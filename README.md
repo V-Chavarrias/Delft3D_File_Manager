@@ -1,6 +1,6 @@
 # WeirImporter
 
-A QGIS plugin to import custom text files defining weirs as LineString geometries.
+A QGIS plugin to import fixed-weir files from Delft3D FM as LineString geometries.
 
 ## Features
 - Reads a text file where each weir is defined by X,Y coordinates and attributes.
