@@ -1,0 +1,11 @@
+[general]
+name=Delft3D File Manager
+qgisMinimumVersion=3.0
+description=Imports and exports custom weir text files as LineString geometries (EPSG:28992)
+version=1.1
+author=Victor Chavarrias
+about=Reads custom weir text files into line/point layers and exports line layers back to a custom text format.
+category=Vector
+experimental=False
+deprecated=False
+icon=icon.svg

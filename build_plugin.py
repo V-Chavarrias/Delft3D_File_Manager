@@ -2,7 +2,8 @@ import os
 import zipfile
 import re
 
-PLUGIN_FOLDER = "WeirImporter"   # plugin folder
+PLUGIN_FOLDER = "Delft3DFileManager"   # plugin folder
+PACKAGE_NAME = "Delft3D_File_Manager"
 METADATA_FILE = os.path.join(PLUGIN_FOLDER, "metadata.txt")
 
 def get_version(metadata_path):
@@ -28,7 +29,7 @@ def zipdir(path, ziph):
 
 if __name__ == "__main__":
     version = get_version(METADATA_FILE)
-    output_zip = f"{PLUGIN_FOLDER}_v{version}.zip"
+    output_zip = f"{PACKAGE_NAME}_v{version}.zip"
 
     if os.path.exists(output_zip):
         os.remove(output_zip)

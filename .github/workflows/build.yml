@@ -18,21 +18,21 @@ jobs:
       - name: Read plugin version
         id: version
         run: |
-          VERSION=$(grep -i '^version' WeirImporter/metadata.txt | cut -d'=' -f2 | tr -d ' ')
+          VERSION=$(grep -i '^version' Delft3DFileManager/metadata.txt | cut -d'=' -f2 | tr -d ' ')
           echo "PLUGIN_VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Prepare plugin ZIP
         run: |
           mkdir -p build
-          cd WeirImporter
-          zip -r ../build/WeirImporter_v${PLUGIN_VERSION}.zip . -x '*.pyc' '__pycache__/*'
+          cd Delft3DFileManager
+          zip -r ../build/Delft3D_File_Manager_v${PLUGIN_VERSION}.zip . -x '*.pyc' '__pycache__/*'
           cd ..
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WeirImporter
-          path: build/WeirImporter_v${PLUGIN_VERSION}.zip
+          name: Delft3D_File_Manager
+          path: build/Delft3D_File_Manager_v${PLUGIN_VERSION}.zip
 
   release:
     needs: build
@@ -46,12 +46,12 @@ jobs:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: WeirImporter
+          name: Delft3D_File_Manager
           path: build
 
       - name: Upload ZIP to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/WeirImporter_v${{ env.PLUGIN_VERSION }}.zip
+          files: build/Delft3D_File_Manager_v${{ env.PLUGIN_VERSION }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
