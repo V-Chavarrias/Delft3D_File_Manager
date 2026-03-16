@@ -1,27 +1,10 @@
 # Delft3D File Manager
 
-A QGIS plugin to import fixed-weir files from Delft3D FM as LineString geometries.
+A QGIS plugin to manage Delft3D files.
 
 ## Features
-- Reads a text file where each weir is defined by X,Y coordinates and attributes.
-- Automatically creates a memory layer in EPSG:28992.
-- Adds attributes for crest level, sill heights, slopes, crest width, and roughness.
-- Exports line features from the active line layer to a custom text format.
-
-Export output format:
-
-```
-name_1
-number_lines number_columns
-x1 y1
-x2 y2
-...
-name_2
-number_lines number_columns
-x1 y1
-x2 y2
-...
-```
+- Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
+- Exports line features as polyline files. 
 
 ## Installation
 1. Download the latest release ZIP from [Releases](../../releases).
