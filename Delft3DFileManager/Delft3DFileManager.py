@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox, QApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsMapLayerType, QgsWkbTypes
 )
-from PyQt5.QtCore import QVariant
+from PyQt5.QtCore import QVariant, Qt
+import importlib
 import os
+import shutil
+import subprocess
+import sys
 
 class Delft3DFileManager:
     def __init__(self, iface):
         self.iface = iface
         self.import_action = None
         self.export_action = None
+        self.bed_level_action = None
+        self.install_deps_action = None
+        self._bed_level_dialog = None
+        self._required_packages = ["netCDF4", "pyproj", "scipy"]
 
     def initGui(self):
         """Create toolbar button and menu item"""
@@ -29,6 +37,24 @@ class Delft3DFileManager:
         self.iface.addToolBarIcon(self.export_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_action)
 
+        self.bed_level_action = QAction(
+            QIcon(icon_path), "Write Bed Level to Mesh", self.iface.mainWindow()
+        )
+        self.bed_level_action.setStatusTip(
+            "Interpolate elevation data from a source layer into a UGRID mesh file"
+        )
+        self.bed_level_action.triggered.connect(self.open_bed_level_dialog)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.bed_level_action)
+
+        self.install_deps_action = QAction(
+            QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
+        )
+        self.install_deps_action.setStatusTip(
+            "Install required Python packages (netCDF4, pyproj, scipy)"
+        )
+        self.install_deps_action.triggered.connect(self.install_dependencies)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
+
     def unload(self):
         """Remove the plugin menu item and icon"""
         if self.import_action:
@@ -37,6 +63,10 @@ class Delft3DFileManager:
         if self.export_action:
             self.iface.removeToolBarIcon(self.export_action)
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_action)
+        if self.bed_level_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
+        if self.install_deps_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
 
     def run(self):
         """Main entry point"""
@@ -213,3 +243,142 @@ class Delft3DFileManager:
             return geometry.asMultiPolyline()
         line = geometry.asPolyline()
         return [line] if line else []
+
+    def open_bed_level_dialog(self):
+        """Open the Write Bed Level to Mesh dialog."""
+        try:
+            from .bed_level_dialog import BedLevelDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not load the bed level dialog:\n{exc}\n\n"
+                "Make sure 'netCDF4' is installed in the QGIS Python environment.",
+            )
+            return
+        if self._bed_level_dialog is None:
+            self._bed_level_dialog = BedLevelDialog(self.iface, self.iface.mainWindow())
+
+        self._bed_level_dialog.show()
+        self._bed_level_dialog.raise_()
+        self._bed_level_dialog.activateWindow()
+
+    def install_dependencies(self):
+        """Install required Python packages in the QGIS interpreter."""
+        reply = QMessageBox.question(
+            self.iface.mainWindow(),
+            "Install Dependencies",
+            "This will run pip in the QGIS Python environment to install:\n"
+            "- netCDF4\n- pyproj\n- scipy\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            missing = []
+            for package in self._required_packages:
+                module_name = "netCDF4" if package == "netCDF4" else package
+                try:
+                    importlib.import_module(module_name)
+                except Exception:
+                    missing.append(package)
+
+            if not missing:
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "Dependencies",
+                    "All required dependencies are already installed.",
+                )
+                return
+
+            result = self._run_pip_install(missing)
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "").strip()
+                if len(err) > 1200:
+                    err = err[-1200:]
+                pip_python = self._get_python_executable_for_pip()
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Dependency installation failed",
+                    "Could not install Python packages with pip.\n\n"
+                    "Command:\n"
+                    f"{pip_python} -m pip install {' '.join(missing)}\n\n"
+                    "Error:\n"
+                    f"{err}",
+                )
+                return
+
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                "Dependencies installed successfully. Please restart QGIS.",
+            )
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Dependencies installed",
+                "Dependencies installed successfully.\n\n"
+                "Please restart QGIS before running bed level interpolation.",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _run_pip_install(self, packages):
+        """Run pip install in QGIS Python; bootstrap pip if missing."""
+        python_exe = self._get_python_executable_for_pip()
+        cmd = [python_exe, "-m", "pip", "install"] + list(packages)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result
+
+        # Try to bootstrap pip when not available, then retry once.
+        ensurepip_result = subprocess.run(
+            [python_exe, "-m", "ensurepip", "--upgrade"],
+            capture_output=True,
+            text=True,
+        )
+        if ensurepip_result.returncode == 0:
+            return subprocess.run(cmd, capture_output=True, text=True)
+        return result
+
+    def _get_python_executable_for_pip(self):
+        """Return a Python executable path suitable for running pip.
+
+        In Windows QGIS, sys.executable can point to qgis-bin.exe, which cannot
+        execute "-m pip" and may open a new QGIS instance instead.
+        """
+        candidates = []
+
+        # Preferred candidate only when it is already a Python executable.
+        exe_name = os.path.basename(sys.executable).lower()
+        if exe_name.startswith("python"):
+            candidates.append(sys.executable)
+
+        # Typical Python root used by embedded QGIS Python.
+        if getattr(sys, "exec_prefix", None):
+            candidates.append(os.path.join(sys.exec_prefix, "python.exe"))
+            candidates.append(os.path.join(sys.exec_prefix, "bin", "python.exe"))
+
+        # Nearby executable in same folder as current executable.
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "python.exe"))
+
+        # PATH fallback.
+        path_python = shutil.which("python")
+        if path_python:
+            candidates.append(path_python)
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            norm = os.path.normcase(os.path.normpath(candidate))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(candidate):
+                return candidate
+
+        # Last resort: keep previous behavior.
+        return sys.executable
