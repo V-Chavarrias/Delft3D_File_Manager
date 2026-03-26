@@ -1,10 +1,10 @@
 [general]
 name=Delft3D File Manager
 qgisMinimumVersion=3.0
-description=Imports and exports custom weir text files as LineString geometries (EPSG:28992)
-version=1.1
+description=Imports and exports Delft3D files. Supports fixed-weir (.fxw), polyline (.pli/.ldb/.pol/.pliz), and UGRID mesh NetCDF files.
+version=1.2
 author=Victor Chavarrias
-about=Reads custom weir text files into line/point layers and exports line layers back to a custom text format.
+about=Reads Delft3D fixed-weir and polyline files into line/point layers; exports line layers to polyline format; writes elevation data to UGRID mesh files.
 category=Vector
 experimental=False
 deprecated=False

@@ -7,13 +7,21 @@ A QGIS plugin to manage Delft3D files.
 - Exports line features as polyline files.
 - Writes bed level data into UGRID mesh NetCDF files.
 
-## Weir Text Import
+## File Import
 
-Load a custom Delft3D fixed-weir text file into QGIS as two memory layers:
+Load Delft3D files into QGIS. File type is detected automatically by extension.
+
+### Supported File Extensions
+- **`.fxw`** — Fixed weir file (creates line + point layers)
+- **`.pli`, `.ldb`, `.pol`, `.pliz`** — Polyline files (creates line layer)
+
+### Import: Fixed Weir (`.fxw`)
+
+Parse a fixed-weir text file into two memory layers:
 - a line layer containing one polyline per weir
 - a point layer containing per-point weir attributes
 
-### Expected Input Format
+#### Expected Input Format
 Each weir block is read in this structure:
 1. Weir name line
 2. Header line: `<number_of_rows> <number_of_columns>`
@@ -27,16 +35,31 @@ Each weir block is read in this structure:
 	 - right slope
 	 - roughness coefficient
 
-### Output Layers
+#### Output Layers
 - `<file_name>_lines` (LineString, EPSG:28992)
 	- field: `weir_name`
 - `<file_name>_points` (Point, EPSG:28992)
 	- fields: `weir_name`, `crest_lvl`, `sill_hL`, `sill_hR`, `crest_w`, `slope_L`, `slope_R`, `rough_cd`
 
+### Import: Polyline (`.pli`, `.ldb`, `.pol`, `.pliz`)
+
+Parse a polyline file into a memory line layer with named polylines.
+
+#### Expected Input Format
+Each polyline block is read in this structure:
+1. Polyline name line
+2. Header line: `<number_of_points> 2`
+3. One row per vertex with:
+	 - X Y
+
+#### Output Layer
+- `<file_name>` (LineString, EPSG:28992)
+	- field: `weir_name` (contains the polyline block name)
+
 ### Typical Workflow
-1. Open `Load Weir File` from the plugin menu or toolbar.
-2. Select the input text file.
-3. The plugin creates line and point layers and adds both to the current project.
+1. Open `Load File` from the plugin menu or toolbar.
+2. Select an input file (.fxw or .pli/.ldb/.pol/.pliz).
+3. The plugin creates appropriate layer(s) and adds them to the current project.
 
 ## Polyline Export
 

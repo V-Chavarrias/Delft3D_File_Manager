@@ -25,8 +25,8 @@ class Delft3DFileManager:
     def initGui(self):
         """Create toolbar button and menu item"""
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
-        self.import_action = QAction(QIcon(icon_path), "Load Weir File", self.iface.mainWindow())
-        self.import_action.setStatusTip("Load custom weir text file as line + point layers")
+        self.import_action = QAction(QIcon(icon_path), "Load File", self.iface.mainWindow())
+        self.import_action.setStatusTip("Load Delft3D file (.fxw fixed-weir or .pli/.ldb/.pol/.pliz polyline)")
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
@@ -69,18 +69,40 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
 
     def run(self):
-        """Main entry point"""
+        """Main entry point: open file dialog and dispatch by extension"""
         filepath, _ = QFileDialog.getOpenFileName(
             self.iface.mainWindow(),
-            "Select weir text file",
+            "Select Delft3D file",
             "",
-            "Text files (*.txt)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz);;All Files (*)"
         )
         if filepath:
-            self.load_weir_file(filepath)
+            self.load_file_by_extension(filepath)
 
-    def load_weir_file(self, filepath):
-        """Parse the text file and create both polyline and point layers"""
+    def load_file_by_extension(self, filepath):
+        """Route file to appropriate parser based on extension."""
+        _, ext = os.path.splitext(filepath)
+        ext_lower = ext.lower()
+        
+        if ext_lower == ".fxw":
+            self.load_fixed_weir_file(filepath)
+        elif ext_lower in [".pli", ".ldb", ".pol", ".pliz"]:
+            self.load_polyline_file(filepath)
+        else:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Unsupported file extension: {ext}\n\n"
+                "Supported extensions:\n"
+                "  .fxw - Fixed weir file\n"
+                "  .pli - Polyline file\n"
+                "  .ldb - Light database file\n"
+                "  .pol - Polygon file\n"
+                "  .pliz - Compressed polyline file"
+            )
+
+    def load_fixed_weir_file(self, filepath):
+        """Parse fixed-weir text file and create both polyline and point layers"""
         base_name = os.path.splitext(os.path.basename(filepath))[0]
 
         # --- Polyline layer ---
@@ -150,6 +172,127 @@ class Delft3DFileManager:
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
             f"Loaded {poly_layer.featureCount()} weirs and {point_layer.featureCount()} points"
+        )
+
+    def load_polyline_file(self, filepath):
+        """Parse polyline file (.pli, .ldb, .pol, .pliz) and create line layer."""
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        
+        # Create line layer
+        line_layer = QgsVectorLayer(f"LineString?crs=EPSG:28992", base_name, "memory")
+        line_pr = line_layer.dataProvider()
+        line_pr.addAttributes([QgsField("weir_name", QVariant.String)])
+        line_layer.updateFields()
+        
+        # Read file
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip()]
+        except UnicodeDecodeError:
+            # Fallback to system encoding if UTF-8 fails
+            with open(filepath, 'r') as f:
+                lines = [line.strip() for line in f if line.strip()]
+        
+        if not lines:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "File is empty or contains no content"
+            )
+            return
+        
+        feature_count = 0
+        i = 0
+        
+        try:
+            while i < len(lines):
+                block_name = lines[i]
+                i += 1
+                
+                if i >= len(lines):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' has no header line"
+                    )
+                    return
+                
+                # Parse header line: "<npoints> 2"
+                header_parts = lines[i].split()
+                if len(header_parts) < 2:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' has invalid header at line {i+1}"
+                    )
+                    return
+                
+                try:
+                    npoints = int(header_parts[0])
+                except ValueError:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' has non-integer point count at line {i+1}"
+                    )
+                    return
+                
+                i += 1
+                pts = []
+                
+                for pt_idx in range(npoints):
+                    if i >= len(lines):
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: block '{block_name}' expected {npoints} points but found {pt_idx} at line {i+1}"
+                        )
+                        return
+                    
+                    try:
+                        parts = lines[i].split()
+                        if len(parts) < 2:
+                            QMessageBox.warning(
+                                self.iface.mainWindow(),
+                                "Delft3D File Manager",
+                                f"Malformed file: block '{block_name}' point {pt_idx} has insufficient coordinates at line {i+1}"
+                            )
+                            return
+                        x, y = float(parts[0]), float(parts[1])
+                        pts.append(QgsPointXY(x, y))
+                    except ValueError as e:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: block '{block_name}' point {pt_idx} has non-numeric coordinates at line {i+1}: {e}"
+                        )
+                        return
+                    
+                    i += 1
+                
+                # Add polyline feature
+                if len(pts) >= 2:
+                    poly_feat = QgsFeature()
+                    poly_feat.setGeometry(QgsGeometry.fromPolylineXY(pts))
+                    poly_feat.setAttributes([block_name])
+                    line_pr.addFeature(poly_feat)
+                    feature_count += 1
+        
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error parsing file: {e}"
+            )
+            return
+        
+        # Add layer to project
+        line_layer.updateExtents()
+        QgsProject.instance().addMapLayer(line_layer)
+        
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {feature_count} polyline(s) from {os.path.basename(filepath)}"
         )
 
     def export_lines(self):
