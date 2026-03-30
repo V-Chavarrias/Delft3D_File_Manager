@@ -235,5 +235,16 @@ Clone this repository and copy the folder into your QGIS plugins directory:
 
 Then restart QGIS and enable *Delft3D File Manager*.
 
+Build:
+```bash
+python .\build_plugin.py
+```
+
+Release:
+```
+git tag v1.0
+git push origin v1.0.0
+```
+
 ## License
 MIT License © Victor Chavarrias
