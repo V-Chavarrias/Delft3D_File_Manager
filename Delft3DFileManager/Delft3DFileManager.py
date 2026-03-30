@@ -24,6 +24,7 @@ class Delft3DFileManager:
         self.iface = iface
         self.import_action = None
         self.export_action = None
+        self.export_pointcloud_action = None
         self.bed_level_action = None
         self.create_trachytopes_action = None
         self.update_trachytopes_action = None
@@ -36,7 +37,7 @@ class Delft3DFileManager:
         """Create toolbar button and menu item"""
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
         self.import_action = QAction(QIcon(icon_path), "Load File", self.iface.mainWindow())
-        self.import_action.setStatusTip("Load Delft3D file (.fxw fixed-weir or .pli/.ldb/.pol/.pliz polyline)")
+        self.import_action.setStatusTip("Load Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol/.pliz polyline, .xyn points)")
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
@@ -83,6 +84,15 @@ class Delft3DFileManager:
         self.export_trachytopes_action.triggered.connect(self.export_trachytopes_arl)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_trachytopes_action)
 
+        self.export_pointcloud_action = QAction(
+            QIcon(icon_path), "Export Point Cloud (.xyn)", self.iface.mainWindow()
+        )
+        self.export_pointcloud_action.setStatusTip(
+            "Export point layer to ASCII .xyn (x y name)"
+        )
+        self.export_pointcloud_action.triggered.connect(self.export_point_cloud_xyn)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.export_pointcloud_action)
+
         self.install_deps_action = QAction(
             QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
         )
@@ -108,6 +118,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
         if self.export_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_trachytopes_action)
+        if self.export_pointcloud_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.export_pointcloud_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
 
@@ -117,7 +129,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -131,6 +143,8 @@ class Delft3DFileManager:
             self.load_fixed_weir_file(filepath)
         elif ext_lower in [".pli", ".ldb", ".pol", ".pliz"]:
             self.load_polyline_file(filepath)
+        elif ext_lower == ".xyn":
+            self.load_xyn_file(filepath)
         else:
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -141,7 +155,8 @@ class Delft3DFileManager:
                 "  .pli - Polyline file\n"
                 "  .ldb - Light database file\n"
                 "  .pol - Polygon file\n"
-                "  .pliz - Compressed polyline file"
+                "  .pliz - Compressed polyline file\n"
+                "  .xyn - Point file"
             )
 
     def load_fixed_weir_file(self, filepath):
@@ -338,6 +353,97 @@ class Delft3DFileManager:
             f"Loaded {feature_count} polyline(s) from {os.path.basename(filepath)}"
         )
 
+    def load_xyn_file(self, filepath):
+        """Parse point file (.xyn) and create point layer with x, y, name."""
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        point_layer = QgsVectorLayer(f"Point?crs=EPSG:28992", base_name, "memory")
+        point_pr = point_layer.dataProvider()
+        point_pr.addAttributes(
+            [
+                QgsField("x", QVariant.Double),
+                QgsField("y", QVariant.Double),
+                QgsField("name", QVariant.String),
+            ]
+        )
+        point_layer.updateFields()
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+        except UnicodeDecodeError:
+            with open(filepath, "r") as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+        if not lines:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "File is empty or contains no content",
+            )
+            return
+
+        features = []
+        generated_name_count = 1
+
+        try:
+            for line_number, line in enumerate(lines, start=1):
+                parts = line.split()
+                if len(parts) < 2:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: line {line_number} has insufficient coordinates",
+                    )
+                    return
+
+                try:
+                    x_value = float(parts[0])
+                    y_value = float(parts[1])
+                except ValueError as e:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: line {line_number} has non-numeric coordinates: {e}",
+                    )
+                    return
+
+                if len(parts) >= 3:
+                    point_name = " ".join(parts[2:])
+                else:
+                    point_name = f"obs_{generated_name_count}"
+                    generated_name_count += 1
+
+                point_feat = QgsFeature(point_layer.fields())
+                point_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x_value, y_value)))
+                point_feat.setAttributes([x_value, y_value, point_name])
+                features.append(point_feat)
+
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error parsing file: {e}",
+            )
+            return
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid points were found in the selected file",
+            )
+            return
+
+        point_pr.addFeatures(features)
+        point_layer.updateExtents()
+        QgsProject.instance().addMapLayer(point_layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} point(s) from {os.path.basename(filepath)}",
+        )
+
     def export_lines(self):
         """Export active line layer into custom text format."""
         layer = self.iface.activeLayer()
@@ -403,6 +509,84 @@ class Delft3DFileManager:
             f"Exported {exported_count} line feature(s) to {os.path.basename(output_path)}"
         )
 
+    def export_point_cloud_xyn(self):
+        """Export active point layer to ASCII .xyn format (x y name)."""
+        layer = self.iface.activeLayer()
+        if not layer or layer.type() != QgsMapLayerType.VectorLayer:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Please select a vector point layer first",
+            )
+            return
+
+        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Active layer must contain point geometries",
+            )
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save XYN file",
+            "",
+            "XYN files (*.xyn);;All files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".xyn"):
+            output_path = output_path + ".xyn"
+
+        name_field = self._get_name_field(layer)
+        exported_count = 0
+        generated_name_count = 1
+
+        with open(output_path, "w", encoding="ascii") as handle:
+            for feature in layer.getFeatures():
+                geometry = feature.geometry()
+                if not geometry or geometry.isEmpty():
+                    continue
+
+                points = self._extract_points(geometry)
+                if not points:
+                    continue
+
+                feature_name = None
+                if name_field:
+                    value = feature[name_field]
+                    if value is not None:
+                        text = str(value).strip()
+                        if text:
+                            feature_name = text
+
+                for point in points:
+                    if feature_name:
+                        point_name = feature_name
+                        try:
+                            point_name.encode("ascii")
+                        except UnicodeEncodeError:
+                            point_name = f"obs_{generated_name_count}"
+                            generated_name_count += 1
+                    else:
+                        point_name = f"obs_{generated_name_count}"
+                        generated_name_count += 1
+
+                    handle.write(f"{point.x():.6f} {point.y():.6f} {point_name}\n")
+                    exported_count += 1
+
+        if exported_count == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid point features were exported",
+            )
+            return
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Exported {exported_count} point feature(s) to {os.path.basename(output_path)}",
+        )
+
     def _get_name_field(self, layer):
         """Find a likely name field to use in export blocks."""
         field_names = [field.name() for field in layer.fields()]
@@ -429,6 +613,13 @@ class Delft3DFileManager:
             return geometry.asMultiPolyline()
         line = geometry.asPolyline()
         return [line] if line else []
+
+    def _extract_points(self, geometry):
+        """Return a list of QgsPoint for single/multi point geometries."""
+        if geometry.isMultipart():
+            return geometry.asMultiPoint()
+        point = geometry.asPoint()
+        return [point] if point is not None else []
 
     def create_trachytopes_from_mesh(self):
         """Create a trachytopes point layer from mesh edge coordinates."""

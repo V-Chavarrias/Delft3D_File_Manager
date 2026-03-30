@@ -4,7 +4,9 @@ A QGIS plugin to manage Delft3D files.
 
 ## Features
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
+- Reads point-cloud `.xyn` files as point layers with optional generated names.
 - Exports line features as polyline files.
+- Exports point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
 - Creates trachytopes point layers from UGRID mesh edge coordinates.
 - Bulk-updates trachytope values for points inside polygons.
@@ -17,6 +19,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension.
 ### Supported File Extensions
 - **`.fxw`** — Fixed weir file (creates line + point layers)
 - **`.pli`, `.ldb`, `.pol`, `.pliz`** — Polyline files (creates line layer)
+- **`.xyn`** — Point files (creates point layer)
 
 ### Import: Fixed Weir (`.fxw`)
 
@@ -59,9 +62,28 @@ Each polyline block is read in this structure:
 - `<file_name>` (LineString, EPSG:28992)
 	- field: `weir_name` (contains the polyline block name)
 
+### Import: Point (`.xyn`)
+
+Parse an ASCII point file into a memory point layer.
+
+#### Expected Input Format
+Each non-empty row contains:
+- `x y name`
+- or `x y` when name is missing
+
+Columns are whitespace-separated.
+
+#### Name Handling
+- If a row has a name value, that value is used.
+- If name is missing, the plugin generates `obs_%d` in import order (`obs_1`, `obs_2`, ...).
+
+#### Output Layer
+- `<file_name>` (Point, EPSG:28992)
+	- fields: `x`, `y`, `name`
+
 ### Typical Workflow
 1. Open `Load File` from the plugin menu or toolbar.
-2. Select an input file (.fxw or .pli/.ldb/.pol/.pliz).
+2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, or .xyn).
 3. The plugin creates appropriate layer(s) and adds them to the current project.
 
 ## Polyline Export
@@ -88,6 +110,28 @@ suffix `_1`, `_2`, etc.
 2. Open `Export Polyline` from the plugin menu or toolbar.
 3. Choose output text file path.
 4. The plugin writes valid line features to the target file.
+
+## Point Cloud Export (`.xyn`)
+
+Export a selected QGIS point layer to ASCII `.xyn` format.
+
+### Input Requirements
+- Active layer must be a vector point layer.
+
+### Output Format
+One row per point:
+- `x y name`
+
+### Name Handling
+- The plugin tries to use a name-like field with priority:
+	`weir_name`, `name`, `naam`, `id`, then first available field.
+- If a name is missing or empty, fallback name `obs_%d` is used in export order.
+
+### Typical Workflow
+1. Select the point layer to export.
+2. Open `Export Point Cloud (.xyn)` from the plugin menu.
+3. Choose output `.xyn` path.
+4. The plugin writes one line per valid point feature.
 
 ## Bed Level To Mesh
 
