@@ -6,6 +6,9 @@ A QGIS plugin to manage Delft3D files.
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
 - Exports line features as polyline files.
 - Writes bed level data into UGRID mesh NetCDF files.
+- Creates trachytopes point layers from UGRID mesh edge coordinates.
+- Bulk-updates trachytope values for points inside polygons.
+- Exports trachytopes to ASCII `.arl` files.
 
 ## File Import
 
@@ -127,6 +130,54 @@ After installation, restart QGIS.
 5. Optionally select `Output mesh` to avoid overwriting the input.
 6. Choose interpolation method and click `Run`.
 7. Open the resulting mesh file and inspect updated node elevations.
+
+## Trachytopes From Mesh
+
+Create trachytopes points from mesh edge coordinates and export selected values
+in Delft3D-style ASCII format.
+
+### Menu Actions
+- `Create Trachytopes from Mesh`
+- `Set Trachytopes in Polygons`
+- `Export Trachytopes (.arl)`
+
+### Create Trachytopes Layer
+The plugin reads edge coordinates from the selected UGRID NetCDF mesh:
+- primary variables: `mesh2d_edge_x`, `mesh2d_edge_y`
+- fallback: edge coordinates from UGRID topology metadata when available
+
+It creates a point layer with one feature per mesh edge coordinate and these fields:
+- `x`
+- `y`
+- `trachytope_number` (initial value `0`)
+- `fraction` (initial value `0`)
+
+### Edit Trachytope Values
+Two workflows are supported:
+- Manual editing in the QGIS attribute table.
+- Bulk assignment using polygons:
+  1. Set the trachytopes layer as active.
+  2. Open `Set Trachytopes in Polygons`.
+  3. Choose a polygon layer.
+  4. Enter target `trachytope_number` and `fraction` values.
+  5. Values are applied to points inside selected polygons (or all polygons if none are selected).
+
+### ARL Export Format
+Export writes an ASCII text file with extension `.arl` and single-space separators.
+
+Each output row is:
+- `x y 0 trachytope_number fraction`
+
+Export rules:
+- Only points with `trachytope_number != 0` are written.
+- Points with invalid or non-finite numeric values are skipped.
+
+### Typical Workflow
+1. Open `Create Trachytopes from Mesh`.
+2. Select the UGRID mesh file and create the trachytopes point layer.
+3. Assign non-zero trachytope values (manually or with polygons).
+4. Open `Export Trachytopes (.arl)`.
+5. Save the ASCII `.arl` output file.
 
 ## Installation
 1. Download the latest release ZIP from [Releases](../../releases).

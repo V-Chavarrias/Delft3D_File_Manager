@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox, QApplication
+from qgis.PyQt.QtWidgets import (
+    QAction,
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QMessageBox,
+)
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
-    QgsMapLayerType, QgsWkbTypes
+    QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex
 )
 from PyQt5.QtCore import QVariant, Qt
 import importlib
+import math
 import os
 import shutil
 import subprocess
@@ -18,6 +25,9 @@ class Delft3DFileManager:
         self.import_action = None
         self.export_action = None
         self.bed_level_action = None
+        self.create_trachytopes_action = None
+        self.update_trachytopes_action = None
+        self.export_trachytopes_action = None
         self.install_deps_action = None
         self._bed_level_dialog = None
         self._required_packages = ["netCDF4", "pyproj", "scipy"]
@@ -46,6 +56,33 @@ class Delft3DFileManager:
         self.bed_level_action.triggered.connect(self.open_bed_level_dialog)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.bed_level_action)
 
+        self.create_trachytopes_action = QAction(
+            QIcon(icon_path), "Create Trachytopes from Mesh", self.iface.mainWindow()
+        )
+        self.create_trachytopes_action.setStatusTip(
+            "Extract mesh2d_edge_x/y to point layer with trachytope attributes"
+        )
+        self.create_trachytopes_action.triggered.connect(self.create_trachytopes_from_mesh)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.create_trachytopes_action)
+
+        self.update_trachytopes_action = QAction(
+            QIcon(icon_path), "Set Trachytopes in Polygons", self.iface.mainWindow()
+        )
+        self.update_trachytopes_action.setStatusTip(
+            "Set trachytope_number and fraction for trachytopes points inside polygons"
+        )
+        self.update_trachytopes_action.triggered.connect(self.set_trachytopes_in_polygons)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.update_trachytopes_action)
+
+        self.export_trachytopes_action = QAction(
+            QIcon(icon_path), "Export Trachytopes (.arl)", self.iface.mainWindow()
+        )
+        self.export_trachytopes_action.setStatusTip(
+            "Export trachytopes point layer to ASCII .arl (space-separated)"
+        )
+        self.export_trachytopes_action.triggered.connect(self.export_trachytopes_arl)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.export_trachytopes_action)
+
         self.install_deps_action = QAction(
             QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
         )
@@ -65,6 +102,12 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_action)
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
+        if self.create_trachytopes_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.create_trachytopes_action)
+        if self.update_trachytopes_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
+        if self.export_trachytopes_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.export_trachytopes_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
 
@@ -386,6 +429,446 @@ class Delft3DFileManager:
             return geometry.asMultiPolyline()
         line = geometry.asPolyline()
         return [line] if line else []
+
+    def create_trachytopes_from_mesh(self):
+        """Create a trachytopes point layer from mesh edge coordinates."""
+        mesh_path, _ = QFileDialog.getOpenFileName(
+            self.iface.mainWindow(),
+            "Select UGRID mesh file",
+            "",
+            "NetCDF files (*.nc);;All files (*)",
+        )
+        if not mesh_path:
+            return
+
+        try:
+            edge_x, edge_y, epsg = self._read_mesh_edge_coordinates(mesh_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not read mesh edge coordinates:\n{exc}",
+            )
+            return
+
+        if edge_x.size == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid edge coordinates found in the selected mesh file.",
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(mesh_path))[0]
+        default_layer_name = f"{base_name}_trachytopes"
+        layer_name, ok = QInputDialog.getText(
+            self.iface.mainWindow(),
+            "Trachytopes Layer",
+            "Layer name:",
+            text=default_layer_name,
+        )
+        if not ok:
+            return
+        layer_name = (layer_name or "").strip() or default_layer_name
+
+        if epsg is None:
+            epsg, ok = QInputDialog.getInt(
+                self.iface.mainWindow(),
+                "Mesh CRS",
+                "EPSG code for the new layer:",
+                value=28992,
+                min=1,
+                max=999999,
+            )
+            if not ok:
+                return
+
+        self._create_trachytopes_layer(layer_name, edge_x, edge_y, epsg)
+
+    def _read_mesh_edge_coordinates(self, mesh_path):
+        """Read mesh edge coordinate arrays and return (x, y, epsg)."""
+        import numpy as np
+
+        try:
+            import netCDF4 as nc
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
+            ) from exc
+
+        with nc.Dataset(mesh_path, "r") as ds:
+            edge_x_var, edge_y_var = self._detect_edge_coordinate_vars(ds)
+
+            raw_x = ds.variables[edge_x_var][:]
+            raw_y = ds.variables[edge_y_var][:]
+
+            if isinstance(raw_x, np.ma.MaskedArray):
+                raw_x = raw_x.filled(np.nan)
+            if isinstance(raw_y, np.ma.MaskedArray):
+                raw_y = raw_y.filled(np.nan)
+
+            edge_x = np.asarray(raw_x, dtype=float).ravel()
+            edge_y = np.asarray(raw_y, dtype=float).ravel()
+
+            if edge_x.shape[0] != edge_y.shape[0]:
+                raise ValueError(
+                    f"Edge coordinate sizes differ ({edge_x.shape[0]} vs {edge_y.shape[0]})."
+                )
+
+            valid = np.isfinite(edge_x) & np.isfinite(edge_y)
+            edge_x = edge_x[valid]
+            edge_y = edge_y[valid]
+
+            epsg = self._read_epsg_from_nc(ds)
+
+        return edge_x, edge_y, epsg
+
+    def _detect_edge_coordinate_vars(self, nc_dataset):
+        """Detect edge coordinate variable names (x/y) in a UGRID dataset."""
+        direct_x = "mesh2d_edge_x"
+        direct_y = "mesh2d_edge_y"
+        if direct_x in nc_dataset.variables and direct_y in nc_dataset.variables:
+            return direct_x, direct_y
+
+        topology_var = None
+        for vname, variable in nc_dataset.variables.items():
+            if getattr(variable, "cf_role", "") == "mesh_topology":
+                topology_var = variable
+                break
+
+        if topology_var is not None:
+            edge_coordinates = getattr(topology_var, "edge_coordinates", "").split()
+            if len(edge_coordinates) >= 2:
+                candidate_x = edge_coordinates[0]
+                candidate_y = edge_coordinates[1]
+                if (
+                    candidate_x in nc_dataset.variables
+                    and candidate_y in nc_dataset.variables
+                ):
+                    return candidate_x, candidate_y
+
+        edge_x_var = None
+        edge_y_var = None
+        for vname in nc_dataset.variables:
+            lname = vname.lower()
+            if edge_x_var is None and "edge" in lname and lname.endswith("_x"):
+                edge_x_var = vname
+            if edge_y_var is None and "edge" in lname and lname.endswith("_y"):
+                edge_y_var = vname
+
+        if edge_x_var and edge_y_var:
+            return edge_x_var, edge_y_var
+
+        raise ValueError(
+            "Could not find edge coordinate variables. Expected 'mesh2d_edge_x' and 'mesh2d_edge_y'."
+        )
+
+    def _read_epsg_from_nc(self, nc_dataset):
+        """Try to read an EPSG code from variables in a NetCDF dataset."""
+        for vname in nc_dataset.variables:
+            variable = nc_dataset[vname]
+            for attr_name in ("EPSG_code", "epsg", "EPSG"):
+                value = getattr(variable, attr_name, None)
+                if value is None:
+                    continue
+                text = str(value).upper().replace("EPSG:", "").strip()
+                try:
+                    code = int(text)
+                except ValueError:
+                    continue
+                if code > 0:
+                    return code
+        return None
+
+    def _create_trachytopes_layer(self, layer_name, edge_x, edge_y, epsg):
+        """Create and populate a trachytopes point layer."""
+        layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("x", QVariant.Double),
+                QgsField("y", QVariant.Double),
+                QgsField("trachytope_number", QVariant.Int),
+                QgsField("fraction", QVariant.Double),
+            ]
+        )
+        layer.updateFields()
+
+        features = []
+        for x_coord, y_coord in zip(edge_x, edge_y):
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(x_coord), float(y_coord))))
+            feat.setAttributes([float(x_coord), float(y_coord), 0, 0.0])
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Created trachytopes layer '{layer_name}' with {layer.featureCount()} point(s)",
+        )
+
+    def set_trachytopes_in_polygons(self):
+        """Set trachytope values for points inside polygons."""
+        point_layer = self.iface.activeLayer()
+        if point_layer is None or point_layer.type() != QgsMapLayerType.VectorLayer:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Select a trachytopes point layer as active layer first.",
+            )
+            return
+        if point_layer.geometryType() != QgsWkbTypes.PointGeometry:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Active layer must be a point layer.",
+            )
+            return
+
+        field_names = [field.name() for field in point_layer.fields()]
+        required_fields = ["x", "y", "trachytope_number", "fraction"]
+        missing = [name for name in required_fields if name not in field_names]
+        if missing:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Active point layer is not a trachytopes layer. Missing fields: "
+                + ", ".join(missing),
+            )
+            return
+
+        polygon_layers = [
+            layer
+            for layer in QgsProject.instance().mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+            and layer.geometryType() == QgsWkbTypes.PolygonGeometry
+        ]
+        if not polygon_layers:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No polygon layers found in the project.",
+            )
+            return
+
+        labels = [layer.name() for layer in polygon_layers]
+        selected_label, ok = QInputDialog.getItem(
+            self.iface.mainWindow(),
+            "Polygon Layer",
+            "Polygon layer used for assignment:",
+            labels,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        polygon_layer = polygon_layers[labels.index(selected_label)]
+
+        trachytope_number, ok = QInputDialog.getInt(
+            self.iface.mainWindow(),
+            "Trachytope Number",
+            "Value for trachytope_number:",
+            value=0,
+            min=-2147483648,
+            max=2147483647,
+        )
+        if not ok:
+            return
+
+        fraction, ok = QInputDialog.getDouble(
+            self.iface.mainWindow(),
+            "Fraction",
+            "Value for fraction:",
+            value=0.0,
+            min=-1e12,
+            max=1e12,
+            decimals=6,
+        )
+        if not ok:
+            return
+
+        polygon_features = list(polygon_layer.getSelectedFeatures())
+        if not polygon_features:
+            polygon_features = list(polygon_layer.getFeatures())
+        if not polygon_features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Selected polygon layer has no features.",
+            )
+            return
+
+        index = QgsSpatialIndex()
+        polygon_geometries = {}
+        for feature in polygon_features:
+            geometry = feature.geometry()
+            if not geometry or geometry.isEmpty():
+                continue
+            index.addFeature(feature)
+            polygon_geometries[feature.id()] = geometry
+
+        if not polygon_geometries:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Polygon layer contains no valid geometries.",
+            )
+            return
+
+        idx_trachytope = point_layer.fields().indexOf("trachytope_number")
+        idx_fraction = point_layer.fields().indexOf("fraction")
+
+        started_edit = False
+        if not point_layer.isEditable():
+            started_edit = point_layer.startEditing()
+            if not started_edit:
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Could not start edit mode on active trachytopes layer.",
+                )
+                return
+
+        changed = 0
+        for point_feature in point_layer.getFeatures():
+            point_geometry = point_feature.geometry()
+            if not point_geometry or point_geometry.isEmpty():
+                continue
+
+            bbox = point_geometry.boundingBox()
+            candidate_ids = index.intersects(bbox)
+            if not candidate_ids:
+                continue
+
+            inside_polygon = False
+            for candidate_id in candidate_ids:
+                polygon_geometry = polygon_geometries.get(candidate_id)
+                if polygon_geometry is not None and polygon_geometry.contains(point_geometry):
+                    inside_polygon = True
+                    break
+
+            if not inside_polygon:
+                continue
+
+            point_layer.changeAttributeValue(point_feature.id(), idx_trachytope, trachytope_number)
+            point_layer.changeAttributeValue(point_feature.id(), idx_fraction, float(fraction))
+            changed += 1
+
+        if started_edit:
+            if not point_layer.commitChanges():
+                point_layer.rollBack()
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Could not commit attribute updates.",
+                )
+                return
+
+        if changed == 0:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "No trachytopes points were inside the selected polygon(s)",
+            )
+            return
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Updated {changed} trachytopes point(s)",
+        )
+
+    def export_trachytopes_arl(self):
+        """Export active trachytopes point layer to ASCII .arl with space separator."""
+        layer = self.iface.activeLayer()
+        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Select a trachytopes point layer first.",
+            )
+            return
+        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Active layer must be a point layer.",
+            )
+            return
+
+        for field_name in ("x", "y", "trachytope_number", "fraction"):
+            if layer.fields().indexOf(field_name) < 0:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Active layer is missing required field '{field_name}'.",
+                )
+                return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Export trachytopes ARL",
+            "",
+            "ARL files (*.arl);;All files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".arl"):
+            output_path = output_path + ".arl"
+
+        idx_x = layer.fields().indexOf("x")
+        idx_y = layer.fields().indexOf("y")
+        idx_trachytope = layer.fields().indexOf("trachytope_number")
+        idx_fraction = layer.fields().indexOf("fraction")
+
+        exported = 0
+        with open(output_path, "w", encoding="ascii") as handle:
+            for feature in layer.getFeatures():
+                geometry = feature.geometry()
+                if geometry is None or geometry.isEmpty():
+                    continue
+
+                x_value = feature.attributes()[idx_x]
+                y_value = feature.attributes()[idx_y]
+                if x_value is None or y_value is None:
+                    point = geometry.asPoint()
+                    x_value = point.x()
+                    y_value = point.y()
+
+                trachytope_number = feature.attributes()[idx_trachytope]
+                fraction = feature.attributes()[idx_fraction]
+
+                try:
+                    x_float = float(x_value)
+                    y_float = float(y_value)
+                    number_int = int(trachytope_number)
+                    fraction_float = float(fraction)
+                except (TypeError, ValueError):
+                    continue
+
+                if not (math.isfinite(x_float) and math.isfinite(y_float) and math.isfinite(fraction_float)):
+                    continue
+                if number_int == 0:
+                    continue
+
+                handle.write(
+                    f"{x_float:.6f} {y_float:.6f} 0 {number_int} {fraction_float:.6f}\n"
+                )
+                exported += 1
+
+        if exported == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No trachytopes points with non-zero trachytope_number were exported.",
+            )
+            return
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Exported {exported} trachytopes point(s) to {os.path.basename(output_path)}",
+        )
 
     def open_bed_level_dialog(self):
         """Open the Write Bed Level to Mesh dialog."""
