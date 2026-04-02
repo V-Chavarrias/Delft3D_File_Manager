@@ -36,15 +36,15 @@ class Delft3DFileManager:
     def initGui(self):
         """Create toolbar button and menu item"""
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
-        self.import_action = QAction(QIcon(icon_path), "Load File", self.iface.mainWindow())
-        self.import_action.setStatusTip("Load Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol/.pliz polyline, .xyn points)")
+        self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
+        self.import_action.setStatusTip("Import Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol polyline, .pliz auto-detected fixed-weir/polyline, .xyn points, .nc UGRID mesh)")
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
 
-        self.export_action = QAction(QIcon(icon_path), "Export Polyline", self.iface.mainWindow())
-        self.export_action.setStatusTip("Export line layer features to custom text format")
-        self.export_action.triggered.connect(self.export_lines)
+        self.export_action = QAction(QIcon(icon_path), "Export", self.iface.mainWindow())
+        self.export_action.setStatusTip("Export the active line or fixed-weir point layer to a Delft3D format")
+        self.export_action.triggered.connect(self.export_active_layer)
         self.iface.addToolBarIcon(self.export_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_action)
 
@@ -129,7 +129,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.nc);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -141,10 +141,17 @@ class Delft3DFileManager:
         
         if ext_lower == ".fxw":
             self.load_fixed_weir_file(filepath)
-        elif ext_lower in [".pli", ".ldb", ".pol", ".pliz"]:
+        elif ext_lower == ".pliz":
+            if self._pliz_has_extra_columns(filepath):
+                self.load_fixed_weir_file(filepath)
+            else:
+                self.load_polyline_file(filepath)
+        elif ext_lower in [".pli", ".ldb", ".pol"]:
             self.load_polyline_file(filepath)
         elif ext_lower == ".xyn":
             self.load_xyn_file(filepath)
+        elif ext_lower == ".nc":
+            self.load_ugrid_mesh_file(filepath)
         else:
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -155,9 +162,31 @@ class Delft3DFileManager:
                 "  .pli - Polyline file\n"
                 "  .ldb - Light database file\n"
                 "  .pol - Polygon file\n"
-                "  .pliz - Compressed polyline file\n"
-                "  .xyn - Point file"
+                "  .pliz - Polyline or fixed weir file (auto-detected by column count)\n"
+                "  .xyn - Point file\n"
+                "  .nc - UGRID mesh file"
             )
+
+    def _pliz_has_extra_columns(self, filepath):
+        """Return True when a .pliz file header indicates more than two data columns."""
+        try:
+            try:
+                with open(filepath, "r", encoding="utf-8") as handle:
+                    lines = [line.strip() for line in handle if line.strip()]
+            except UnicodeDecodeError:
+                with open(filepath, "r") as handle:
+                    lines = [line.strip() for line in handle if line.strip()]
+
+            if len(lines) < 2:
+                return False
+
+            header_parts = lines[1].split()
+            if len(header_parts) < 2:
+                return False
+
+            return int(header_parts[1]) > 2
+        except (OSError, ValueError, IndexError):
+            return False
 
     def load_fixed_weir_file(self, filepath):
         """Parse fixed-weir text file and create both polyline and point layers"""
@@ -509,6 +538,130 @@ class Delft3DFileManager:
             f"Exported {exported_count} line feature(s) to {os.path.basename(output_path)}"
         )
 
+    def export_active_layer(self):
+        """Export the active layer to the appropriate Delft3D format."""
+        layer = self.iface.activeLayer()
+        if not layer or layer.type() != QgsMapLayerType.VectorLayer:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Please select a vector layer first",
+            )
+            return
+
+        if layer.geometryType() == QgsWkbTypes.LineGeometry:
+            self.export_lines()
+            return
+
+        if layer.geometryType() == QgsWkbTypes.PointGeometry:
+            if self._is_fixed_weir_point_layer(layer):
+                self.export_fixed_weir_pliz(layer)
+            else:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    "Point layers without the fixed-weir fields should be exported with 'Export Point Cloud (.xyn)'",
+                )
+            return
+
+        self.iface.messageBar().pushWarning(
+            "Delft3D File Manager",
+            "Export supports only line layers and fixed-weir point layers",
+        )
+
+    def export_fixed_weir_pliz(self, layer):
+        """Export a compatible point layer to fixed-weir .pliz format."""
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save PLIZ file",
+            "",
+            "Fixed weir files (*.pliz);;All files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".pliz"):
+            output_path = output_path + ".pliz"
+
+        field_names = self._resolved_fixed_weir_fields(layer)
+        grouped_rows = {}
+        group_order = []
+        exported_count = 0
+
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry or geometry.isEmpty():
+                continue
+
+            points = self._extract_points(geometry)
+            if not points:
+                continue
+
+            weir_name = feature[field_names["weir_name"]]
+            if weir_name is None or not str(weir_name).strip():
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Feature {feature.id()} has an empty 'weir_name' and cannot be exported to .pliz",
+                )
+                return
+
+            weir_name = str(weir_name).strip()
+            if weir_name not in grouped_rows:
+                grouped_rows[weir_name] = []
+                group_order.append(weir_name)
+
+            numeric_values = []
+            for required_name in self._fixed_weir_field_names()[1:]:
+                value = feature[field_names[required_name]]
+                if value is None:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Feature {feature.id()} is missing '{required_name}' and cannot be exported to .pliz",
+                    )
+                    return
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Feature {feature.id()} has a non-numeric '{required_name}' value and cannot be exported to .pliz",
+                    )
+                    return
+                if not math.isfinite(numeric_value):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Feature {feature.id()} has a non-finite '{required_name}' value and cannot be exported to .pliz",
+                    )
+                    return
+                numeric_values.append(numeric_value)
+
+            for point in points:
+                grouped_rows[weir_name].append((point, numeric_values))
+                exported_count += 1
+
+        if exported_count == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid fixed-weir point features were exported",
+            )
+            return
+
+        with open(output_path, "w", encoding="utf-8") as handle:
+            for weir_name in group_order:
+                rows = grouped_rows[weir_name]
+                handle.write(f"{self._normalize_fxw_name(weir_name)}\n")
+                handle.write(f"{len(rows)} 9\n")
+                for point, numeric_values in rows:
+                    numeric_text = " ".join(f"{value:.6f}" for value in numeric_values)
+                    handle.write(f"{point.x():.6f} {point.y():.6f} {numeric_text}\n")
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Exported {exported_count} fixed-weir point(s) to {os.path.basename(output_path)}",
+        )
+
     def export_point_cloud_xyn(self):
         """Export active point layer to ASCII .xyn format (x y name)."""
         layer = self.iface.activeLayer()
@@ -620,6 +773,561 @@ class Delft3DFileManager:
             return geometry.asMultiPoint()
         point = geometry.asPoint()
         return [point] if point is not None else []
+
+    def _fixed_weir_field_names(self):
+        """Return the required fixed-weir point field names in export order."""
+        return [
+            "weir_name",
+            "crest_lvl",
+            "sill_hL",
+            "sill_hR",
+            "crest_w",
+            "slope_L",
+            "slope_R",
+            "rough_cd",
+        ]
+
+    def _is_fixed_weir_point_layer(self, layer):
+        """Return True when a point layer has the full fixed-weir schema."""
+        return self._resolved_fixed_weir_fields(layer) is not None
+
+    def _resolved_fixed_weir_fields(self, layer):
+        """Return actual field names for the fixed-weir schema, resolved case-insensitively."""
+        field_lookup = {field.name().lower(): field.name() for field in layer.fields()}
+        resolved = {}
+        for field_name in self._fixed_weir_field_names():
+            actual_name = field_lookup.get(field_name.lower())
+            if actual_name is None:
+                return None
+            resolved[field_name] = actual_name
+        return resolved
+
+    def _normalize_fxw_name(self, name):
+        """Ensure exported fixed-weir block names remain compatible with the importer."""
+        name = str(name).strip()
+        return name if name.endswith(":") else f"{name}:"
+
+    def load_ugrid_mesh_file(self, filepath):
+        """Load UGRID netCDF mesh file with 1D/2D components."""
+        try:
+            import netCDF4 as nc
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        try:
+            with nc.Dataset(filepath, 'r') as ds:
+                # Read CRS
+                epsg = self._read_epsg_from_nc(ds)
+                if epsg is None:
+                    epsg = 28992  # Default fallback
+
+                # Detect components
+                has_mesh2d = self._detect_mesh2d_exists(ds)
+                mesh1d_data = self._read_mesh1d_data(ds) if self._detect_mesh1d_exists(ds) else None
+                geom_data = self._read_geometry_data(ds) if self._detect_geometry_exists(ds) else None
+
+                if not has_mesh2d and mesh1d_data is None and geom_data is None:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"No mesh2d, mesh1d, or geometry components found in {os.path.basename(filepath)}"
+                    )
+                    return
+
+                # Prompt for layer names
+                layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data)
+                if layer_names is None:
+                    return
+
+                loaded_layers = []
+
+                # Load mesh2d
+                if has_mesh2d:
+                    try:
+                        self._load_mesh2d_layer(filepath, base_name, epsg, layer_names["mesh2d"])
+                        loaded_layers.append("mesh2d")
+                    except Exception as exc:
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Could not load mesh2d: {exc}"
+                        )
+
+                # Load mesh1d branches
+                if mesh1d_data:
+                    try:
+                        self._load_mesh1d_branches_layer(
+                            mesh1d_data["node_x"], mesh1d_data["node_y"],
+                            mesh1d_data["edges"], mesh1d_data["edge_branch"],
+                            mesh1d_data["branch_names"],
+                            epsg, layer_names["mesh1d_branches"]
+                        )
+                        loaded_layers.append("mesh1d_branches")
+                    except Exception as exc:
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Could not load mesh1d branches: {exc}"
+                        )
+
+                # Load geometry edges
+                if geom_data:
+                    try:
+                        self._load_geometry_edges_layer(
+                            geom_data["geom_node_x"], geom_data["geom_node_y"],
+                            geom_data["geom_node_count"], geom_data["edge_names"],
+                            epsg, layer_names["geometry_edges"]
+                        )
+                        loaded_layers.append("geometry_edges")
+                    except Exception as exc:
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Could not load geometry edges: {exc}"
+                        )
+
+                    # Load geometry nodes
+                    try:
+                        self._load_geometry_nodes_layer(
+                            geom_data["node_x"], geom_data["node_y"],
+                            geom_data["node_names"],
+                            epsg, layer_names["geometry_nodes"]
+                        )
+                        loaded_layers.append("geometry_nodes")
+                    except Exception as exc:
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Could not load geometry nodes: {exc}"
+                        )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error loading mesh file: {exc}"
+            )
+            return
+
+        if loaded_layers:
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Loaded {', '.join(loaded_layers)} from {os.path.basename(filepath)}"
+            )
+
+    def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data):
+        """Prompt user for layer names."""
+        layer_names = {}
+
+        # For simplicity, auto-generate names with sensible defaults
+        if has_mesh2d:
+            layer_names["mesh2d"] = f"{base_name}_mesh2d"
+
+        if mesh1d_data:
+            layer_names["mesh1d_branches"] = f"{base_name}_mesh1d_branches"
+
+        if geom_data:
+            layer_names["geometry_edges"] = f"{base_name}_geometry_edges"
+            layer_names["geometry_nodes"] = f"{base_name}_geometry_nodes"
+
+        return layer_names
+
+    def _detect_mesh2d_exists(self, nc_dataset):
+        """Check if mesh2d topology exists in dataset."""
+        return "Mesh2d_node_x" in nc_dataset.variables and "Mesh2d_node_y" in nc_dataset.variables
+
+    def _detect_mesh1d_exists(self, nc_dataset):
+        """Check if mesh1d topology exists in dataset."""
+        return "mesh1d_node_x" in nc_dataset.variables and "mesh1d_node_y" in nc_dataset.variables
+
+    def _detect_geometry_exists(self, nc_dataset):
+        """Check if network geometry exists in dataset."""
+        return "network_geom_x" in nc_dataset.variables and "network_geom_y" in nc_dataset.variables
+
+    def _has_nonempty_strings(self, values):
+        """Return True when the sequence contains at least one non-empty string."""
+        if not values:
+            return False
+        return any(str(value).strip() for value in values)
+
+    def _read_mesh1d_data(self, nc_dataset):
+        """Read mesh1d node coordinates and edge connectivity."""
+        import numpy as np
+
+        node_x = nc_dataset.variables["mesh1d_node_x"][:]
+        node_y = nc_dataset.variables["mesh1d_node_y"][:]
+
+        # Handle masked arrays
+        if isinstance(node_x, np.ma.MaskedArray):
+            node_x = node_x.filled(np.nan)
+        if isinstance(node_y, np.ma.MaskedArray):
+            node_y = node_y.filled(np.nan)
+
+        node_x = np.asarray(node_x, dtype=float)
+        node_y = np.asarray(node_y, dtype=float)
+
+        # Read edge connectivity
+        edges = nc_dataset.variables["mesh1d_edge_nodes"][:] if "mesh1d_edge_nodes" in nc_dataset.variables else None
+        edge_branch = nc_dataset.variables["mesh1d_edge_branch"][:] if "mesh1d_edge_branch" in nc_dataset.variables else None
+        branch_names = self._read_string_array(nc_dataset, "network_branch_long_name")
+        if not self._has_nonempty_strings(branch_names):
+            branch_names = self._read_string_array(nc_dataset, "network_branch_id")
+
+        if edges is None or edge_branch is None:
+            return None
+
+        return {
+            "node_x": node_x,
+            "node_y": node_y,
+            "edges": edges,
+            "edge_branch": edge_branch,
+            "branch_names": branch_names,
+        }
+
+    def _read_geometry_data(self, nc_dataset):
+        """Read network geometry data."""
+        import numpy as np
+
+        # Geometry nodes
+        geom_x = nc_dataset.variables["network_geom_x"][:]
+        geom_y = nc_dataset.variables["network_geom_y"][:]
+
+        if isinstance(geom_x, np.ma.MaskedArray):
+            geom_x = geom_x.filled(np.nan)
+        if isinstance(geom_y, np.ma.MaskedArray):
+            geom_y = geom_y.filled(np.nan)
+
+        geom_x = np.asarray(geom_x, dtype=float)
+        geom_y = np.asarray(geom_y, dtype=float)
+
+        node_x = nc_dataset.variables["network_node_x"][:] if "network_node_x" in nc_dataset.variables else None
+        node_y = nc_dataset.variables["network_node_y"][:] if "network_node_y" in nc_dataset.variables else None
+        if node_x is not None and node_y is not None:
+            if isinstance(node_x, np.ma.MaskedArray):
+                node_x = node_x.filled(np.nan)
+            if isinstance(node_y, np.ma.MaskedArray):
+                node_y = node_y.filled(np.nan)
+            node_x = np.asarray(node_x, dtype=float)
+            node_y = np.asarray(node_y, dtype=float)
+
+        # Geometry node count and indices
+        geom_node_count = nc_dataset.variables["network_geom_node_count"][:] if "network_geom_node_count" in nc_dataset.variables else None
+
+        # Edge names
+        edge_names = self._read_string_array(nc_dataset, "network_branch_long_name")
+        if not self._has_nonempty_strings(edge_names):
+            edge_names = self._read_string_array(nc_dataset, "network_branch_id")
+
+        node_names = self._read_string_array(nc_dataset, "network_node_long_name")
+        if not self._has_nonempty_strings(node_names):
+            node_names = self._read_string_array(nc_dataset, "network_node_id")
+
+        return {
+            "geom_node_x": geom_x,
+            "geom_node_y": geom_y,
+            "node_x": node_x,
+            "node_y": node_y,
+            "geom_node_count": geom_node_count,
+            "edge_names": edge_names,
+            "node_names": node_names,
+        }
+
+    def _read_string_array(self, nc_dataset, var_name):
+        """Read a string array variable (e.g., 'network_branch_long_name')."""
+        import netCDF4 as nc
+        import numpy as np
+
+        if var_name not in nc_dataset.variables:
+            return None
+
+        var = nc_dataset.variables[var_name]
+        raw_data = var[:]
+
+        if isinstance(raw_data, np.ma.MaskedArray):
+            fill_value = b" " if raw_data.dtype.kind == "S" else " "
+            raw_data = raw_data.filled(fill_value)
+
+        raw_array = np.asarray(raw_data)
+
+        if raw_array.dtype.kind in ("S", "U") and raw_array.ndim > 1:
+            string_array = nc.chartostring(raw_array)
+        elif raw_array.dtype.kind == "S":
+            string_array = raw_array.astype("U")
+        elif raw_array.dtype.kind == "U":
+            string_array = raw_array
+        else:
+            if not hasattr(raw_array, "__len__"):
+                return None
+            string_array = raw_array
+
+        values = np.asarray(string_array).tolist()
+        if not isinstance(values, list):
+            values = [values]
+
+        return [str(value).replace("\x00", "").strip() for value in values]
+
+    def _load_mesh2d_layer(self, filepath, base_name, epsg, layer_name):
+        """Load 2D mesh as native QGIS mesh layer."""
+        try:
+            from qgis.core import QgsMeshLayer, QgsCoordinateReferenceSystem, QgsProject
+        except ImportError:
+            raise RuntimeError("Could not import QgsMeshLayer from QGIS")
+
+        import os
+
+        # Ensure absolute path
+        filepath = os.path.abspath(filepath)
+        if not os.path.exists(filepath):
+            raise RuntimeError(f"File does not exist: {filepath}")
+
+        def _apply_crs_if_missing(layer):
+            if layer is not None and layer.isValid() and not layer.crs().isValid():
+                crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
+                layer.setCrs(crs)
+
+        def _is_usable_2d_mesh(layer):
+            if layer is None or not layer.isValid():
+                return False
+            try:
+                if layer.meshFaceCount() > 0:
+                    return True
+            except Exception:
+                pass
+            try:
+                ext = layer.extent()
+                return ext is not None and not ext.isEmpty()
+            except Exception:
+                return False
+
+        def _source_matches(layer_source, target_path):
+            if not layer_source:
+                return False
+            source = layer_source.split("|")[0]
+            if source.lower().startswith("file:///"):
+                source = source[8:]
+            source = source.replace("/", os.sep)
+            try:
+                return os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(target_path))
+            except Exception:
+                return False
+
+        # In multi-topology UGRID files, explicitly target the 2D mesh only.
+        # MDAL URI format (from MDAL sources):
+        # - "meshfile":meshname
+        # - mdal:"meshfile":meshname
+        quoted_file = f'"{filepath}"'
+        mdal_mesh_uri = f'{quoted_file}:Mesh2d'
+        mdal_mesh_uri_lower = f'{quoted_file}:mesh2d'
+        mdal_driver_uri = f'mdal:{quoted_file}:Mesh2d'
+        mdal_driver_uri_lower = f'mdal:{quoted_file}:mesh2d'
+
+        uri_candidates = [
+            mdal_mesh_uri,
+            mdal_mesh_uri_lower,
+            mdal_driver_uri,
+            mdal_driver_uri_lower,
+            f"{filepath}|layername=Mesh2d",
+            f"{filepath}|layerName=Mesh2d",
+        ]
+
+        for uri in uri_candidates:
+            for provider in ("mdal", ""):
+                mesh_layer = QgsMeshLayer(uri, layer_name, provider)
+                if not mesh_layer.isValid():
+                    continue
+                if _is_usable_2d_mesh(mesh_layer):
+                    _apply_crs_if_missing(mesh_layer)
+                    QgsProject.instance().addMapLayer(mesh_layer)
+                    return
+
+        # Avoid false-negative warning if a valid mesh from this same source is already loaded.
+        for existing_layer in QgsProject.instance().mapLayers().values():
+            if isinstance(existing_layer, QgsMeshLayer) and existing_layer.isValid():
+                if _source_matches(existing_layer.source(), filepath) and _is_usable_2d_mesh(existing_layer):
+                    _apply_crs_if_missing(existing_layer)
+                    return
+
+        raise RuntimeError(
+            f"Failed to load mesh from {filepath}. "
+            "Ensure the file is a valid UGRID mesh in netCDF format with faces. "
+            "Supported by QGIS MDAL provider (netCDF/HDF5 with UGRID topology). "
+            "Try opening directly in QGIS (File > Open Mesh) to verify."
+        )
+
+    def _load_mesh1d_branches_layer(self, node_x, node_y, edges, edge_branch, branch_names, epsg, layer_name):
+        """Load mesh1d branches as polyline layer."""
+        import numpy as np
+
+        layer = QgsVectorLayer(f"LineString?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+
+        # Group edges by branch
+        unique_branches = np.unique(edge_branch)
+        features = []
+
+        for branch_id in sorted(unique_branches):
+            branch_edge_indices = np.where(edge_branch == branch_id)[0]
+            if len(branch_edge_indices) == 0:
+                continue
+
+            # Build adjacency graph from edges
+            adjacency = {}  # node -> list of connected nodes
+            branch_edges = []
+            for edge_idx in branch_edge_indices:
+                edge = edges[edge_idx]
+                start_node, end_node = int(edge[0]), int(edge[1])
+                branch_edges.append((start_node, end_node))
+                
+                if start_node not in adjacency:
+                    adjacency[start_node] = []
+                if end_node not in adjacency:
+                    adjacency[end_node] = []
+                
+                adjacency[start_node].append(end_node)
+                adjacency[end_node].append(start_node)
+
+            if not branch_edges or not adjacency:
+                continue
+
+            # Find start node (node with degree 1, or just first node)
+            start_node = None
+            for node, neighbors in adjacency.items():
+                if len(neighbors) == 1:
+                    start_node = node
+                    break
+            
+            if start_node is None:
+                # No start node with degree 1, use first node
+                start_node = branch_edges[0][0]
+
+            # Traverse the chain to build ordered node list
+            ordered_nodes = [start_node]
+            current_node = start_node
+            prev_node = None
+
+            while len(ordered_nodes) < len(adjacency):
+                neighbors = adjacency.get(current_node, [])
+                next_node = None
+                
+                for neighbor in neighbors:
+                    if neighbor != prev_node:  # Don't go back
+                        next_node = neighbor
+                        break
+                
+                if next_node is None:
+                    break  # End of chain
+                
+                ordered_nodes.append(next_node)
+                prev_node = current_node
+                current_node = next_node
+
+            if len(ordered_nodes) < 2:
+                continue
+
+            # Build polyline geometry from ordered nodes
+            points = [QgsPointXY(float(node_x[n]), float(node_y[n])) for n in ordered_nodes]
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPolylineXY(points))
+
+            branch_name = f"Branch_{branch_id}"
+            branch_index = int(branch_id)
+            if branch_names and 0 <= branch_index < len(branch_names):
+                if branch_names[branch_index]:
+                    branch_name = branch_names[branch_index]
+
+            feat.setAttributes([branch_name])
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+    def _load_geometry_edges_layer(self, geom_node_x, geom_node_y, geom_node_count, edge_names, epsg, layer_name):
+        """Load network geometry edges as polyline layer from geometry nodes."""
+        import numpy as np
+
+        if geom_node_x is None or geom_node_y is None or geom_node_count is None:
+            raise ValueError("Missing geometry node or node count data")
+
+        layer = QgsVectorLayer(f"LineString?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+
+        features = []
+        
+        # Reconstruct polylines from geometry nodes using node counts
+        geom_idx = 0
+        for branch_idx, node_count in enumerate(geom_node_count):
+            if node_count < 1:
+                continue
+            
+            # Extract geometry nodes for this branch
+            node_indices = np.arange(geom_idx, geom_idx + node_count)
+            
+            # Validate indices
+            if np.any(node_indices >= len(geom_node_x)):
+                break
+            
+            # Build polyline from these nodes
+            points = [
+                QgsPointXY(float(geom_node_x[i]), float(geom_node_y[i]))
+                for i in node_indices
+            ]
+            
+            if len(points) >= 2:
+                feat = QgsFeature(layer.fields())
+                feat.setGeometry(QgsGeometry.fromPolylineXY(points))
+                
+                # Use edge name if available
+                edge_name = f"Branch_{branch_idx}"
+                if edge_names and branch_idx < len(edge_names):
+                    name = edge_names[branch_idx]
+                    if name:
+                        edge_name = name
+                
+                feat.setAttributes([edge_name])
+                features.append(feat)
+            
+            geom_idx += node_count
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+    def _load_geometry_nodes_layer(self, geom_node_x, geom_node_y, geom_node_names, epsg, layer_name):
+        """Load network geometry nodes as point layer."""
+        layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+
+        features = []
+
+        for idx, (x, y) in enumerate(zip(geom_node_x, geom_node_y)):
+            if not (float('-inf') < float(x) < float('inf') and float('-inf') < float(y) < float('inf')):
+                continue
+
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(x), float(y))))
+
+            node_name = "node"
+            if geom_node_names and idx < len(geom_node_names):
+                name = geom_node_names[idx]
+                if name:
+                    node_name = name
+
+            feat.setAttributes([node_name])
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
 
     def create_trachytopes_from_mesh(self):
         """Create a trachytopes point layer from mesh edge coordinates."""

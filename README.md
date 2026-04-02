@@ -5,8 +5,9 @@ A QGIS plugin to manage Delft3D files.
 ## Features
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
 - Reads point-cloud `.xyn` files as point layers with optional generated names.
-- Exports line features as polyline files.
-- Exports point layers to ASCII `.xyn` files.
+- Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
+- Exports line features and fixed-weir point layers with the main `Export` action.
+- Exports generic point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
 - Creates trachytopes point layers from UGRID mesh edge coordinates.
 - Bulk-updates trachytope values for points inside polygons.
@@ -14,14 +15,16 @@ A QGIS plugin to manage Delft3D files.
 
 ## File Import
 
-Load Delft3D files into QGIS. File type is detected automatically by extension.
+Load Delft3D files into QGIS. File type is detected automatically by extension and, for `.pliz`, by the number of columns declared in the file header.
 
 ### Supported File Extensions
 - **`.fxw`** — Fixed weir file (creates line + point layers)
-- **`.pli`, `.ldb`, `.pol`, `.pliz`** — Polyline files (creates line layer)
+- **`.pli`, `.ldb`, `.pol`** — Polyline files (creates line layer)
+- **`.pliz`** — Auto-detected as polyline or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
+- **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
 
-### Import: Fixed Weir (`.fxw`)
+### Import: Fixed Weir (`.fxw`, `.pliz` with more than 2 columns)
 
 Parse a fixed-weir text file into two memory layers:
 - a line layer containing one polyline per weir
@@ -47,7 +50,7 @@ Each weir block is read in this structure:
 - `<file_name>_points` (Point, EPSG:28992)
 	- fields: `weir_name`, `crest_lvl`, `sill_hL`, `sill_hR`, `crest_w`, `slope_L`, `slope_R`, `rough_cd`
 
-### Import: Polyline (`.pli`, `.ldb`, `.pol`, `.pliz`)
+### Import: Polyline (`.pli`, `.ldb`, `.pol`, `.pliz` with 2 columns)
 
 Parse a polyline file into a memory line layer with named polylines.
 
@@ -61,6 +64,12 @@ Each polyline block is read in this structure:
 #### Output Layer
 - `<file_name>` (LineString, EPSG:28992)
 	- field: `weir_name` (contains the polyline block name)
+
+### `.pliz` Detection Rule
+
+When loading a `.pliz` file, the plugin reads the block header line and checks the declared number of columns:
+- If the header column count is greater than `2`, the file is loaded as a fixed weir.
+- If the header column count is `2`, the file is loaded as a polyline.
 
 ### Import: Point (`.xyn`)
 
@@ -81,14 +90,61 @@ Columns are whitespace-separated.
 - `<file_name>` (Point, EPSG:28992)
 	- fields: `x`, `y`, `name`
 
+### Import: UGRID Mesh (`.nc`)
+
+Load UGRID-format NetCDF files containing 1D and/or 2D computational mesh components.
+The plugin automatically detects and creates separate layers for each component found.
+
+#### Supported Components
+
+**2D Mesh (mesh2d)**
+- Creates a native QGIS mesh layer from the `Mesh2d` topology
+- Loads only the 2D mesh topology as mesh, so mesh1d is not added as a separate mesh layer
+
+**1D Mesh Branches (mesh1d)**
+- Creates a polyline layer from mesh1d discretization
+- Aggregates `mesh1d_edge_nodes` by branch (via `mesh1d_edge_branch` mapping)
+- One polyline feature per branch
+- Field: `name` (e.g., "Branch_0", "Branch_1", ...)
+
+**Network Geometry Edges**
+- Creates a polyline layer from network topology geometry
+- Built from `network_edge_nodes` and network node coordinates
+- One polyline feature per network edge/branch
+- Field: `name` (from `network_branch_long_name` if available)
+
+**Network Geometry Nodes**
+- Creates a point layer from detailed geometry nodes
+- Extracted from `network_geom_x`, `network_geom_y` coordinates
+- One point feature per geometry node
+- Field: `name` (descriptive node identifier)
+
+#### Output Layers
+When loading a mesh file, the following layers are created (if components exist):
+- `<file_name>_mesh2d` (Mesh layer)
+- `<file_name>_mesh1d_branches` (LineString layer, with `name` field)
+- `<file_name>_geometry_edges` (LineString layer, with `name` field)
+- `<file_name>_geometry_nodes` (Point layer, with `name` field)
+
+#### CRS Handling
+- The plugin attempts to read EPSG code from NetCDF metadata
+- If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
+
 ### Typical Workflow
-1. Open `Load File` from the plugin menu or toolbar.
-2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, or .xyn).
+1. Open `Import` from the plugin menu or toolbar.
+2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, .xyn, or .nc).
 3. The plugin creates appropriate layer(s) and adds them to the current project.
 
-## Polyline Export
+## Export
 
-Export a selected QGIS line layer to the Delft3D-style text format.
+Use the main `Export` action to export the active layer to the appropriate Delft3D format.
+
+### Dispatch Rules
+- Active line layer: exported to the Delft3D-style polyline text format.
+- Active point layer with the fixed-weir fields: exported to `.pliz`.
+- Other point layers: use `Export Point Cloud (.xyn)` instead.
+
+### Export: Polyline Text
 
 ### Input Requirements
 - Active layer must be a vector line layer.
@@ -107,9 +163,38 @@ suffix `_1`, `_2`, etc.
 
 ### Typical Workflow
 1. Select the line layer to export.
-2. Open `Export Polyline` from the plugin menu or toolbar.
+2. Open `Export` from the plugin menu or toolbar.
 3. Choose output text file path.
 4. The plugin writes valid line features to the target file.
+
+### Export: Fixed Weir (`.pliz`)
+
+Export a compatible QGIS point layer to fixed-weir `.pliz` format.
+
+### Input Requirements
+- Active layer must be a vector point layer.
+- The layer must contain these fields:
+	`weir_name`, `crest_lvl`, `sill_hL`, `sill_hR`, `crest_w`, `slope_L`, `slope_R`, `rough_cd`
+- `weir_name` must be non-empty.
+- Numeric fixed-weir attributes must be finite values.
+
+### Output Format
+For each `weir_name`, the plugin writes one block:
+1. Weir name line
+2. Header line: `<number_of_rows> 9`
+3. One row per point with:
+	`x y crest_lvl sill_hL sill_hR crest_w slope_L slope_R rough_cd`
+
+### Grouping And Order
+- Points are grouped by `weir_name`.
+- The current feature iteration order is preserved within each weir block.
+- If a block name does not already end with `:`, the exporter adds it in the output file for importer compatibility.
+
+### Typical Workflow
+1. Select a compatible fixed-weir point layer.
+2. Open `Export` from the plugin menu or toolbar.
+3. Choose output `.pliz` path.
+4. The plugin writes one fixed-weir block per `weir_name`.
 
 ## Point Cloud Export (`.xyn`)
 
@@ -132,6 +217,7 @@ One row per point:
 2. Open `Export Point Cloud (.xyn)` from the plugin menu.
 3. Choose output `.xyn` path.
 4. The plugin writes one line per valid point feature.
+5. Use this action for generic point layers that are not fixed-weir `.fxw` layers.
 
 ## Bed Level To Mesh
 
