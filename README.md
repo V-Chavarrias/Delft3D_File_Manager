@@ -144,7 +144,7 @@ Use the main `Export` action to export the active layer to the appropriate Delft
 - Active point layer with the fixed-weir fields: exported to `.pliz`.
 - Other point layers: use `Export Point Cloud (.xyn)` instead.
 
-### Export: Polyline Text
+### Export: Polyline
 
 ### Input Requirements
 - Active layer must be a vector line layer.
@@ -152,19 +152,26 @@ Use the main `Export` action to export the active layer to the appropriate Delft
 - A name field is selected automatically with this preference order:
 	`weir_name`, `name`, `naam`, `id`, then first available field.
 
-### Output Format
-For each exported line, a text block is written:
+### Output Formats
+
+**Polyline (`.pli`)** — Delft3D block format. For each exported line:
 1. Block name (feature name or fallback `feature_<id>`)
 2. Header line: `<number_of_points> 2`
 3. One line per vertex with `x y`
 
-For multi-part geometries, each part is exported as a separate block with
-suffix `_1`, `_2`, etc.
+For multi-part geometries, each part is exported as a separate block with suffix `_1`, `_2`, etc.
+
+**XY (`.xy`)** — Two-column format, compatible with tools that expect plain coordinate lists:
+- Two columns per row: `x y`
+- No name or header lines
+- Consecutive polylines are separated by a `NaN NaN` line
+- No trailing `NaN NaN` after the last polyline
 
 ### Typical Workflow
 1. Select the line layer to export.
 2. Open `Export` from the plugin menu or toolbar.
-3. Choose output text file path.
+3. Choose output file path — use `.pli` for Delft3D block format or `.xy` for two-column format.
+   If no known extension is typed, `.pli` is appended automatically.
 4. The plugin writes valid line features to the target file.
 
 ### Export: Fixed Weir (`.pliz`)

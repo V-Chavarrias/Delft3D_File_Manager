@@ -494,15 +494,20 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Save exported weir file",
             "",
-            "Text files (*.txt)"
+            "Polyline (*.pli);;XY files (*.xy);;All files (*)"
         )
         if not output_path:
             return
 
+        if not output_path.lower().endswith(".pli") and not output_path.lower().endswith(".xy"):
+            output_path = output_path + ".pli"
+
         name_field = self._get_name_field(layer)
         exported_count = 0
+        export_as_xy = output_path.lower().endswith(".xy")
 
         with open(output_path, "w", encoding="utf-8") as handle:
+            is_first_polyline = True
             for feature in layer.getFeatures():
                 geometry = feature.geometry()
                 if not geometry or geometry.isEmpty():
@@ -519,11 +524,19 @@ class Delft3DFileManager:
                         continue
 
                     exported_count += 1
-                    block_name = base_name if len(polylines) == 1 else f"{base_name}_{idx + 1}"
-                    handle.write(f"{block_name}\n")
-                    handle.write(f"{len(polyline)} 2\n")
-                    for point in polyline:
-                        handle.write(f"{point.x():.6f} {point.y():.6f}\n")
+
+                    if export_as_xy:
+                        if not is_first_polyline:
+                            handle.write("NaN NaN\n")
+                        is_first_polyline = False
+                        for point in polyline:
+                            handle.write(f"{point.x():.6f} {point.y():.6f}\n")
+                    else:
+                        block_name = base_name if len(polylines) == 1 else f"{base_name}_{idx + 1}"
+                        handle.write(f"{block_name}\n")
+                        handle.write(f"{len(polyline)} 2\n")
+                        for point in polyline:
+                            handle.write(f"{point.x():.6f} {point.y():.6f}\n")
 
         if exported_count == 0:
             QMessageBox.warning(
