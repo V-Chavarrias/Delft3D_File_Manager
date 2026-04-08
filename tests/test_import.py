@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
+FXW_01 = DATA_DIR / "fxw_01.pliz"
+PLI_01 = DATA_DIR / "pli_01.pli"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
@@ -35,9 +37,9 @@ def test_route_pli(plugin):
     plugin.load_fixed_weir_file = MagicMock()
     plugin.load_polyline_file = MagicMock()
 
-    plugin.load_file_by_extension("/fake/file.pli")
+    plugin.load_file_by_extension(str(PLI_01))
 
-    plugin.load_polyline_file.assert_called_once_with("/fake/file.pli")
+    plugin.load_polyline_file.assert_called_once_with(str(PLI_01))
     plugin.load_fixed_weir_file.assert_not_called()
 
 
@@ -57,10 +59,9 @@ def test_route_pliz_fixed_weir(plugin):
     plugin.load_fixed_weir_file = MagicMock()
     plugin.load_polyline_file = MagicMock()
 
-    with patch.object(plugin, "_pliz_has_extra_columns", return_value=True):
-        plugin.load_file_by_extension("/fake/file.pliz")
+    plugin.load_file_by_extension(str(FXW_01))
 
-    plugin.load_fixed_weir_file.assert_called_once_with("/fake/file.pliz")
+    plugin.load_fixed_weir_file.assert_called_once_with(str(FXW_01))
     plugin.load_polyline_file.assert_not_called()
 
 
@@ -95,7 +96,7 @@ def test_load_polyline_file_adds_layer(plugin):
     add_map_layer = _add_map_layer_mock()
     add_map_layer.reset_mock()
 
-    plugin.load_polyline_file(str(DATA_DIR / "test.txt"))
+    plugin.load_polyline_file(str(PLI_01))
 
     assert add_map_layer.call_count == 1
 
@@ -104,7 +105,7 @@ def test_load_fixed_weir_file_adds_two_layers(plugin):
     add_map_layer = _add_map_layer_mock()
     add_map_layer.reset_mock()
 
-    plugin.load_fixed_weir_file(str(DATA_DIR / "test.fxw"))
+    plugin.load_file_by_extension(str(FXW_01))
 
     assert add_map_layer.call_count == 2
 
