@@ -1,10 +1,13 @@
 import os
 import zipfile
 import re
+import shutil
 
 PLUGIN_FOLDER = "Delft3DFileManager"   # plugin folder
 PACKAGE_NAME = "Delft3D_File_Manager"
 METADATA_FILE = os.path.join(PLUGIN_FOLDER, "metadata.txt")
+ROOT_LICENSE_FILE = "LICENSE"
+PLUGIN_LICENSE_FILE = os.path.join(PLUGIN_FOLDER, "LICENSE")
 
 def get_version(metadata_path):
     """Read version from metadata.txt"""
@@ -30,6 +33,12 @@ def zipdir(path, ziph):
 if __name__ == "__main__":
     version = get_version(METADATA_FILE)
     output_zip = f"{PACKAGE_NAME}_v{version}.zip"
+
+    if os.path.exists(ROOT_LICENSE_FILE):
+        shutil.copy2(ROOT_LICENSE_FILE, PLUGIN_LICENSE_FILE)
+        print(f"Copied {ROOT_LICENSE_FILE} -> {PLUGIN_LICENSE_FILE}")
+    else:
+        print(f"Warning: {ROOT_LICENSE_FILE} not found; plugin LICENSE was not updated")
 
     if os.path.exists(output_zip):
         os.remove(output_zip)
