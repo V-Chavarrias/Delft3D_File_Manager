@@ -2,10 +2,11 @@
 name=Delft3D File Manager
 qgisMinimumVersion=3.0
 description=Imports and exports Delft3D files. Supports fixed-weir (.fxw), polyline (.pli/.ldb/.pol/.pliz), and UGRID mesh NetCDF files.
-version=9.1.1
+version=9.1.2
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
+tracker=https://github.com/V-Chavarrias/Delft3D_File_Manager
 about=Reads Delft3D fixed-weir and polyline files into line/point layers; exports line layers to polyline format; writes elevation data to UGRID mesh files.
 category=Vector
 experimental=False
