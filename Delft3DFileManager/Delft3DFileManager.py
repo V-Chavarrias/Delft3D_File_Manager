@@ -11,7 +11,8 @@ from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex
 )
-from PyQt5.QtCore import QVariant, Qt
+from PyQt5.QtCore import QDateTime, QVariant, Qt
+from datetime import datetime, timedelta
 import importlib
 import math
 import os
@@ -129,7 +130,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.nc);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -150,8 +151,12 @@ class Delft3DFileManager:
             self.load_polyline_file(filepath)
         elif ext_lower == ".xyn":
             self.load_xyn_file(filepath)
+        elif ext_lower == ".xyz":
+            self.load_xyz_file(filepath)
         elif ext_lower == ".nc":
             self.load_ugrid_mesh_file(filepath)
+        elif ext_lower == ".mat":
+            self.load_shorelines_mat_file(filepath)
         else:
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -164,7 +169,9 @@ class Delft3DFileManager:
                 "  .pol - Polygon file\n"
                 "  .pliz - Polyline or fixed weir file (auto-detected by column count)\n"
                 "  .xyn - Point file\n"
-                "  .nc - UGRID mesh file"
+                "  .xyz - Point file with elevation\n"
+                "  .nc - UGRID mesh file\n"
+                "  .mat - ShorelineS results file"
             )
 
     def _pliz_has_extra_columns(self, filepath):
@@ -384,17 +391,33 @@ class Delft3DFileManager:
 
     def load_xyn_file(self, filepath):
         """Parse point file (.xyn) and create point layer with x, y, name."""
+        self._load_point_cloud_file(filepath, file_type="xyn")
+
+    def load_xyz_file(self, filepath):
+        """Parse point file (.xyz) and create point layer with x, y, z."""
+        self._load_point_cloud_file(filepath, file_type="xyz")
+
+    def _load_point_cloud_file(self, filepath, file_type):
+        """Parse point-cloud files (.xyn or .xyz) into a memory point layer."""
         base_name = os.path.splitext(os.path.basename(filepath))[0]
 
         point_layer = QgsVectorLayer(f"Point?crs=EPSG:28992", base_name, "memory")
         point_pr = point_layer.dataProvider()
-        point_pr.addAttributes(
-            [
+
+        if file_type == "xyz":
+            fields = [
+                QgsField("x", QVariant.Double),
+                QgsField("y", QVariant.Double),
+                QgsField("z", QVariant.Double),
+            ]
+        else:
+            fields = [
                 QgsField("x", QVariant.Double),
                 QgsField("y", QVariant.Double),
                 QgsField("name", QVariant.String),
             ]
-        )
+
+        point_pr.addAttributes(fields)
         point_layer.updateFields()
 
         try:
@@ -418,34 +441,60 @@ class Delft3DFileManager:
         try:
             for line_number, line in enumerate(lines, start=1):
                 parts = line.split()
-                if len(parts) < 2:
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"Malformed file: line {line_number} has insufficient coordinates",
-                    )
-                    return
 
-                try:
-                    x_value = float(parts[0])
-                    y_value = float(parts[1])
-                except ValueError as e:
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"Malformed file: line {line_number} has non-numeric coordinates: {e}",
-                    )
-                    return
+                if file_type == "xyz":
+                    if len(parts) != 3:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: line {line_number} must contain exactly x y z values",
+                        )
+                        return
 
-                if len(parts) >= 3:
-                    point_name = " ".join(parts[2:])
+                    try:
+                        x_value = float(parts[0])
+                        y_value = float(parts[1])
+                        z_value = float(parts[2])
+                    except ValueError as e:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: line {line_number} has non-numeric coordinates: {e}",
+                        )
+                        return
+
+                    attributes = [x_value, y_value, z_value]
                 else:
-                    point_name = f"obs_{generated_name_count}"
-                    generated_name_count += 1
+                    if len(parts) < 2:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: line {line_number} has insufficient coordinates",
+                        )
+                        return
+
+                    try:
+                        x_value = float(parts[0])
+                        y_value = float(parts[1])
+                    except ValueError as e:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: line {line_number} has non-numeric coordinates: {e}",
+                        )
+                        return
+
+                    if len(parts) >= 3:
+                        point_name = " ".join(parts[2:])
+                    else:
+                        point_name = f"obs_{generated_name_count}"
+                        generated_name_count += 1
+
+                    attributes = [x_value, y_value, point_name]
 
                 point_feat = QgsFeature(point_layer.fields())
                 point_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x_value, y_value)))
-                point_feat.setAttributes([x_value, y_value, point_name])
+                point_feat.setAttributes(attributes)
                 features.append(point_feat)
 
         except Exception as e:
@@ -1341,6 +1390,410 @@ class Delft3DFileManager:
         provider.addFeatures(features)
         layer.updateExtents()
         QgsProject.instance().addMapLayer(layer)
+
+    def load_shorelines_mat_file(self, filepath):
+        """Load ShorelineS results from a .mat file into separate line layers."""
+        try:
+            from scipy.io import loadmat
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'scipy' package is required. Use 'Install Python Dependencies' and restart QGIS."
+            )
+            return
+
+        import numpy as np
+
+        try:
+            mat_data = loadmat(filepath, squeeze_me=True)
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error reading .mat file: {e}"
+            )
+            return
+
+        # Find the data source - try different possible locations
+        data_source = None
+        
+        # Try 'O' key first (common for ShorelineS output)
+        if 'O' in mat_data:
+            O_data = mat_data['O']
+            # With squeeze_me=True, (1,1) becomes 0-d array; with squeeze_me=False, it stays (1,1)
+            if isinstance(O_data, np.ndarray):
+                if O_data.ndim == 0:
+                    # 0-d array from squeeze_me=True, it's already the void record
+                    data_source = O_data
+                elif O_data.shape == (1, 1):
+                    # (1,1) array from squeeze_me=False
+                    data_source = O_data[0, 0]
+                else:
+                    data_source = O_data
+            else:
+                # Already a scalar/void object
+                data_source = O_data
+        
+        # Try output.O structure (alternative nesting)
+        if data_source is None and 'output' in mat_data:
+            output = mat_data['output']
+            if hasattr(output, 'O'):
+                O_data = output.O
+                if isinstance(O_data, np.ndarray):
+                    if O_data.ndim == 0:
+                        data_source = O_data
+                    elif O_data.shape == (1, 1):
+                        data_source = O_data[0, 0]
+                    else:
+                        data_source = O_data
+                else:
+                    data_source = O_data
+            elif isinstance(output, dict) and 'O' in output:
+                O_data = output['O']
+                if isinstance(O_data, np.ndarray):
+                    if O_data.ndim == 0:
+                        data_source = O_data
+                    elif O_data.shape == (1, 1):
+                        data_source = O_data[0, 0]
+                    else:
+                        data_source = O_data
+                else:
+                    data_source = O_data
+
+        # Validate ShorelineS structure
+        required_fields = {"x", "y", "timenum"}
+        
+        # Detect available keys by checking for specific fields using the same method as _field_exists
+        available_keys = set()
+        all_possible_fields = ["x", "y", "timenum", "xhard", "yhard", "x_groyne", "y_groyne"]
+        
+        for attr in all_possible_fields:
+            # Use the same detection logic as _field_exists
+            try:
+                # Try indexed access first (for numpy.void and dicts)
+                if hasattr(data_source, '__getitem__'):
+                    try:
+                        data_source[attr]
+                        available_keys.add(attr)
+                        continue
+                    except (KeyError, TypeError, IndexError):
+                        pass
+                
+                # Try attribute access (for regular objects)
+                if hasattr(data_source, attr):
+                    available_keys.add(attr)
+            except Exception:
+                pass
+        
+        if not required_fields.issubset(available_keys):
+            # Debug: print structure contents for diagnostics
+            debug_info = []
+            debug_info.append("Available data structure contents:")
+            
+            # Try different methods to see what's available
+            if isinstance(data_source, dict):
+                debug_info.append(f"  Dict keys: {list(data_source.keys())}")
+            if hasattr(data_source, "dtype"):
+                debug_info.append(f"  dtype names: {list(data_source.dtype.names) if hasattr(data_source.dtype, 'names') else 'N/A'}")
+            if hasattr(data_source, "_fields"):
+                debug_info.append(f"  _fields: {list(data_source._fields)}")
+            
+            debug_str = "\n".join(debug_info)
+            
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"File does not appear to be a ShorelineS results file.\n\n"
+                f"Required fields: {', '.join(sorted(required_fields))}\n"
+                f"Found fields: {', '.join(sorted(available_keys)) if available_keys else 'None'}\n\n"
+                f"Debug info:\n{debug_str}"
+            )
+            return
+
+        # Validate array shapes and values
+        try:
+            x = np.asarray(self._get_field(data_source, "x"), dtype=float)
+            y = np.asarray(self._get_field(data_source, "y"), dtype=float)
+            timenum = np.asarray(self._get_field(data_source, "timenum"), dtype=float)
+
+            if x.ndim != 2 or y.ndim != 2 or timenum.ndim != 1:
+                raise ValueError(
+                    f"Invalid ShorelineS structure: x ({x.ndim}D), y ({y.ndim}D), "
+                    f"timenum ({timenum.ndim}D); expected x/y 2D, timenum 1D"
+                )
+
+            if x.shape != y.shape:
+                raise ValueError(
+                    f"x and y shape mismatch: {x.shape} vs {y.shape}"
+                )
+
+            if x.shape[1] != len(timenum):
+                raise ValueError(
+                    f"x/y column count ({x.shape[1]}) does not match timenum length ({len(timenum)})"
+                )
+
+        except (TypeError, ValueError) as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error validating ShorelineS arrays: {e}"
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        epsg = 28992  # Default RD New CRS
+        loaded_layers = []
+
+        # Load coastline layer (one feature per timestep)
+        try:
+            coastline_count = self._load_coastline_layer(
+                x, y, timenum, base_name, epsg
+            )
+            if coastline_count > 0:
+                loaded_layers.append(f"coastline ({coastline_count} timesteps)")
+        except Exception as e:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not load coastline: {e}"
+            )
+
+        # Load hard structures layer (optional)
+        if self._field_exists(data_source, "xhard") and self._field_exists(data_source, "yhard"):
+            try:
+                xhard = np.asarray(self._get_field(data_source, "xhard"), dtype=float)
+                yhard = np.asarray(self._get_field(data_source, "yhard"), dtype=float)
+                
+                # Flatten 2D arrays to 1D (take first timestep if time-varying)
+                if xhard.ndim == 2:
+                    xhard = xhard[:, 0].flatten()
+                elif xhard.ndim > 2:
+                    xhard = xhard.flatten()
+                
+                if yhard.ndim == 2:
+                    yhard = yhard[:, 0].flatten()
+                elif yhard.ndim > 2:
+                    yhard = yhard.flatten()
+                
+                hard_count = self._load_hard_features_layer(
+                    xhard, yhard, "hard_structures", base_name, epsg
+                )
+                if hard_count > 0:
+                    loaded_layers.append(f"hard structures ({hard_count})")
+            except Exception as e:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load hard structures: {e}"
+                )
+
+        # Load groynes layer (optional)
+        if self._field_exists(data_source, "x_groyne") and self._field_exists(data_source, "y_groyne"):
+            try:
+                x_groyne = np.asarray(self._get_field(data_source, "x_groyne"), dtype=float)
+                y_groyne = np.asarray(self._get_field(data_source, "y_groyne"), dtype=float)
+                
+                # Flatten 2D arrays to 1D (take first timestep if time-varying)
+                if x_groyne.ndim == 2:
+                    x_groyne = x_groyne[:, 0].flatten()
+                elif x_groyne.ndim > 2:
+                    x_groyne = x_groyne.flatten()
+                
+                if y_groyne.ndim == 2:
+                    y_groyne = y_groyne[:, 0].flatten()
+                elif y_groyne.ndim > 2:
+                    y_groyne = y_groyne.flatten()
+                
+                groyne_count = self._load_hard_features_layer(
+                    x_groyne, y_groyne, "groynes", base_name, epsg
+                )
+                if groyne_count > 0:
+                    loaded_layers.append(f"groynes ({groyne_count})")
+            except Exception as e:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load groynes: {e}"
+                )
+
+        if loaded_layers:
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Loaded ShorelineS data: {', '.join(loaded_layers)}"
+            )
+        else:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid ShorelineS data could be imported from the file"
+            )
+
+    def _load_coastline_layer(self, x, y, timenum, base_name, epsg):
+        """Load coastline as one feature per timestep."""
+        import numpy as np
+
+        layer = QgsVectorLayer(
+            f"LineString?crs=EPSG:{epsg}",
+            f"{base_name}_coastline",
+            "memory"
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("t_index", QVariant.Int),
+            QgsField("timenum", QVariant.Double),
+            QgsField("datetime", QVariant.DateTime)
+        ])
+        layer.updateFields()
+
+        features = []
+        for t_idx in range(x.shape[1]):
+            x_vals = x[:, t_idx]
+            y_vals = y[:, t_idx]
+
+            # Extract polylines from this timestep, handling NaN separators
+            polylines = self._extract_polylines_from_arrays(x_vals, y_vals)
+            if not polylines:
+                continue
+
+            for polyline in polylines:
+                if len(polyline) < 2:
+                    continue
+
+                feat = QgsFeature(layer.fields())
+                feat.setGeometry(QgsGeometry.fromPolylineXY(polyline))
+                feat.setAttributes([
+                    t_idx,
+                    float(timenum[t_idx]),
+                    QDateTime(self._matlab_datenum_to_datetime(timenum[t_idx]))
+                ])
+                features.append(feat)
+
+        if not features:
+            return 0
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        return len(features)
+
+    def _matlab_datenum_to_datetime(self, matlab_datenum):
+        """Convert MATLAB datenum to a Python datetime."""
+        serial_date = float(matlab_datenum)
+        return datetime.fromordinal(int(serial_date)) + timedelta(days=serial_date % 1) - timedelta(days=366)
+
+    def _load_hard_features_layer(self, x_array, y_array, feature_type, base_name, epsg):
+        """Load hard features (structures or groynes) as polylines."""
+        import numpy as np
+
+        layer_name = f"{base_name}_{feature_type}"
+        layer = QgsVectorLayer(
+            f"LineString?crs=EPSG:{epsg}",
+            layer_name,
+            "memory"
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("kind", QVariant.String),
+            QgsField("segment_id", QVariant.Int)
+        ])
+        layer.updateFields()
+
+        # Extract polylines from hard feature arrays
+        polylines = self._extract_polylines_from_arrays(x_array, y_array)
+        if not polylines:
+            return 0
+
+        features = []
+        for seg_idx, polyline in enumerate(polylines):
+            if len(polyline) < 2:
+                continue
+
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPolylineXY(polyline))
+            feat.setAttributes([
+                feature_type.rstrip("s"),  # "hard_structures" -> "hard_structure", "groynes" -> "groyne"
+                seg_idx
+            ])
+            features.append(feat)
+
+        if not features:
+            return 0
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        return len(features)
+
+    def _extract_polylines_from_arrays(self, x_array, y_array):
+        """Extract polylines from 1D arrays, handling NaN-separated segments."""
+        import numpy as np
+
+        x_array = np.asarray(x_array, dtype=float)
+        y_array = np.asarray(y_array, dtype=float)
+
+        polylines = []
+        current_line = []
+
+        for i in range(len(x_array)):
+            x_val = x_array[i]
+            y_val = y_array[i]
+
+            # Check for NaN separator or check if values are finite
+            if not (np.isfinite(x_val) and np.isfinite(y_val)):
+                # End current line if it has enough points
+                if len(current_line) >= 2:
+                    polylines.append(current_line)
+                current_line = []
+            else:
+                current_line.append(QgsPointXY(float(x_val), float(y_val)))
+
+        # Add final line if it has enough points
+        if len(current_line) >= 2:
+            polylines.append(current_line)
+
+        return polylines
+
+    def _field_exists(self, source, field_name):
+        """Check if a field exists in a structured array, dict, or object."""
+        try:
+            # Try indexed access first (for structured arrays and dicts)
+            if hasattr(source, '__getitem__'):
+                try:
+                    source[field_name]
+                    return True
+                except (KeyError, TypeError, IndexError):
+                    pass
+            
+            # Try attribute access (for regular objects)
+            if hasattr(source, field_name):
+                return True
+            
+            return False
+        except Exception:
+            return False
+
+    def _get_field(self, source, field_name):
+        """Extract field from structured array, dict, or object."""
+        import numpy as np
+        
+        # Try indexed access first (for structured arrays and dicts)
+        if hasattr(source, '__getitem__'):
+            try:
+                value = source[field_name]
+                # Handle 0-d arrays with object dtype (from squeeze_me=True in loadmat)
+                if isinstance(value, np.ndarray) and value.ndim == 0 and value.dtype == object:
+                    value = value.item()
+                return value
+            except (KeyError, TypeError, IndexError):
+                pass
+        
+        # Try attribute access (for regular objects)
+        if hasattr(source, field_name):
+            value = getattr(source, field_name)
+            # Handle 0-d arrays with object dtype
+            if isinstance(value, np.ndarray) and value.ndim == 0 and value.dtype == object:
+                value = value.item()
+            return value
+        
+        raise AttributeError(f"Field {field_name} not found")
 
     def create_trachytopes_from_mesh(self):
         """Create a trachytopes point layer from mesh edge coordinates."""

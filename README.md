@@ -5,6 +5,7 @@ A QGIS plugin to manage Delft3D files.
 ## Features
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
 - Reads point-cloud `.xyn` files as point layers with optional generated names.
+- Reads `.xyz` point files as 2D point layers with a `z` attribute.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
 - Exports line features and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
@@ -22,7 +23,9 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.pli`, `.ldb`, `.pol`** — Polyline files (creates line layer)
 - **`.pliz`** — Auto-detected as polyline or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
+- **`.xyz`** — Point files with elevation attribute (creates point layer)
 - **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
+- **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 
 ### Import: Fixed Weir (`.fxw`, `.pliz` with more than 2 columns)
 
@@ -90,6 +93,25 @@ Columns are whitespace-separated.
 - `<file_name>` (Point, EPSG:28992)
 	- fields: `x`, `y`, `name`
 
+### Import: XYZ Point (`.xyz`)
+
+Parse an ASCII point file with elevation values into a 2D memory point layer.
+
+#### Expected Input Format
+Each non-empty row contains exactly:
+- `x y z`
+
+All three columns must be numeric and whitespace-separated.
+
+#### Output Layer
+- `<file_name>` (Point, EPSG:28992)
+	- fields: `x`, `y`, `z`
+
+#### Data Handling
+- Geometry is imported as standard 2D points
+- Elevation is stored in the `z` attribute
+- Rows with missing or non-numeric `x`, `y`, or `z` values trigger a validation warning
+
 ### Import: UGRID Mesh (`.nc`)
 
 Load UGRID-format NetCDF files containing 1D and/or 2D computational mesh components.
@@ -130,9 +152,64 @@ When loading a mesh file, the following layers are created (if components exist)
 - The plugin attempts to read EPSG code from NetCDF metadata
 - If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
 
+### Import: ShorelineS Results (`.mat`)
+
+Load ShorelineS coastal evolution model results from MATLAB files into separate line layers for coastline and hard features.
+
+#### Expected Input Format
+
+A MATLAB `.mat` file containing ShorelineS results with the following required structure:
+
+The data is organized in a nested structure: **`output.O`** contains the ShorelineS data fields:
+
+- **`output.O.x`** — 2D numeric array (n_points × n_timesteps): x-coordinates of coastline
+- **`output.O.y`** — 2D numeric array (n_points × n_timesteps): y-coordinates of coastline
+- **`output.O.timenum`** — 1D numeric array (n_timesteps): time values for each timestep
+
+Optional datasets (processed when present in `output.O`):
+- **`output.O.xhard`, `output.O.yhard`** — 1D or 2D numeric arrays: coordinates of hard structures (e.g., seawalls, dikes). If 2D, the first timestep is used.
+- **`output.O.x_groyne`, `output.O.y_groyne`** — 1D or 2D numeric arrays: coordinates of groynes (hard points). If 2D, the first timestep is used.
+
+The plugin automatically detects and extracts data from the nested `output.O` structure.
+
+#### Output Layers
+
+The plugin creates separate layers for each dataset found:
+
+**Coastline Layer** (`<file_name>_coastline`, LineString, EPSG:28992)
+- One feature per timestep
+- Fields: `t_index` (timestep index), `timenum` (MATLAB datenum), `datetime` (native QGIS DateTime converted from MATLAB datenum)
+
+**Hard Structures Layer** (`<file_name>_hard_structures`, LineString, EPSG:28992)
+- Created only if `xhard` and `yhard` are present and contain valid coordinates
+- Represents fixed structures like seawalls or dikes
+- Fields: `kind` (value: "hard_structure"), `segment_id` (polyline segment index)
+- Polylines are separated by NaN markers in the coordinate arrays
+
+**Groynes Layer** (`<file_name>_groynes`, LineString, EPSG:28992)
+- Created only if `x_groyne` and `y_groyne` are present and contain valid coordinates
+- Represents groynes or other hard point features
+- Fields: `kind` (value: "groyne"), `segment_id` (polyline segment index)
+- Polylines are separated by NaN markers in the coordinate arrays
+
+#### Data Handling
+
+- **Time-varying coastline**: One feature per timestep; all coastline points at that time are connected in a single polyline (or multiple if NaN-separated)
+- **Time-invariant structures/groynes**: Single dataset per type; multiple polylines extracted as separate features, with NaN rows treated as segment separators
+- **Coordinate validation**: Only finite (non-NaN) coordinates are imported; short polylines (<2 points) are filtered
+- **Empty datasets**: If optional datasets (hard structures/groynes) are all-NaN or empty, no corresponding layer is created; import still succeeds
+
+#### Validation
+
+The plugin validates ShorelineS file structure before import:
+- Missing required fields (`x`, `y`, `timenum`) triggers a warning with available field names
+- Array shape mismatches (e.g., x and y have different dimensions) trigger an error
+- Incompatible data types (non-numeric) trigger an error
+- Non-ShorelineS `.mat` files are rejected with a clear diagnostic message
+
 ### Typical Workflow
 1. Open `Import` from the plugin menu or toolbar.
-2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, .xyn, or .nc).
+2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, .xyn, .xyz, .nc, or .mat).
 3. The plugin creates appropriate layer(s) and adds them to the current project.
 
 ## Export
