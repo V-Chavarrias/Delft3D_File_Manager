@@ -16,7 +16,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install dependencies
-        run: pip install pytest
+        run: pip install -r requirements-test.txt
 
       - name: Run tests
         run: pytest tests/ -v

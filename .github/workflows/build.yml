@@ -11,7 +11,26 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       plugin_version: ${{ steps.version.outputs.PLUGIN_VERSION }}
