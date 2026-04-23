@@ -11,7 +11,7 @@ from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex
 )
-from PyQt5.QtCore import QDateTime, QVariant, Qt
+from PyQt5.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
 from datetime import datetime, timedelta
 import importlib
 import math
@@ -19,6 +19,32 @@ import os
 import shutil
 import subprocess
 import sys
+
+
+class _CanvasDoubleClickFilter(QObject):
+    """Event filter that forwards canvas double-clicks as map coordinates."""
+
+    def __init__(self, canvas, callback):
+        super().__init__()
+        self._canvas = canvas
+        self._callback = callback
+
+    def eventFilter(self, watched, event):
+        if event.type() != QEvent.MouseButtonDblClick:
+            return False
+
+        button = getattr(event, "button", lambda: None)()
+        if button != Qt.LeftButton:
+            return False
+
+        try:
+            transform = self._canvas.getCoordinateTransform()
+            point = transform.toMapCoordinates(event.pos().x(), event.pos().y())
+            self._callback(point)
+        except Exception:
+            # Keep default canvas behavior even if coordinate conversion fails.
+            return False
+        return False
 
 class Delft3DFileManager:
     def __init__(self, iface):
@@ -31,14 +57,20 @@ class Delft3DFileManager:
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
+        self.profile_chart_action = None
         self._bed_level_dialog = None
+        self._profile_dialog = None
+        self._profile_layer = None
+        self._profile_selection_connected = False
+        self._canvas_double_click_connected = False
+        self._canvas_double_click_filter = None
         self._required_packages = ["netCDF4", "pyproj", "scipy"]
 
     def initGui(self):
         """Create toolbar button and menu item"""
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
         self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
-        self.import_action.setStatusTip("Import Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol polyline, .pliz auto-detected fixed-weir/polyline, .xyn points, .nc UGRID mesh)")
+        self.import_action.setStatusTip("Import Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol polyline, .pliz auto-detected fixed-weir/polyline, .xyn points, .nc UGRID mesh, .csl/.csd cross-sections)")
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
@@ -103,6 +135,17 @@ class Delft3DFileManager:
         self.install_deps_action.triggered.connect(self.install_dependencies)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
 
+        self.profile_chart_action = QAction(
+            QIcon(icon_path), "Cross-Section Profile", self.iface.mainWindow()
+        )
+        self.profile_chart_action.setStatusTip(
+            "Open the cross-section profile chart window"
+        )
+        self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.profile_chart_action)
+
+        self._connect_canvas_double_click()
+
     def unload(self):
         """Remove the plugin menu item and icon"""
         if self.import_action:
@@ -123,6 +166,11 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_pointcloud_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
+        if self.profile_chart_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.profile_chart_action)
+
+        self._disconnect_profile_layer_selection()
+        self._disconnect_canvas_double_click()
 
     def run(self):
         """Main entry point: open file dialog and dispatch by extension"""
@@ -130,7 +178,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -157,6 +205,18 @@ class Delft3DFileManager:
             self.load_ugrid_mesh_file(filepath)
         elif ext_lower == ".mat":
             self.load_shorelines_mat_file(filepath)
+        elif ext_lower in [".csl", ".csd"]:
+            self.load_cross_sections_from_selection(filepath)
+        elif ext_lower == ".ini":
+            ini_kind = self._detect_cross_section_ini_kind(filepath)
+            if ini_kind in ("crossloc", "crossdef"):
+                self.load_cross_sections_from_selection(filepath)
+            else:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Unsupported .ini file. Expected Delft3D cross-section location or definition file.",
+                )
         else:
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -171,8 +231,778 @@ class Delft3DFileManager:
                 "  .xyn - Point file\n"
                 "  .xyz - Point file with elevation\n"
                 "  .nc - UGRID mesh file\n"
-                "  .mat - ShorelineS results file"
+                "  .mat - ShorelineS results file\n"
+                "  .csl/.csd/.ini - Cross-section location/definition files"
             )
+
+    def load_cross_sections_from_selection(self, selected_filepath):
+        """Load cross-sections by prompting for missing files based on selected .csl or .csd."""
+        selected_path = os.path.abspath(selected_filepath)
+        selected_ext = os.path.splitext(selected_path)[1].lower()
+        start_dir = os.path.dirname(selected_path)
+
+        csl_path = ""
+        csd_path = ""
+
+        if selected_ext == ".csl":
+            csl_path = selected_path
+        elif selected_ext == ".csd":
+            csd_path = selected_path
+        elif selected_ext == ".ini":
+            ini_kind = self._detect_cross_section_ini_kind(selected_path)
+            if ini_kind == "crossloc":
+                csl_path = selected_path
+            elif ini_kind == "crossdef":
+                csd_path = selected_path
+            else:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Selected .ini file is not a supported cross-section file.",
+                )
+                return
+
+        if not csl_path:
+            csl_path, _ = QFileDialog.getOpenFileName(
+                self.iface.mainWindow(),
+                "Select Cross-Section Locations (.csl)",
+                start_dir,
+                "Cross-section location files (*.csl *.ini);;All Files (*)",
+            )
+            if not csl_path:
+                return
+
+        if not csd_path:
+            csd_path, _ = QFileDialog.getOpenFileName(
+                self.iface.mainWindow(),
+                "Select Cross-Section Definitions (.csd)",
+                start_dir,
+                "Cross-section definition files (*.csd *.ini);;All Files (*)",
+            )
+            if not csd_path:
+                return
+
+        grid_path, _ = QFileDialog.getOpenFileName(
+            self.iface.mainWindow(),
+            "Select UGRID Grid (.nc)",
+            start_dir,
+            "NetCDF files (*.nc);;All Files (*)",
+        )
+        if not grid_path:
+            return
+
+        self.load_cross_sections_files(csl_path, csd_path, grid_path)
+
+    def load_cross_sections_files(self, csl_path, csd_path, grid_path):
+        """Import FM cross-sections from locations/definitions and mesh grid into one point layer."""
+        csl_path = os.path.abspath(csl_path)
+        csd_path = os.path.abspath(csd_path)
+        grid_path = os.path.abspath(grid_path)
+
+        for path in (csl_path, csd_path, grid_path):
+            if not os.path.exists(path):
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Input file does not exist: {path}",
+                )
+                return
+
+        try:
+            cross_sections = self._read_crossloc_records(csl_path)
+            if not cross_sections:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "No [CrossSection] records were found in the selected .csl file",
+                )
+                return
+
+            definitions = self._read_crossdef_records(csd_path)
+            branch_lookup, epsg = self._read_mesh_branch_profiles_from_grid(grid_path)
+            if not branch_lookup:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Could not derive any mesh1d branch profiles from the selected grid",
+                )
+                return
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import cross-sections: {exc}",
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(csl_path))[0]
+        layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", f"{base_name}_cross_sections", "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("id", QVariant.String),
+                QgsField("branchId", QVariant.String),
+                QgsField("chainage", QVariant.Double),
+                QgsField("shift", QVariant.Double),
+                QgsField("definitionId", QVariant.String),
+                QgsField("def_type", QVariant.String),
+                QgsField("def_thalweg", QVariant.String),
+                QgsField("def_singleValZ", QVariant.String),
+                QgsField("def_yzCount", QVariant.String),
+                QgsField("def_convey", QVariant.String),
+                QgsField("def_secCount", QVariant.String),
+                QgsField("def_fricIds", QVariant.String),
+                QgsField("def_fricPos", QVariant.String),
+                QgsField("def_diam", QVariant.String),
+                QgsField("def_fricType", QVariant.String),
+                QgsField("def_fricVal", QVariant.String),
+                QgsField("def_yCoords", QVariant.String),
+                QgsField("def_zCoords", QVariant.String),
+                QgsField("def_raw", QVariant.String),
+                QgsField("def_found", QVariant.Int),
+                QgsField("import_note", QVariant.String),
+            ]
+        )
+        layer.updateFields()
+
+        features = []
+        skipped = 0
+        missing_definition_count = 0
+
+        for record in cross_sections:
+            note_parts = []
+            branch_key = record["branchId"].strip().lower()
+            branch_profile = branch_lookup.get(branch_key)
+            if branch_profile is None:
+                skipped += 1
+                continue
+
+            target_distance = record["chainage"] + record["shift"]
+            point_xy = self._interpolate_point_on_branch(branch_profile, target_distance)
+            if point_xy is None:
+                skipped += 1
+                continue
+
+            definition = definitions.get(record["definitionId"].strip().lower())
+            definition_found = 1 if definition is not None else 0
+            if not definition_found:
+                missing_definition_count += 1
+                note_parts.append("definition_not_found")
+
+            definition = definition or {}
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+            feature.setAttributes(
+                [
+                    record["id"],
+                    record["branchId"],
+                    float(record["chainage"]),
+                    float(record["shift"]),
+                    record["definitionId"],
+                    definition.get("type", ""),
+                    definition.get("thalweg", ""),
+                    definition.get("singlevaluedz", ""),
+                    definition.get("yzcount", ""),
+                    definition.get("conveyance", ""),
+                    definition.get("sectioncount", ""),
+                    definition.get("frictionids", ""),
+                    definition.get("frictionpositions", ""),
+                    definition.get("diameter", ""),
+                    definition.get("frictiontype", ""),
+                    definition.get("frictionvalue", ""),
+                    definition.get("ycoordinates", ""),
+                    definition.get("zcoordinates", ""),
+                    self._definition_to_text(definition),
+                    definition_found,
+                    ";".join(note_parts),
+                ]
+            )
+            features.append(feature)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid cross-section points were derived from the selected files",
+            )
+            return
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        summary = (
+            f"Loaded {len(features)} cross-section point(s)"
+            f" from {os.path.basename(csl_path)}"
+        )
+        if skipped > 0 or missing_definition_count > 0:
+            summary += f" (skipped: {skipped}, missing definitions: {missing_definition_count})"
+
+        self.iface.messageBar().pushSuccess("Delft3D File Manager", summary)
+
+    def _field_name_map(self, layer):
+        """Return case-insensitive field-name lookup for a vector layer."""
+        lookup = {}
+        for field in layer.fields():
+            name = field.name()
+            lookup[name.lower()] = name
+        return lookup
+
+    def _is_cross_section_layer(self, layer):
+        """Return True when layer appears to be an imported FM cross-section point layer."""
+        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+            return False
+        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+            return False
+
+        field_lookup = self._field_name_map(layer)
+        has_type = "def_type" in field_lookup
+        has_id = "id" in field_lookup or "definitionid" in field_lookup
+        has_profile = "def_ycoords" in field_lookup or "def_diam" in field_lookup
+        return has_type and has_id and has_profile
+
+    def _parse_float_list(self, text):
+        """Parse whitespace-separated numeric text into a list of floats."""
+        if text is None:
+            return None
+
+        raw_text = str(text).strip()
+        if not raw_text:
+            return []
+
+        values = []
+        for token in raw_text.split():
+            try:
+                value = float(token)
+            except ValueError:
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(value)
+        return values
+
+    def _build_yz_profile(self, feature):
+        """Build profile points from yCoordinates/zCoordinates attributes."""
+        y_coords = self._parse_float_list(feature["def_yCoords"])
+        z_coords = self._parse_float_list(feature["def_zCoords"])
+
+        if y_coords is None or z_coords is None:
+            return []
+        if len(y_coords) != len(z_coords):
+            return []
+        if len(y_coords) < 2:
+            return []
+
+        return [(x_val, z_val) for x_val, z_val in zip(y_coords, z_coords)]
+
+    def _build_circle_profile(self, feature, n=64):
+        """Build a circular profile from diameter as a closed full circle."""
+        raw_diam = feature["def_diam"]
+        if raw_diam is None:
+            return []
+
+        try:
+            diameter = float(str(raw_diam).strip())
+        except (TypeError, ValueError):
+            return []
+
+        if not math.isfinite(diameter) or diameter <= 0.0:
+            return []
+
+        radius = diameter / 2.0
+        points = []
+        for idx in range(n + 1):
+            angle = (2.0 * math.pi * idx) / n
+            x_val = radius * math.cos(angle)
+            z_val = radius * math.sin(angle)
+            points.append((x_val, z_val))
+        return points
+
+    def _profile_from_feature(self, feature):
+        """Build displayable profile points and metadata for one feature."""
+        raw_type = feature["def_type"] if feature["def_type"] is not None else ""
+        profile_type = str(raw_type).strip().lower()
+
+        if profile_type == "yz":
+            points = self._build_yz_profile(feature)
+            if points:
+                return points, {"def_type": "yz"}, ""
+            return [], {"def_type": "yz"}, "Invalid yz profile: check def_yCoords/def_zCoords values."
+
+        if profile_type == "circle":
+            points = self._build_circle_profile(feature)
+            if points:
+                return points, {"def_type": "circle"}, ""
+            return [], {"def_type": "circle"}, "Invalid circle profile: check def_diam value."
+
+        return [], {"def_type": profile_type or "unknown"}, f"Unsupported def_type: {profile_type or 'empty'}"
+
+    def _profile_metadata(self, feature):
+        """Extract lightweight metadata for chart display."""
+        metadata = {
+            "id": "",
+            "definitionId": "",
+            "def_type": "",
+        }
+
+        for key in metadata.keys():
+            value = feature[key]
+            metadata[key] = "" if value is None else str(value)
+        return metadata
+
+    def _profile_title(self, feature):
+        """Build chart title from feature attributes."""
+        feature_id = feature["id"] if feature["id"] is not None else feature.id()
+        definition_id = feature["definitionId"] if feature["definitionId"] is not None else ""
+        if definition_id:
+            return f"Cross-section {feature_id} ({definition_id})"
+        return f"Cross-section {feature_id}"
+
+    def _create_cross_section_profile_dialog(self):
+        """Construct the profile dialog lazily to keep plugin import lightweight."""
+        from .cross_section_profile_dialog import CrossSectionProfileDialog
+
+        return CrossSectionProfileDialog(self.iface.mainWindow())
+
+    def _ensure_profile_dialog(self):
+        """Ensure profile dialog exists and return it."""
+        if self._profile_dialog is None:
+            self._profile_dialog = self._create_cross_section_profile_dialog()
+        return self._profile_dialog
+
+    def _show_profile_in_dialog(self, feature):
+        """Render one feature profile in the profile dialog."""
+        points, profile_meta, message = self._profile_from_feature(feature)
+        metadata = self._profile_metadata(feature)
+        metadata.update(profile_meta)
+
+        dialog = self._ensure_profile_dialog()
+        dialog.set_profile(
+            points=points,
+            title=self._profile_title(feature),
+            metadata=metadata,
+            message=message,
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _show_profile_message(self, message):
+        """Show guidance or status text in the profile dialog."""
+        dialog = self._ensure_profile_dialog()
+        dialog.set_profile(points=[], title="Cross-Section Profile", metadata={}, message=message)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _disconnect_profile_layer_selection(self):
+        """Disconnect existing profile layer selection signal safely."""
+        if self._profile_layer is None or not self._profile_selection_connected:
+            self._profile_layer = None
+            self._profile_selection_connected = False
+            return
+
+        try:
+            self._profile_layer.selectionChanged.disconnect(self._on_profile_layer_selection_changed)
+        except Exception:
+            pass
+
+        self._profile_layer = None
+        self._profile_selection_connected = False
+
+    def _set_profile_layer(self, layer):
+        """Track active profile layer and hook selection updates."""
+        if layer is self._profile_layer and self._profile_selection_connected:
+            return
+
+        self._disconnect_profile_layer_selection()
+
+        if layer is None:
+            return
+
+        try:
+            layer.selectionChanged.connect(self._on_profile_layer_selection_changed)
+            self._profile_layer = layer
+            self._profile_selection_connected = True
+        except Exception:
+            self._profile_layer = None
+            self._profile_selection_connected = False
+
+    def _selected_cross_section_feature(self, layer):
+        """Return first selected feature from the layer or None."""
+        if layer is None:
+            return None
+
+        try:
+            selected = list(layer.getSelectedFeatures())
+        except Exception:
+            selected = []
+
+        return selected[0] if selected else None
+
+    def _on_profile_layer_selection_changed(self, *args):
+        """Refresh chart from the first selected feature on the tracked layer."""
+        layer = self._profile_layer
+        if layer is None:
+            return
+
+        selected_feature = self._selected_cross_section_feature(layer)
+        if selected_feature is None:
+            self._show_profile_message("Select a cross-section feature.")
+            return
+
+        self._show_profile_in_dialog(selected_feature)
+
+    def open_cross_section_profile_window(self):
+        """Open/focus profile chart and render selected feature when available."""
+        layer = self.iface.activeLayer()
+        if not self._is_cross_section_layer(layer):
+            self._show_profile_message(
+                "Activate a cross-section point layer and select a feature to preview its profile."
+            )
+            self._disconnect_profile_layer_selection()
+            return
+
+        self._set_profile_layer(layer)
+        selected_feature = self._selected_cross_section_feature(layer)
+        if selected_feature is None:
+            self._show_profile_message("Select a cross-section feature.")
+            return
+
+        self._show_profile_in_dialog(selected_feature)
+
+    def _find_nearest_feature(self, layer, map_point):
+        """Return nearest feature around a map click, with a map-unit tolerance."""
+        if layer is None or map_point is None:
+            return None
+
+        try:
+            tolerance = float(self.iface.mapCanvas().mapUnitsPerPixel()) * 8.0
+        except Exception:
+            tolerance = 0.0
+
+        click_geom = QgsGeometry.fromPointXY(QgsPointXY(float(map_point.x()), float(map_point.y())))
+        best_feature = None
+        best_distance = None
+
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+
+            try:
+                distance = float(geometry.distance(click_geom))
+            except Exception:
+                continue
+
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_feature = feature
+
+        if best_feature is None:
+            return None
+        if tolerance > 0.0 and best_distance is not None and best_distance > tolerance:
+            return None
+        return best_feature
+
+    def _handle_canvas_double_click(self, map_point):
+        """Handle map canvas double-click by opening profile for nearest feature."""
+        layer = self.iface.activeLayer()
+        if not self._is_cross_section_layer(layer):
+            return
+
+        feature = self._find_nearest_feature(layer, map_point)
+        if feature is None:
+            return
+
+        self._set_profile_layer(layer)
+        self._show_profile_in_dialog(feature)
+
+    def _connect_canvas_double_click(self):
+        """Connect to map canvas double-click events, failing gracefully in test stubs."""
+        if self._canvas_double_click_connected:
+            return
+
+        try:
+            canvas = self.iface.mapCanvas()
+            viewport = canvas.viewport()
+            self._canvas_double_click_filter = _CanvasDoubleClickFilter(
+                canvas, self._handle_canvas_double_click
+            )
+            viewport.installEventFilter(self._canvas_double_click_filter)
+            self._canvas_double_click_connected = True
+        except Exception:
+            self._canvas_double_click_filter = None
+            self._canvas_double_click_connected = False
+
+    def _disconnect_canvas_double_click(self):
+        """Disconnect canvas double-click handling if it was connected."""
+        if not self._canvas_double_click_connected:
+            self._canvas_double_click_filter = None
+            return
+
+        try:
+            canvas = self.iface.mapCanvas()
+            viewport = canvas.viewport()
+            if self._canvas_double_click_filter is not None:
+                viewport.removeEventFilter(self._canvas_double_click_filter)
+        except Exception:
+            pass
+
+        self._canvas_double_click_filter = None
+        self._canvas_double_click_connected = False
+
+    def _parse_repeated_ini_sections(self, filepath):
+        """Parse INI-style files while preserving repeated section blocks."""
+        sections = []
+        current_section = None
+        current_values = {}
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except UnicodeDecodeError:
+            with open(filepath, "r") as handle:
+                lines = handle.readlines()
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith(";") or line.startswith("#"):
+                continue
+
+            if line.startswith("[") and line.endswith("]"):
+                if current_section is not None:
+                    sections.append({"section": current_section, "values": current_values})
+                current_section = line[1:-1].strip()
+                current_values = {}
+                continue
+
+            if "=" not in line or current_section is None:
+                continue
+
+            key, value = line.split("=", 1)
+            current_values[key.strip()] = value.strip()
+
+        if current_section is not None:
+            sections.append({"section": current_section, "values": current_values})
+
+        return sections
+
+    def _detect_cross_section_ini_kind(self, filepath):
+        """Detect whether an INI file is crossLoc or crossDef based on [General] fileType."""
+        try:
+            sections = self._parse_repeated_ini_sections(filepath)
+        except OSError:
+            return None
+
+        for block in sections:
+            if block["section"].strip().lower() != "general":
+                continue
+            file_type = block["values"].get("fileType", "").strip().lower()
+            if file_type in ("crossloc", "crossdef"):
+                return file_type
+        return None
+
+    def _read_crossloc_records(self, csl_path):
+        """Read [CrossSection] records from a cross-section location file."""
+        records = []
+        for block in self._parse_repeated_ini_sections(csl_path):
+            if block["section"].strip().lower() != "crosssection":
+                continue
+
+            values = block["values"]
+            record = {
+                "id": values.get("id", "").strip(),
+                "branchId": values.get("branchId", "").strip(),
+                "definitionId": values.get("definitionId", "").strip(),
+            }
+
+            if not record["id"] or not record["branchId"] or not record["definitionId"]:
+                continue
+
+            try:
+                record["chainage"] = float(values.get("chainage", "0"))
+                record["shift"] = float(values.get("shift", "0"))
+            except ValueError:
+                continue
+
+            records.append(record)
+
+        return records
+
+    def _read_crossdef_records(self, csd_path):
+        """Read [Definition] records keyed by definition id."""
+        definitions = {}
+        for block in self._parse_repeated_ini_sections(csd_path):
+            if block["section"].strip().lower() != "definition":
+                continue
+
+            values = block["values"]
+            definition_id = values.get("id", "").strip()
+            if not definition_id:
+                continue
+
+            normalized = {}
+            for key, value in values.items():
+                normalized[key.strip().lower()] = value.strip()
+
+            definitions[definition_id.lower()] = normalized
+
+        return definitions
+
+    def _definition_to_text(self, definition):
+        """Serialize a cross-section definition dictionary to text."""
+        if not definition:
+            return ""
+
+        parts = []
+        for key in sorted(definition.keys()):
+            parts.append(f"{key}={definition[key]}")
+        return " | ".join(parts)
+
+    def _read_mesh_branch_profiles_from_grid(self, grid_path):
+        """Read mesh1d branches from grid file and build branch chainage profiles."""
+        try:
+            import netCDF4 as nc
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
+            ) from exc
+
+        with nc.Dataset(grid_path, "r") as ds:
+            mesh1d_data = self._read_mesh1d_data(ds) if self._detect_mesh1d_exists(ds) else None
+            if mesh1d_data is None:
+                raise RuntimeError("No mesh1d data found in the selected grid")
+
+            epsg = self._read_epsg_from_nc(ds)
+            if epsg is None:
+                epsg = 28992
+
+        branch_lookup = self._build_branch_lookup(mesh1d_data)
+        return branch_lookup, epsg
+
+    def _build_branch_lookup(self, mesh1d_data):
+        """Build a case-insensitive branch lookup with cumulative chainage profiles."""
+        import numpy as np
+
+        node_x = mesh1d_data["node_x"]
+        node_y = mesh1d_data["node_y"]
+        edges = mesh1d_data["edges"]
+        edge_branch = mesh1d_data["edge_branch"]
+        branch_names = mesh1d_data.get("branch_names")
+
+        lookup = {}
+        unique_branches = np.unique(edge_branch)
+
+        for branch_id in sorted(unique_branches):
+            branch_edge_indices = np.where(edge_branch == branch_id)[0]
+            if len(branch_edge_indices) == 0:
+                continue
+
+            adjacency = {}
+            branch_edges = []
+            for edge_idx in branch_edge_indices:
+                edge = edges[edge_idx]
+                start_node = int(edge[0])
+                end_node = int(edge[1])
+                branch_edges.append((start_node, end_node))
+
+                adjacency.setdefault(start_node, []).append(end_node)
+                adjacency.setdefault(end_node, []).append(start_node)
+
+            if not branch_edges:
+                continue
+
+            start_node = None
+            for node_id, neighbors in adjacency.items():
+                if len(neighbors) == 1:
+                    start_node = node_id
+                    break
+            if start_node is None:
+                start_node = branch_edges[0][0]
+
+            ordered_nodes = [start_node]
+            previous_node = None
+            current_node = start_node
+            while len(ordered_nodes) < len(adjacency):
+                neighbors = adjacency.get(current_node, [])
+                next_node = None
+                for neighbor in neighbors:
+                    if neighbor != previous_node:
+                        next_node = neighbor
+                        break
+                if next_node is None:
+                    break
+
+                ordered_nodes.append(next_node)
+                previous_node = current_node
+                current_node = next_node
+
+            if len(ordered_nodes) < 2:
+                continue
+
+            points = []
+            for node_id in ordered_nodes:
+                points.append((float(node_x[node_id]), float(node_y[node_id])))
+
+            cumlen = [0.0]
+            for idx in range(1, len(points)):
+                x0, y0 = points[idx - 1]
+                x1, y1 = points[idx]
+                cumlen.append(cumlen[-1] + math.hypot(x1 - x0, y1 - y0))
+
+            branch_name = f"Branch_{int(branch_id)}"
+            branch_index = int(branch_id)
+            if branch_names and 0 <= branch_index < len(branch_names):
+                candidate = str(branch_names[branch_index]).strip()
+                if candidate:
+                    branch_name = candidate
+
+            profile = {
+                "name": branch_name,
+                "points": points,
+                "cumlen": cumlen,
+                "length": cumlen[-1],
+            }
+
+            for key in (branch_name, f"branch_{int(branch_id)}", str(int(branch_id))):
+                lookup[key.strip().lower()] = profile
+
+        return lookup
+
+    def _interpolate_point_on_branch(self, profile, target_distance):
+        """Interpolate x/y coordinate on a branch profile at the requested chainage distance."""
+        points = profile.get("points", [])
+        cumlen = profile.get("cumlen", [])
+        total_length = profile.get("length", 0.0)
+
+        if len(points) < 2 or len(cumlen) != len(points):
+            return None
+
+        if target_distance < 0.0 or target_distance > total_length:
+            return None
+
+        if target_distance == 0.0:
+            return points[0]
+        if target_distance == total_length:
+            return points[-1]
+
+        for idx in range(len(points) - 1):
+            start_dist = cumlen[idx]
+            end_dist = cumlen[idx + 1]
+            if target_distance < start_dist or target_distance > end_dist:
+                continue
+
+            seg_len = end_dist - start_dist
+            if seg_len <= 0.0:
+                continue
+
+            t = (target_distance - start_dist) / seg_len
+            x0, y0 = points[idx]
+            x1, y1 = points[idx + 1]
+            return (x0 + t * (x1 - x0), y0 + t * (y1 - y0))
+
+        return None
 
     def _pliz_has_extra_columns(self, filepath):
         """Return True when a .pliz file header indicates more than two data columns."""

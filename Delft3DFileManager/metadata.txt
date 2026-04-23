@@ -3,15 +3,16 @@ name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 description=Imports and exports Delft3D files. 
-version=9.2.0
+version=9.3.0
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tracker=https://github.com/V-Chavarrias/Delft3D_File_Manager
 homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
-about=Reads Delft3D fixed-weir and polyline files into line/point layers; exports line layers to polyline format; writes elevation data to UGRID mesh files.
+about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
 changelog=
+    9.3.0 - Import and visualize cross-sections
     9.2.0 - ShorelineS and xyz files. 
     9.1.4 - Mesh node interpolation from external datasets, improved error handling.
 category=Vector

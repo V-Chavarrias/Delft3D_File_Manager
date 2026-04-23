@@ -26,6 +26,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
 - **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
+- **`.csl`, `.csd`** — FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
 ### Import: Fixed Weir (`.fxw`, `.pliz` with more than 2 columns)
 
@@ -207,9 +208,64 @@ The plugin validates ShorelineS file structure before import:
 - Incompatible data types (non-numeric) trigger an error
 - Non-ShorelineS `.mat` files are rejected with a clear diagnostic message
 
+### Import: FM Cross-Sections (`.csl` or `.csd`)
+
+Import Delft3D Flexible Mesh 1D cross-sections into one point layer.
+
+#### Required Input Files
+The importer requires all three files:
+- **Grid**: UGRID NetCDF file (`.nc`) with mesh1d topology
+- **Cross-section locations**: `.csl` (`fileType = crossLoc`)
+- **Cross-section definitions**: `.csd` (`fileType = crossDef`)
+
+You can start by selecting either `.csl` or `.csd` from the normal `Import` action.
+The plugin then prompts for the missing companion file and the grid file.
+
+#### Location Input (`.csl`)
+Each `[CrossSection]` block is expected to contain:
+- `id`
+- `branchId`
+- `chainage`
+- `shift`
+- `definitionId`
+
+#### Definition Input (`.csd`)
+Each `[Definition]` block is keyed by `id` and merged into the output attributes.
+For `yz` definitions, arrays such as `yCoordinates` and `zCoordinates` are preserved as text attributes.
+
+#### Output Layer
+- `<csl_file_name>_cross_sections` (Point, mesh EPSG from grid or fallback EPSG:28992)
+
+Output attributes include:
+- location fields: `id`, `branchId`, `chainage`, `shift`, `definitionId`
+- definition fields (if found): `def_type`, `def_thalweg`, `def_singleValZ`, `def_yzCount`, `def_convey`, `def_secCount`, `def_fricIds`, `def_fricPos`, `def_diam`, `def_fricType`, `def_fricVal`, `def_yCoords`, `def_zCoords`
+- full serialized definition payload: `def_raw`
+- diagnostics: `def_found`, `import_note`
+
+#### Geometry Construction
+- Branch geometry is derived from mesh1d connectivity in the selected grid
+- Point coordinates are interpolated along the branch at `chainage + shift`
+
+#### Validation And Partial Import
+- Cross-sections with missing branch geometry or out-of-range chainage are skipped
+- Missing definitions do not block import; points are still created with `def_found = 0`
+- Success message reports loaded points and skipped/missing-definition counts
+
+### Profile Chart Window
+
+- Open by double-clicking a cross-section point on the map.
+- Also available from plugin menu: `Cross-Section Profile`.
+- Supports:
+	- `yz` definitions from `def_yCoords` / `def_zCoords`
+	- `circle` definitions from `def_diam`
+- Axes are labeled with units (`y [m]`, `z [m]`).
+- The window uses a matplotlib plot when matplotlib is available, and falls back to the built-in renderer otherwise.
+- The chart updates automatically when selection changes on the active cross-section layer.
+- No extra dependencies are required.
+
 ### Typical Workflow
 1. Open `Import` from the plugin menu or toolbar.
-2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, .xyn, .xyz, .nc, or .mat).
+2. Select an input file (.fxw, .pli/.ldb/.pol/.pliz, .xyn, .xyz, .nc, .mat, .csl, or .csd).
 3. The plugin creates appropriate layer(s) and adds them to the current project.
 
 ## Export

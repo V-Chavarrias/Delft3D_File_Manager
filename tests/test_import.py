@@ -10,6 +10,9 @@ DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
 PLI_01 = DATA_DIR / "pli_01.pli"
 XYZ_01 = DATA_DIR / "xyz_01.xyz"
+CSL_01 = DATA_DIR / "csl.ini"
+CSD_01 = DATA_DIR / "csd.ini"
+GRID_01 = DATA_DIR / "grd_net.nc"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
@@ -89,6 +92,18 @@ def test_route_xyz(plugin):
     plugin.load_xyz_file = MagicMock()
     plugin.load_file_by_extension("/fake/file.xyz")
     plugin.load_xyz_file.assert_called_once_with("/fake/file.xyz")
+
+
+def test_route_csl(plugin):
+    plugin.load_cross_sections_from_selection = MagicMock()
+    plugin.load_file_by_extension("/fake/file.csl")
+    plugin.load_cross_sections_from_selection.assert_called_once_with("/fake/file.csl")
+
+
+def test_route_csd(plugin):
+    plugin.load_cross_sections_from_selection = MagicMock()
+    plugin.load_file_by_extension("/fake/file.csd")
+    plugin.load_cross_sections_from_selection.assert_called_once_with("/fake/file.csd")
 
 
 def test_route_unknown(plugin):
@@ -171,6 +186,99 @@ def test_load_xyz_file_malformed_warns(plugin, tmp_path):
         plugin.load_xyz_file(str(xyz_file))
 
     mock_mb.warning.assert_called_once()
+
+
+def test_load_cross_sections_from_selection_csl(plugin):
+    plugin.load_cross_sections_files = MagicMock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg:
+        mock_dlg.getOpenFileName.side_effect = [
+            (str(CSD_01), ""),
+            (str(GRID_01), ""),
+        ]
+        plugin.load_cross_sections_from_selection(str(CSL_01))
+
+    plugin.load_cross_sections_files.assert_called_once_with(
+        str(CSL_01), str(CSD_01), str(GRID_01)
+    )
+
+
+def test_load_cross_sections_from_selection_csd(plugin):
+    plugin.load_cross_sections_files = MagicMock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg:
+        mock_dlg.getOpenFileName.side_effect = [
+            (str(CSL_01), ""),
+            (str(GRID_01), ""),
+        ]
+        plugin.load_cross_sections_from_selection(str(CSD_01))
+
+    plugin.load_cross_sections_files.assert_called_once_with(
+        str(CSL_01), str(CSD_01), str(GRID_01)
+    )
+
+
+def test_load_cross_sections_files_adds_layer(plugin):
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    profile = {
+        "name": "A12Ma_Kj.1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+
+    with patch.object(
+        plugin,
+        "_read_mesh_branch_profiles_from_grid",
+        return_value=({"a12ma_kj.1": profile}, 28992),
+    ):
+        plugin.load_cross_sections_files(str(CSL_01), str(CSD_01), str(GRID_01))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_cross_sections_files_missing_definition_still_loads(plugin):
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    profile = {
+        "name": "A12Ma_Kj.1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+
+    with patch.object(
+        plugin,
+        "_read_mesh_branch_profiles_from_grid",
+        return_value=({"a12ma_kj.1": profile}, 28992),
+    ), patch.object(plugin, "_read_crossdef_records", return_value={}):
+        plugin.load_cross_sections_files(str(CSL_01), str(CSD_01), str(GRID_01))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_read_crossdef_records_includes_circular_fields(plugin, tmp_path):
+    csd_file = tmp_path / "circle.csd"
+    csd_file.write_text(
+        "[General]\n"
+        "fileType = crossDef\n\n"
+        "[Definition]\n"
+        "id = CIRC001\n"
+        "type = circle\n"
+        "diameter = 1.5\n"
+        "frictionType = Manning\n"
+        "frictionValue = 0.030\n"
+    )
+
+    definitions = plugin._read_crossdef_records(str(csd_file))
+    assert "circ001" in definitions
+    assert definitions["circ001"]["type"] == "circle"
+    assert definitions["circ001"]["diameter"] == "1.5"
+    assert definitions["circ001"]["frictiontype"] == "Manning"
+    assert definitions["circ001"]["frictionvalue"] == "0.030"
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +502,143 @@ def test_load_coastline_layer_sets_datetime_field(plugin):
     assert captured["layer"].provider.attributes[2].variant_type != _qgis_core.QVariant.String
     assert captured["features"][0].attributes == [0, 719529.0, FakeQDateTime(datetime(1970, 1, 1, 0, 0, 0))]
     assert captured["features"][1].attributes == [1, 719529.5, FakeQDateTime(datetime(1970, 1, 1, 12, 0, 0))]
+
+
+# ---------------------------------------------------------------------------
+# Cross-section profile chart helper tests
+# ---------------------------------------------------------------------------
+
+class _FakeField:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+
+class _FakeSignal:
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        self._callbacks.append(callback)
+
+    def disconnect(self, callback):
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+
+class _FakeFeature:
+    def __init__(self, attrs, fid=1):
+        self._attrs = attrs
+        self._fid = fid
+
+    def __getitem__(self, key):
+        return self._attrs.get(key)
+
+    def id(self):
+        return self._fid
+
+
+class _FakeLayer:
+    def __init__(self, fields, selected=None):
+        self._fields = [_FakeField(name) for name in fields]
+        self._selected = selected or []
+        self.selectionChanged = _FakeSignal()
+
+    def type(self):
+        return _qgis_core.QgsMapLayerType.VectorLayer
+
+    def geometryType(self):
+        return _qgis_core.QgsWkbTypes.PointGeometry
+
+    def fields(self):
+        return self._fields
+
+    def getSelectedFeatures(self):
+        return list(self._selected)
+
+
+def test_profile_layer_detection(plugin):
+    layer = _FakeLayer(
+        ["id", "definitionId", "def_type", "def_yCoords", "def_zCoords", "def_diam"]
+    )
+    assert plugin._is_cross_section_layer(layer)
+
+
+def test_parse_float_list_valid_and_invalid(plugin):
+    assert plugin._parse_float_list("1 2.5 -3") == [1.0, 2.5, -3.0]
+    assert plugin._parse_float_list("1 two 3") is None
+
+
+def test_build_yz_profile_success(plugin):
+    feature = _FakeFeature({"def_yCoords": "0 1 2", "def_zCoords": "-1 -2 -3"})
+    points = plugin._build_yz_profile(feature)
+    assert points == [(0.0, -1.0), (1.0, -2.0), (2.0, -3.0)]
+
+
+def test_build_yz_profile_mismatch_returns_empty(plugin):
+    feature = _FakeFeature({"def_yCoords": "0 1", "def_zCoords": "-1"})
+    assert plugin._build_yz_profile(feature) == []
+
+
+def test_build_circle_profile_success(plugin):
+    feature = _FakeFeature({"def_diam": "2.0"})
+    points = plugin._build_circle_profile(feature, n=8)
+    assert len(points) == 9
+    assert points[0][0] == pytest.approx(points[-1][0])
+    assert points[0][1] == pytest.approx(points[-1][1])
+    assert min(point[1] for point in points) < 0.0
+    assert max(point[1] for point in points) > 0.0
+
+
+def test_open_profile_from_selected_feature(plugin):
+    feature = _FakeFeature(
+        {
+            "id": "cs_1",
+            "definitionId": "def_1",
+            "def_type": "yz",
+            "def_yCoords": "0 1",
+            "def_zCoords": "-1 -2",
+            "def_diam": "",
+        }
+    )
+    layer = _FakeLayer(
+        ["id", "definitionId", "def_type", "def_yCoords", "def_zCoords", "def_diam"],
+        selected=[feature],
+    )
+
+    plugin.iface.activeLayer.return_value = layer
+    plugin._show_profile_in_dialog = MagicMock()
+
+    plugin.open_cross_section_profile_window()
+
+    plugin._show_profile_in_dialog.assert_called_once_with(feature)
+
+
+def test_selection_changed_updates_profile(plugin):
+    feature = _FakeFeature(
+        {
+            "id": "cs_2",
+            "definitionId": "def_2",
+            "def_type": "yz",
+            "def_yCoords": "0 1",
+            "def_zCoords": "-2 -3",
+            "def_diam": "",
+        }
+    )
+    layer = _FakeLayer(
+        ["id", "definitionId", "def_type", "def_yCoords", "def_zCoords", "def_diam"],
+        selected=[feature],
+    )
+
+    plugin._show_profile_in_dialog = MagicMock()
+    plugin._set_profile_layer(layer)
+    plugin._on_profile_layer_selection_changed()
+
+    plugin._show_profile_in_dialog.assert_called_once_with(feature)
+
+
+def test_double_click_with_no_cross_section_layer_no_crash(plugin):
+    plugin.iface.activeLayer.return_value = None
+    plugin._handle_canvas_double_click(SimpleNamespace(x=lambda: 0.0, y=lambda: 0.0))
