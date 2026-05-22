@@ -12,7 +12,7 @@ homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
 about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
 changelog=
-    9.4.0 - Reading of morphodynamic data from map-file.
+    9.4.0 - Reading of morphodynamic data from map-file. Creating, importing, and exporting bridge pillars. 
     9.3.0 - Import and visualize cross-sections.
     9.2.0 - ShorelineS and xyz files. 
     9.1.4 - Mesh node interpolation from external datasets, improved error handling.

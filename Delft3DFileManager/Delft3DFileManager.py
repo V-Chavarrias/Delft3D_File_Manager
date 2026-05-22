@@ -63,6 +63,7 @@ class Delft3DFileManager:
         self.export_pointcloud_action = None
         self.bed_level_action = None
         self.create_trachytopes_action = None
+        self.create_bridge_points_action = None
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
@@ -107,6 +108,15 @@ class Delft3DFileManager:
         )
         self.create_trachytopes_action.triggered.connect(self.create_trachytopes_from_mesh)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.create_trachytopes_action)
+
+        self.create_bridge_points_action = QAction(
+            QIcon(icon_path), "Create Bridge Points from Polyline", self.iface.mainWindow()
+        )
+        self.create_bridge_points_action.setStatusTip(
+            "Create a bridge point layer from active polyline vertices with default width and drag_cd"
+        )
+        self.create_bridge_points_action.triggered.connect(self.create_bridge_points_from_polyline)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.create_bridge_points_action)
 
         self.update_trachytopes_action = QAction(
             QIcon(icon_path), "Set Trachytopes in Polygons", self.iface.mainWindow()
@@ -167,6 +177,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.create_trachytopes_action)
+        if self.create_bridge_points_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.create_bridge_points_action)
         if self.update_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
         if self.export_trachytopes_action:
@@ -200,10 +212,19 @@ class Delft3DFileManager:
         if ext_lower == ".fxw":
             self.load_fixed_weir_file(filepath)
         elif ext_lower == ".pliz":
-            if self._pliz_has_extra_columns(filepath):
+            column_count = self._pliz_column_count(filepath)
+            if column_count == 2:
+                self.load_polyline_file(filepath)
+            elif column_count == 4:
+                self.load_bridge_file(filepath)
+            elif column_count == 9:
                 self.load_fixed_weir_file(filepath)
             else:
-                self.load_polyline_file(filepath)
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    "Unsupported .pliz header column count. Expected 2 (polyline), 4 (bridge), or 9 (fixed-weir).",
+                )
         elif ext_lower in [".pli", ".ldb", ".pol"]:
             self.load_polyline_file(filepath)
         elif ext_lower == ".xyn":
@@ -1013,8 +1034,8 @@ class Delft3DFileManager:
 
         return None
 
-    def _pliz_has_extra_columns(self, filepath):
-        """Return True when a .pliz file header indicates more than two data columns."""
+    def _pliz_column_count(self, filepath):
+        """Return the declared data column count from a .pliz header, or None."""
         try:
             try:
                 with open(filepath, "r", encoding="utf-8") as handle:
@@ -1028,11 +1049,149 @@ class Delft3DFileManager:
 
             header_parts = lines[1].split()
             if len(header_parts) < 2:
-                return False
+                return None
 
-            return int(header_parts[1]) > 2
+            return int(header_parts[1])
         except (OSError, ValueError, IndexError):
+            return None
+
+    def _pliz_has_extra_columns(self, filepath):
+        """Backward-compatible helper retained for tests and older call paths."""
+        column_count = self._pliz_column_count(filepath)
+        if column_count is None:
             return False
+        return column_count > 2
+
+    def load_bridge_file(self, filepath):
+        """Parse bridge .pliz file and create line and point layers."""
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+
+        line_layer = QgsVectorLayer(f"LineString?crs=EPSG:28992", base_name, "memory")
+        line_provider = line_layer.dataProvider()
+        line_provider.addAttributes([QgsField("bridge_name", QVariant.String)])
+        line_layer.updateFields()
+
+        point_layer = QgsVectorLayer(f"Point?crs=EPSG:28992", f"{base_name}_points", "memory")
+        point_provider = point_layer.dataProvider()
+        point_provider.addAttributes(
+            [
+                QgsField("bridge_name", QVariant.String),
+                QgsField("width", QVariant.Double),
+                QgsField("drag_cd", QVariant.Double),
+            ]
+        )
+        point_layer.updateFields()
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+        except UnicodeDecodeError:
+            with open(filepath, "r") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+
+        if not lines:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "File is empty or contains no content",
+            )
+            return
+
+        line_feature_count = 0
+        point_feature_count = 0
+        i = 0
+
+        try:
+            while i < len(lines):
+                bridge_name = lines[i]
+                i += 1
+
+                if i >= len(lines):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{bridge_name}' has no header line",
+                    )
+                    return
+
+                header_parts = lines[i].split()
+                if len(header_parts) < 2:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{bridge_name}' has invalid header at line {i+1}",
+                    )
+                    return
+
+                nrows = int(header_parts[0])
+                ncols = int(header_parts[1])
+                if ncols != 4:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed bridge file: block '{bridge_name}' expected 4 columns but found {ncols}.",
+                    )
+                    return
+
+                i += 1
+                vertices = []
+                for row_idx in range(nrows):
+                    if i >= len(lines):
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: block '{bridge_name}' expected {nrows} rows but ended at {row_idx}.",
+                        )
+                        return
+
+                    parts = lines[i].split()
+                    if len(parts) < 4:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Malformed file: block '{bridge_name}' row {row_idx+1} has fewer than 4 values.",
+                        )
+                        return
+
+                    x_coord = float(parts[0])
+                    y_coord = float(parts[1])
+                    width = float(parts[2])
+                    drag_cd = float(parts[3])
+
+                    point = QgsPointXY(x_coord, y_coord)
+                    vertices.append(point)
+
+                    point_feature = QgsFeature(point_layer.fields())
+                    point_feature.setGeometry(QgsGeometry.fromPointXY(point))
+                    point_feature.setAttributes([bridge_name, width, drag_cd])
+                    point_provider.addFeature(point_feature)
+                    point_feature_count += 1
+                    i += 1
+
+                if len(vertices) >= 2:
+                    line_feature = QgsFeature(line_layer.fields())
+                    line_feature.setGeometry(QgsGeometry.fromPolylineXY(vertices))
+                    line_feature.setAttributes([bridge_name])
+                    line_provider.addFeature(line_feature)
+                    line_feature_count += 1
+
+        except (ValueError, TypeError) as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Error parsing bridge file: {exc}",
+            )
+            return
+
+        line_layer.updateExtents()
+        point_layer.updateExtents()
+        QgsProject.instance().addMapLayer(line_layer)
+        QgsProject.instance().addMapLayer(point_layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {line_feature_count} bridge polyline(s) and {point_feature_count} bridge point(s)",
+        )
 
     def load_fixed_weir_file(self, filepath):
         """Parse fixed-weir text file and create both polyline and point layers"""
@@ -1450,7 +1609,13 @@ class Delft3DFileManager:
             return
 
         if layer.geometryType() == QgsWkbTypes.LineGeometry:
-            self.export_lines()
+            selected_layers = self._selected_bridge_line_layers()
+            if len(selected_layers) > 1 and all(self._line_layer_has_bridge_companion(selected) for selected in selected_layers):
+                self.export_bridge_pliz_from_selected_layers(selected_layers)
+            elif self._line_layer_has_bridge_companion(layer):
+                self.export_bridge_pliz_from_selected_layers([layer])
+            else:
+                self.export_lines()
             return
 
         if layer.geometryType() == QgsWkbTypes.PointGeometry:
@@ -1561,6 +1726,201 @@ class Delft3DFileManager:
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
             f"Exported {exported_count} fixed-weir point(s) to {os.path.basename(output_path)}",
+        )
+
+    def _bridge_point_field_names(self):
+        """Return required bridge point-layer fields."""
+        return ["bridge_name", "width", "drag_cd"]
+
+    def _resolved_bridge_point_fields(self, layer):
+        """Resolve required bridge point fields case-insensitively."""
+        field_lookup = {field.name().lower(): field.name() for field in layer.fields()}
+        resolved = {}
+        for field_name in self._bridge_point_field_names():
+            actual_name = field_lookup.get(field_name.lower())
+            if actual_name is None:
+                return None
+            resolved[field_name] = actual_name
+        return resolved
+
+    def _selected_bridge_line_layers(self):
+        """Return selected vector line layers from the layer tree, if available."""
+        selected_layers = []
+        try:
+            tree_view = self.iface.layerTreeView()
+            selected_layers = list(tree_view.selectedLayers())
+        except Exception:
+            selected_layers = []
+
+        valid_selected = [
+            layer
+            for layer in selected_layers
+            if layer is not None
+            and layer.type() == QgsMapLayerType.VectorLayer
+            and layer.geometryType() == QgsWkbTypes.LineGeometry
+        ]
+        return valid_selected
+
+    def _find_point_layer_by_name(self, layer_name):
+        """Find a point layer by exact layer name."""
+        for layer in QgsProject.instance().mapLayers().values():
+            try:
+                if layer.type() != QgsMapLayerType.VectorLayer:
+                    continue
+                if layer.geometryType() != QgsWkbTypes.PointGeometry:
+                    continue
+            except Exception:
+                continue
+            if layer.name() == layer_name:
+                return layer
+        return None
+
+    def _line_layer_has_bridge_companion(self, line_layer):
+        """Return True if a line layer has a valid companion bridge points layer."""
+        if line_layer is None:
+            return False
+        point_layer = self._find_point_layer_by_name(f"{line_layer.name()}_points")
+        if point_layer is None:
+            return False
+        return self._resolved_bridge_point_fields(point_layer) is not None
+
+    def export_bridge_pliz_from_selected_layers(self, selected_line_layers=None):
+        """Export selected bridge line layers into one combined bridge .pliz file."""
+        selected_line_layers = list(selected_line_layers or self._selected_bridge_line_layers())
+        if not selected_line_layers:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Select one or more line layers in the layer tree to export bridge .pliz.",
+            )
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save Bridge PLIZ file",
+            "",
+            "Bridge files (*.pliz);;All files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".pliz"):
+            output_path = output_path + ".pliz"
+
+        blocks = []
+
+        for line_layer in selected_line_layers:
+            point_layer_name = f"{line_layer.name()}_points"
+            point_layer = self._find_point_layer_by_name(point_layer_name)
+            if point_layer is None:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Missing companion point layer '{point_layer_name}' for line layer '{line_layer.name()}'.",
+                )
+                return
+
+            point_fields = self._resolved_bridge_point_fields(point_layer)
+            if point_fields is None:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Point layer '{point_layer_name}' must contain bridge_name, width, and drag_cd fields.",
+                )
+                return
+
+            grouped_point_rows = {}
+            grouped_order = {}
+            for point_feature in point_layer.getFeatures():
+                geometry = point_feature.geometry()
+                if not geometry or geometry.isEmpty():
+                    continue
+                points = self._extract_points(geometry)
+                if not points:
+                    continue
+
+                bridge_name = point_feature[point_fields["bridge_name"]]
+                if bridge_name is None or not str(bridge_name).strip():
+                    continue
+                bridge_name = str(bridge_name).strip()
+                if bridge_name not in grouped_point_rows:
+                    grouped_point_rows[bridge_name] = []
+                    grouped_order[bridge_name] = len(grouped_order)
+
+                width_value = point_feature[point_fields["width"]]
+                drag_value = point_feature[point_fields["drag_cd"]]
+                try:
+                    width = float(width_value)
+                    drag_cd = float(drag_value)
+                except (TypeError, ValueError):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Point layer '{point_layer_name}' has non-numeric width/drag_cd for bridge '{bridge_name}'.",
+                    )
+                    return
+                if not math.isfinite(width) or not math.isfinite(drag_cd):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Point layer '{point_layer_name}' has non-finite width/drag_cd for bridge '{bridge_name}'.",
+                    )
+                    return
+
+                for point in points:
+                    grouped_point_rows[bridge_name].append((float(point.x()), float(point.y()), width, drag_cd))
+
+            name_field = self._get_name_field(line_layer)
+            for line_feature in line_layer.getFeatures():
+                geometry = line_feature.geometry()
+                if not geometry or geometry.isEmpty():
+                    continue
+
+                polylines = self._extract_polylines(geometry)
+                if not polylines:
+                    continue
+
+                base_name = self._feature_name(line_feature, name_field)
+                for part_idx, polyline in enumerate(polylines):
+                    if len(polyline) < 2:
+                        continue
+                    bridge_name = base_name if len(polylines) == 1 else f"{base_name}_{part_idx + 1}"
+
+                    point_rows = grouped_point_rows.get(bridge_name)
+                    if point_rows is None:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"No bridge points found for '{bridge_name}' in layer '{point_layer_name}'.",
+                        )
+                        return
+
+                    if len(point_rows) != len(polyline):
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"Bridge '{bridge_name}' has {len(polyline)} vertices but {len(point_rows)} point rows in '{point_layer_name}'.",
+                        )
+                        return
+
+                    blocks.append((bridge_name, point_rows, grouped_order.get(bridge_name, 0)))
+
+        if not blocks:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid bridge features were exported.",
+            )
+            return
+
+        with open(output_path, "w", encoding="utf-8") as handle:
+            for bridge_name, rows, _ in blocks:
+                handle.write(f"{bridge_name}\n")
+                handle.write(f"{len(rows)} 4\n")
+                for x_coord, y_coord, width, drag_cd in rows:
+                    handle.write(f"{x_coord:.6f} {y_coord:.6f} {width:.6f} {drag_cd:.6f}\n")
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Exported {len(blocks)} bridge block(s) to {os.path.basename(output_path)}",
         )
 
     def export_point_cloud_xyn(self):
@@ -3414,6 +3774,111 @@ class Delft3DFileManager:
                 return
 
         self._create_trachytopes_layer(layer_name, edge_x, edge_y, epsg)
+
+    def create_bridge_points_from_polyline(self):
+        """Create a bridge point layer from vertices of the active polyline layer."""
+        line_layer = self.iface.activeLayer()
+        if line_layer is None or line_layer.type() != QgsMapLayerType.VectorLayer:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Select a polyline layer as active layer first.",
+            )
+            return
+
+        if line_layer.geometryType() != QgsWkbTypes.LineGeometry:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Active layer must be a polyline layer.",
+            )
+            return
+
+        width, ok = QInputDialog.getDouble(
+            self.iface.mainWindow(),
+            "Bridge Width",
+            "Default width value for all bridge points:",
+            value=2.5,
+            min=-1e12,
+            max=1e12,
+            decimals=6,
+        )
+        if not ok:
+            return
+
+        drag_cd, ok = QInputDialog.getDouble(
+            self.iface.mainWindow(),
+            "Bridge Drag Coefficient",
+            "Default drag_cd value for all bridge points:",
+            value=1.0,
+            min=-1e12,
+            max=1e12,
+            decimals=6,
+        )
+        if not ok:
+            return
+
+        crs_authid = "EPSG:28992"
+        try:
+            layer_crs = line_layer.crs()
+            if layer_crs is not None and layer_crs.isValid():
+                authid = layer_crs.authid()
+                if authid:
+                    crs_authid = authid
+        except Exception:
+            pass
+
+        output_name = f"{line_layer.name()}_points"
+        point_layer = QgsVectorLayer(f"Point?crs={crs_authid}", output_name, "memory")
+        provider = point_layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("bridge_name", QVariant.String),
+                QgsField("width", QVariant.Double),
+                QgsField("drag_cd", QVariant.Double),
+            ]
+        )
+        point_layer.updateFields()
+
+        name_field = self._get_name_field(line_layer)
+        features = []
+
+        for feature in line_layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry or geometry.isEmpty():
+                continue
+
+            polylines = self._extract_polylines(geometry)
+            if not polylines:
+                continue
+
+            base_name = self._feature_name(feature, name_field)
+            for part_index, polyline in enumerate(polylines):
+                if not polyline:
+                    continue
+                bridge_name = base_name if len(polylines) == 1 else f"{base_name}_{part_index + 1}"
+                for point in polyline:
+                    feat = QgsFeature(point_layer.fields())
+                    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(point.x()), float(point.y()))))
+                    feat.setAttributes([bridge_name, float(width), float(drag_cd)])
+                    features.append(feat)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid vertices were found in the active polyline layer.",
+            )
+            return
+
+        provider.addFeatures(features)
+        point_layer.updateExtents()
+        QgsProject.instance().addMapLayer(point_layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Created bridge points layer '{output_name}' with {len(features)} point(s)",
+        )
 
     def _read_mesh_edge_coordinates(self, mesh_path):
         """Read mesh edge coordinate arrays and return (x, y, epsg)."""

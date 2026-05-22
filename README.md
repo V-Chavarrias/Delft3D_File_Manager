@@ -22,7 +22,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 ### Supported File Extensions
 - **`.fxw`** — Fixed weir file (creates line + point layers)
 - **`.pli`, `.ldb`, `.pol`** — Polyline files (creates line layer)
-- **`.pliz`** — Auto-detected as polyline or fixed weir based on header column count
+- **`.pliz`** — Auto-detected as polyline, bridge, or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
 - **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
@@ -73,8 +73,29 @@ Each polyline block is read in this structure:
 ### `.pliz` Detection Rule
 
 When loading a `.pliz` file, the plugin reads the block header line and checks the declared number of columns:
-- If the header column count is greater than `2`, the file is loaded as a fixed weir.
 - If the header column count is `2`, the file is loaded as a polyline.
+- If the header column count is `4`, the file is loaded as a bridge file.
+- If the header column count is `9`, the file is loaded as a fixed weir.
+- Other column counts are rejected with a warning.
+
+### Import: Bridge (`.pliz` with 4 columns)
+
+Parse a bridge file into:
+- a line layer with one polyline per bridge block
+- a companion point layer with one point per bridge vertex
+
+#### Expected Input Format
+Each bridge block is read in this structure:
+1. Bridge name line
+2. Header line: `<number_of_rows> 4`
+3. One row per bridge vertex with:
+	 - `x y width drag_cd`
+
+#### Output Layers
+- `<file_name>` (LineString, EPSG:28992)
+	- field: `bridge_name`
+- `<file_name>_points` (Point, EPSG:28992)
+	- fields: `bridge_name`, `width`, `drag_cd`
 
 ### Import: Point (`.xyn`)
 
@@ -284,6 +305,12 @@ Use the main `Export` action to export the active layer to the appropriate Delft
 - Active point layer with the fixed-weir fields: exported to `.pliz`.
 - Other point layers: use `Export Point Cloud (.xyn)` instead.
 
+When multiple line layers are selected in the QGIS layer tree, `Export` writes a combined bridge `.pliz` file using the selected line layers.
+For each selected line layer `<layer_name>`, a matching point layer named `<layer_name>_points` must exist with fields:
+- `bridge_name`
+- `width`
+- `drag_cd`
+
 ### Export: Polyline
 
 ### Input Requirements
@@ -455,6 +482,27 @@ Export rules:
 3. Assign non-zero trachytope values (manually or with polygons).
 4. Open `Export Trachytopes (.arl)`.
 5. Save the ASCII `.arl` output file.
+
+## Bridge Points From Polyline
+
+Create a companion bridge point layer from vertices of the active polyline layer.
+This is useful before exporting bridge `.pliz` files that require per-vertex `width` and `drag_cd` values.
+
+### Menu Action
+- `Create Bridge Points from Polyline`
+
+### Behavior
+1. Set a polyline layer as active.
+2. Run `Create Bridge Points from Polyline`.
+3. Enter default values for:
+	- `width`
+	- `drag_cd`
+4. The plugin creates `<active_layer_name>_points` with one point per vertex and fields:
+	- `bridge_name`
+	- `width`
+	- `drag_cd`
+
+All created points receive the entered default values, which you can edit later per point.
 
 ## Installation
 1. Download the latest release ZIP from [Releases](../../releases).
