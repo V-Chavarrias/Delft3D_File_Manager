@@ -2,9 +2,16 @@
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QInputDialog,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
+    QVBoxLayout,
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
@@ -13,9 +20,11 @@ from qgis.core import (
 )
 from PyQt5.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
 from datetime import datetime, timedelta
+import itertools
 import importlib
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1699,6 +1708,61 @@ class Delft3DFileManager:
         name = str(name).strip()
         return name if name.endswith(":") else f"{name}:"
 
+    def _set_status_message(self, message):
+        """Show an import status message when a QGIS status bar is available."""
+        try:
+            self.iface.statusBarIface().showMessage(str(message))
+            QApplication.processEvents()
+        except Exception:
+            # Keep import flow resilient in test/mocked environments.
+            pass
+
+    def _clear_status_message(self):
+        """Clear status message when supported by the QGIS interface."""
+        try:
+            self.iface.statusBarIface().clearMessage()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _create_progress_dialog(self, title):
+        """Create and show a progress dialog for long-running netCDF imports."""
+        try:
+            dialog = QProgressDialog("Initializing...", None, 0, 100, self.iface.mainWindow())
+            dialog.setWindowTitle(title)
+            dialog.setAutoClose(True)
+            dialog.setAutoReset(False)
+            dialog.setMinimumDuration(0)
+            dialog.setWindowModality(Qt.WindowModal)
+            dialog.setValue(0)
+            dialog.show()
+            QApplication.processEvents()
+            return dialog
+        except Exception:
+            return None
+
+    def _update_progress_dialog(self, dialog, value, text=None):
+        """Update progress dialog value and optional label text."""
+        if dialog is None:
+            return
+        try:
+            dialog.setValue(max(0, min(100, int(value))))
+            if text:
+                dialog.setLabelText(str(text))
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _close_progress_dialog(self, dialog):
+        """Close the import progress dialog when available."""
+        if dialog is None:
+            return
+        try:
+            dialog.close()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
     def load_ugrid_mesh_file(self, filepath):
         """Load UGRID netCDF mesh file with 1D/2D components."""
         try:
@@ -1712,18 +1776,29 @@ class Delft3DFileManager:
             return
 
         base_name = os.path.splitext(os.path.basename(filepath))[0]
+        loaded_layers = []
+        mesh2d_source_path = filepath
+        progress_dialog = self._create_progress_dialog(f"Loading {base_name}")
 
         try:
+            self._update_progress_dialog(progress_dialog, 5, "Opening netCDF file")
+            self._set_status_message(f"Loading {os.path.basename(filepath)}")
             with nc.Dataset(filepath, 'r') as ds:
                 # Read CRS
+                self._update_progress_dialog(progress_dialog, 15, "Reading CRS and topology")
+                self._set_status_message("Reading CRS and topology")
                 epsg = self._read_epsg_from_nc(ds)
                 if epsg is None:
                     epsg = 28992  # Default fallback
 
                 # Detect components
-                has_mesh2d = self._detect_mesh2d_exists(ds)
+                mesh2d_topology_names = self._find_mesh2d_topology_names(ds)
+                has_mesh2d = bool(mesh2d_topology_names)
                 mesh1d_data = self._read_mesh1d_data(ds) if self._detect_mesh1d_exists(ds) else None
                 geom_data = self._read_geometry_data(ds) if self._detect_geometry_exists(ds) else None
+                self._update_progress_dialog(progress_dialog, 25, "Analyzing netCDF variables")
+                self._set_status_message("Analyzing netCDF variables")
+                variable_analysis = self._analyze_ugrid_data_variables(ds)
 
                 if not has_mesh2d and mesh1d_data is None and geom_data is None:
                     QMessageBox.warning(
@@ -1731,70 +1806,17 @@ class Delft3DFileManager:
                         "Delft3D File Manager",
                         f"No mesh2d, mesh1d, or geometry components found in {os.path.basename(filepath)}"
                     )
+                    self._close_progress_dialog(progress_dialog)
+                    self._clear_status_message()
                     return
 
                 # Prompt for layer names
+                self._update_progress_dialog(progress_dialog, 35, "Preparing layer names")
                 layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data)
                 if layer_names is None:
+                    self._close_progress_dialog(progress_dialog)
+                    self._clear_status_message()
                     return
-
-                loaded_layers = []
-
-                # Load mesh2d
-                if has_mesh2d:
-                    try:
-                        self._load_mesh2d_layer(filepath, base_name, epsg, layer_names["mesh2d"])
-                        loaded_layers.append("mesh2d")
-                    except Exception as exc:
-                        self.iface.messageBar().pushWarning(
-                            "Delft3D File Manager",
-                            f"Could not load mesh2d: {exc}"
-                        )
-
-                # Load mesh1d branches
-                if mesh1d_data:
-                    try:
-                        self._load_mesh1d_branches_layer(
-                            mesh1d_data["node_x"], mesh1d_data["node_y"],
-                            mesh1d_data["edges"], mesh1d_data["edge_branch"],
-                            mesh1d_data["branch_names"],
-                            epsg, layer_names["mesh1d_branches"]
-                        )
-                        loaded_layers.append("mesh1d_branches")
-                    except Exception as exc:
-                        self.iface.messageBar().pushWarning(
-                            "Delft3D File Manager",
-                            f"Could not load mesh1d branches: {exc}"
-                        )
-
-                # Load geometry edges
-                if geom_data:
-                    try:
-                        self._load_geometry_edges_layer(
-                            geom_data["geom_node_x"], geom_data["geom_node_y"],
-                            geom_data["geom_node_count"], geom_data["edge_names"],
-                            epsg, layer_names["geometry_edges"]
-                        )
-                        loaded_layers.append("geometry_edges")
-                    except Exception as exc:
-                        self.iface.messageBar().pushWarning(
-                            "Delft3D File Manager",
-                            f"Could not load geometry edges: {exc}"
-                        )
-
-                    # Load geometry nodes
-                    try:
-                        self._load_geometry_nodes_layer(
-                            geom_data["node_x"], geom_data["node_y"],
-                            geom_data["node_names"],
-                            epsg, layer_names["geometry_nodes"]
-                        )
-                        loaded_layers.append("geometry_nodes")
-                    except Exception as exc:
-                        self.iface.messageBar().pushWarning(
-                            "Delft3D File Manager",
-                            f"Could not load geometry nodes: {exc}"
-                        )
 
         except Exception as exc:
             QMessageBox.critical(
@@ -1802,13 +1824,133 @@ class Delft3DFileManager:
                 "Delft3D File Manager",
                 f"Error loading mesh file: {exc}"
             )
+            self._close_progress_dialog(progress_dialog)
+            self._clear_status_message()
             return
 
+        if has_mesh2d and variable_analysis["has_morphodynamic"]:
+            self._update_progress_dialog(progress_dialog, 40, "Select variables to flatten")
+            self._set_status_message("Select morphodynamic variables")
+            selected_variables = self._prompt_for_morphodynamic_variables(
+                variable_analysis["candidate_names"],
+                default_selected=variable_analysis.get("default_selected"),
+            )
+            if selected_variables is None:
+                self._close_progress_dialog(progress_dialog)
+                self._clear_status_message()
+                return
+
+            if selected_variables:
+                try:
+                    base_progress = 45
+                    flatten_span = 20
+                    self._set_status_message("Flattening selected variables")
+                    progress_step = max(1, len(selected_variables) // 20)
+
+                    def _flatten_progress(done, total, label=None):
+                        if total <= 0:
+                            return
+                        fraction = min(1.0, max(0.0, float(done) / float(total)))
+                        progress_value = base_progress + int(flatten_span * fraction)
+                        progress_text = f"Flattening variables {done}/{total}"
+                        self._update_progress_dialog(progress_dialog, progress_value, progress_text)
+                        if done < total and (done % progress_step) != 0:
+                            return
+                        suffix = f": {label}" if label else ""
+                        self._set_status_message(f"Flattening variables {done}/{total}{suffix}")
+
+                    mesh2d_source_path = self._prepare_flattened_ugrid_sidecar(
+                        filepath,
+                        selected_variables,
+                        progress_callback=_flatten_progress,
+                    )
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not flatten morphodynamic variables, loading original mesh: {exc}"
+                    )
+        else:
+            self._update_progress_dialog(progress_dialog, 65, "Loading mesh layers")
+
+        # Load mesh2d
+        if has_mesh2d:
+            try:
+                self._update_progress_dialog(progress_dialog, 75, "Loading mesh2d layer")
+                self._set_status_message("Loading mesh2d layer")
+                self._load_mesh2d_layer(
+                    mesh2d_source_path,
+                    base_name,
+                    epsg,
+                    layer_names["mesh2d"],
+                    topology_names=mesh2d_topology_names,
+                    expect_data_variables=bool(variable_analysis["candidate_names"]),
+                )
+                loaded_layers.append("mesh2d")
+            except Exception as exc:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load mesh2d: {exc}"
+                )
+
+        # Load mesh1d branches
+        if mesh1d_data:
+            try:
+                self._update_progress_dialog(progress_dialog, 85, "Loading mesh1d branches")
+                self._set_status_message("Loading mesh1d branches")
+                self._load_mesh1d_branches_layer(
+                    mesh1d_data["node_x"], mesh1d_data["node_y"],
+                    mesh1d_data["edges"], mesh1d_data["edge_branch"],
+                    mesh1d_data["branch_names"],
+                    epsg, layer_names["mesh1d_branches"]
+                )
+                loaded_layers.append("mesh1d_branches")
+            except Exception as exc:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load mesh1d branches: {exc}"
+                )
+
+        # Load geometry edges
+        if geom_data:
+            try:
+                self._update_progress_dialog(progress_dialog, 92, "Loading geometry edges")
+                self._set_status_message("Loading geometry edges")
+                self._load_geometry_edges_layer(
+                    geom_data["geom_node_x"], geom_data["geom_node_y"],
+                    geom_data["geom_node_count"], geom_data["edge_names"],
+                    epsg, layer_names["geometry_edges"]
+                )
+                loaded_layers.append("geometry_edges")
+            except Exception as exc:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load geometry edges: {exc}"
+                )
+
+            # Load geometry nodes
+            try:
+                self._update_progress_dialog(progress_dialog, 97, "Loading geometry nodes")
+                self._set_status_message("Loading geometry nodes")
+                self._load_geometry_nodes_layer(
+                    geom_data["node_x"], geom_data["node_y"],
+                    geom_data["node_names"],
+                    epsg, layer_names["geometry_nodes"]
+                )
+                loaded_layers.append("geometry_nodes")
+            except Exception as exc:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"Could not load geometry nodes: {exc}"
+                )
+
         if loaded_layers:
+            self._update_progress_dialog(progress_dialog, 100, "Import complete")
             self.iface.messageBar().pushSuccess(
                 "Delft3D File Manager",
                 f"Loaded {', '.join(loaded_layers)} from {os.path.basename(filepath)}"
             )
+        self._close_progress_dialog(progress_dialog)
+        self._clear_status_message()
 
     def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data):
         """Prompt user for layer names."""
@@ -1829,15 +1971,557 @@ class Delft3DFileManager:
 
     def _detect_mesh2d_exists(self, nc_dataset):
         """Check if mesh2d topology exists in dataset."""
-        return "Mesh2d_node_x" in nc_dataset.variables and "Mesh2d_node_y" in nc_dataset.variables
+        return bool(self._find_mesh2d_topology_names(nc_dataset))
+
+    def _find_mesh2d_topology_names(self, nc_dataset):
+        """Return candidate 2D mesh topology variable names in preferred order."""
+        names = []
+
+        for variable_name, variable in nc_dataset.variables.items():
+            try:
+                cf_role = str(getattr(variable, "cf_role", "")).strip().lower()
+                topology_dimension = int(getattr(variable, "topology_dimension", -1))
+                if cf_role == "mesh_topology" and topology_dimension == 2:
+                    names.append(variable_name)
+            except Exception:
+                continue
+
+        for fallback_name in ("Mesh2d", "mesh2d"):
+            found_name = self._find_variable_name(nc_dataset, fallback_name)
+            if found_name is not None:
+                names.append(found_name)
+
+        unique_names = []
+        for name in names:
+            if name not in unique_names:
+                unique_names.append(name)
+        return unique_names
 
     def _detect_mesh1d_exists(self, nc_dataset):
         """Check if mesh1d topology exists in dataset."""
-        return "mesh1d_node_x" in nc_dataset.variables and "mesh1d_node_y" in nc_dataset.variables
+        return self._find_variable_name(nc_dataset, "mesh1d_node_x") is not None and self._find_variable_name(nc_dataset, "mesh1d_node_y") is not None
 
     def _detect_geometry_exists(self, nc_dataset):
         """Check if network geometry exists in dataset."""
-        return "network_geom_x" in nc_dataset.variables and "network_geom_y" in nc_dataset.variables
+        return self._find_variable_name(nc_dataset, "network_geom_x") is not None and self._find_variable_name(nc_dataset, "network_geom_y") is not None
+
+    def _find_variable_name(self, nc_dataset, expected_name):
+        """Return actual variable name for a case-insensitive lookup, or None."""
+        if expected_name in nc_dataset.variables:
+            return expected_name
+
+        expected_lower = expected_name.lower()
+        for name in nc_dataset.variables.keys():
+            if name.lower() == expected_lower:
+                return name
+        return None
+
+    def _analyze_ugrid_data_variables(self, nc_dataset):
+        """Return selectable data variables and whether any require flattening."""
+        candidate_names = []
+        default_selected = []
+        has_morphodynamic = False
+
+        for name, variable in nc_dataset.variables.items():
+            if self._is_topology_or_metadata_variable(name, variable):
+                continue
+            if not self._is_numeric_netcdf_variable(variable):
+                continue
+
+            candidate_names.append(name)
+            if self._variable_has_extra_dimensions(variable.dimensions):
+                has_morphodynamic = True
+                default_selected.append(name)
+
+        return {
+            "candidate_names": sorted(candidate_names),
+            "default_selected": sorted(default_selected),
+            "has_morphodynamic": has_morphodynamic,
+        }
+
+    def _is_topology_or_metadata_variable(self, name, variable):
+        """Return True when the variable belongs to topology, geometry, or metadata."""
+        name_lower = name.lower()
+        topology_exact_names = {
+            "time",
+            "timestep",
+            "projected_coordinate_system",
+            "wgs84",
+            "crs",
+            "mesh2d",
+            "mesh1d",
+        }
+
+        topology_suffixes = (
+            "_node_x",
+            "_node_y",
+            "_node_z",
+            "_edge_x",
+            "_edge_y",
+            "_face_x",
+            "_face_y",
+            "_face_x_bnd",
+            "_face_y_bnd",
+            "_edge_nodes",
+            "_face_nodes",
+            "_edge_faces",
+            "_edge_type",
+            "_flowelem_domain",
+            "_flowelem_globalnr",
+        )
+
+        if name_lower in topology_exact_names:
+            return True
+
+        if name_lower.startswith("network_"):
+            return True
+
+        if name_lower.endswith(topology_suffixes):
+            return True
+
+        try:
+            cf_role = str(getattr(variable, "cf_role", "")).strip().lower()
+            if cf_role == "mesh_topology":
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _is_numeric_netcdf_variable(self, variable):
+        """Return True if a netCDF variable stores numeric values."""
+        import numpy as np
+
+        try:
+            dtype = np.dtype(variable.dtype)
+        except Exception:
+            return False
+        return dtype.kind in ("i", "u", "f")
+
+    def _is_time_dimension(self, dim_name):
+        """Return True if the dimension appears to represent time."""
+        value = str(dim_name).strip().lower()
+        if value in ("time", "times", "ntime", "ntimes", "timestep", "timesteps"):
+            return True
+        return "time" in value
+
+    def _is_space_dimension(self, dim_name):
+        """Return True if the dimension appears to represent mesh space."""
+        value = str(dim_name).strip().lower()
+        tokens = (
+            "mesh2d_n",
+            "mesh1d_n",
+            "mesh2d_face",
+            "mesh2d_node",
+            "mesh2d_edge",
+            "mesh1d_face",
+            "mesh1d_node",
+            "mesh1d_edge",
+            "network_node",
+            "network_geom",
+            "nmesh2d",
+            "nmesh1d",
+            "nnetwork",
+        )
+        return any(token in value for token in tokens)
+
+    def _variable_extra_dimensions(self, dimensions):
+        """Return dimensions that are not recognized as time or space dimensions."""
+        extras = []
+        for dim_name in dimensions:
+            if self._is_time_dimension(dim_name) or self._is_space_dimension(dim_name):
+                continue
+            extras.append(dim_name)
+        return extras
+
+    def _variable_has_extra_dimensions(self, dimensions):
+        """Return True when a variable has dimensions beyond time/space."""
+        return bool(self._variable_extra_dimensions(dimensions))
+
+    def _prompt_for_morphodynamic_variables(self, candidate_names, default_selected=None):
+        """Prompt user to choose which data variables to include in the flattened file."""
+        if not candidate_names:
+            return []
+
+        default_set = set(default_selected or [])
+
+        dialog = QDialog(self.iface.mainWindow())
+        dialog.setWindowTitle("Select NetCDF Variables")
+        dialog.resize(520, 480)
+
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select data variables to include in the flattened file:"))
+
+        list_widget = QListWidget(dialog)
+        for name in candidate_names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if name in default_set:
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        select_all_button = buttons.addButton("Select all", QDialogButtonBox.ActionRole)
+        unselect_all_button = buttons.addButton("Unselect all", QDialogButtonBox.ActionRole)
+
+        def _set_all_checks(state):
+            for row in range(list_widget.count()):
+                list_widget.item(row).setCheckState(state)
+
+        select_all_button.clicked.connect(lambda: _set_all_checks(Qt.Checked))
+        unselect_all_button.clicked.connect(lambda: _set_all_checks(Qt.Unchecked))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+
+        selected = []
+        for row in range(list_widget.count()):
+            item = list_widget.item(row)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.text())
+
+        return selected
+
+    def _sidecar_flattened_path(self, source_path):
+        """Return deterministic sidecar path for flattened datasets."""
+        base, ext = os.path.splitext(source_path)
+        return f"{base}_qgis_flat{ext}"
+
+    def _prepare_flattened_ugrid_sidecar(self, source_path, selected_variables, progress_callback=None):
+        """Create or reuse a sidecar netCDF with selected variables flattened to time/space."""
+        import netCDF4 as nc
+        import numpy as np
+
+        source_path = os.path.abspath(source_path)
+        sidecar_path = os.path.abspath(self._sidecar_flattened_path(source_path))
+        source_mtime = str(int(os.path.getmtime(source_path)))
+        signature = "v3|" + "|".join(sorted(selected_variables))
+
+        if os.path.exists(sidecar_path):
+            try:
+                with nc.Dataset(sidecar_path, "r") as sidecar_ds:
+                    sidecar_signature = str(getattr(sidecar_ds, "qgis_flatten_signature", ""))
+                    sidecar_mtime = str(getattr(sidecar_ds, "qgis_flatten_source_mtime", ""))
+                    if sidecar_signature == signature and sidecar_mtime == source_mtime:
+                        if progress_callback is not None:
+                            progress_callback(len(selected_variables), len(selected_variables), "reuse")
+                        return sidecar_path
+            except Exception:
+                pass
+
+        with nc.Dataset(source_path, "r") as source_ds, nc.Dataset(sidecar_path, "w", format="NETCDF4") as sidecar_ds:
+            for attr_name in source_ds.ncattrs():
+                sidecar_ds.setncattr(attr_name, getattr(source_ds, attr_name))
+
+            created_dims = set()
+
+            def _ensure_dimensions(dimensions):
+                for dim_name in dimensions:
+                    if dim_name in created_dims:
+                        continue
+                    src_dim = source_ds.dimensions[dim_name]
+                    if src_dim.isunlimited():
+                        sidecar_ds.createDimension(dim_name, None)
+                    else:
+                        sidecar_ds.createDimension(dim_name, len(src_dim))
+                    created_dims.add(dim_name)
+
+            def _copy_variable(src_name, dst_name=None):
+                dst_name = dst_name or src_name
+                if dst_name in sidecar_ds.variables or src_name not in source_ds.variables:
+                    return
+
+                src_var = source_ds.variables[src_name]
+                _ensure_dimensions(src_var.dimensions)
+
+                fill_value = getattr(src_var, "_FillValue", None)
+                if fill_value is None:
+                    dst_var = sidecar_ds.createVariable(dst_name, src_var.datatype, src_var.dimensions)
+                else:
+                    dst_var = sidecar_ds.createVariable(
+                        dst_name,
+                        src_var.datatype,
+                        src_var.dimensions,
+                        fill_value=fill_value,
+                    )
+
+                for attr_name in src_var.ncattrs():
+                    if attr_name == "_FillValue":
+                        continue
+                    dst_var.setncattr(attr_name, getattr(src_var, attr_name))
+
+                dst_var[:] = src_var[:]
+
+            def _referenced_variable_tokens(variable):
+                """Return variable names referenced by standard UGRID metadata attributes."""
+                tokens = set()
+                for attr_name in (
+                    "grid_mapping",
+                    "mesh",
+                    "coordinates",
+                    "node_coordinates",
+                    "edge_coordinates",
+                    "face_coordinates",
+                    "face_node_connectivity",
+                    "edge_node_connectivity",
+                    "edge_face_connectivity",
+                    "node_dimension",
+                    "edge_dimension",
+                    "face_dimension",
+                    "time",
+                ):
+                    attr_value = getattr(variable, attr_name, None)
+                    if not attr_value:
+                        continue
+
+                    for token in re.split(r"[\s,;]+", str(attr_value).strip()):
+                        token = token.strip()
+                        if token and token in source_ds.variables:
+                            tokens.add(token)
+                return tokens
+
+            required_variable_names = set()
+            for var_name, src_var in source_ds.variables.items():
+                if self._is_topology_or_metadata_variable(var_name, src_var):
+                    required_variable_names.add(var_name)
+                    continue
+
+                try:
+                    cf_role = str(getattr(src_var, "cf_role", "")).strip().lower()
+                    if cf_role in (
+                        "mesh_topology",
+                        "edge_node_connectivity",
+                        "face_node_connectivity",
+                        "edge_face_connectivity",
+                    ):
+                        required_variable_names.add(var_name)
+                except Exception:
+                    pass
+
+            for selected_name in selected_variables:
+                selected_var = source_ds.variables.get(selected_name)
+                if selected_var is None:
+                    continue
+
+                required_variable_names.update(_referenced_variable_tokens(selected_var))
+
+                for dim_name in selected_var.dimensions:
+                    if dim_name in source_ds.variables:
+                        required_variable_names.add(dim_name)
+
+            pending = list(required_variable_names)
+            while pending:
+                current_name = pending.pop()
+                current_var = source_ds.variables.get(current_name)
+                if current_var is None:
+                    continue
+
+                for referenced_name in _referenced_variable_tokens(current_var):
+                    if referenced_name not in required_variable_names:
+                        required_variable_names.add(referenced_name)
+                        pending.append(referenced_name)
+
+                for dim_name in current_var.dimensions:
+                    if dim_name in source_ds.variables and dim_name not in required_variable_names:
+                        required_variable_names.add(dim_name)
+                        pending.append(dim_name)
+
+            spatial_dimensions = {
+                dim_name
+                for dim_name in source_ds.dimensions.keys()
+                if self._is_space_dimension(dim_name)
+            }
+            for required_name in required_variable_names:
+                required_var = source_ds.variables.get(required_name)
+                if required_var is None:
+                    continue
+                for dim_name in required_var.dimensions:
+                    if not self._is_time_dimension(dim_name):
+                        spatial_dimensions.add(dim_name)
+
+            for required_name in sorted(required_variable_names):
+                _copy_variable(required_name)
+
+            generated_names = []
+            used_names = set(sidecar_ds.variables.keys())
+
+            total_variables = len(selected_variables)
+            for variable_index, variable_name in enumerate(selected_variables, start=1):
+                if progress_callback is not None:
+                    progress_callback(variable_index, total_variables, variable_name)
+
+                if variable_name not in source_ds.variables:
+                    continue
+
+                variable = source_ds.variables[variable_name]
+                if not self._is_numeric_netcdf_variable(variable):
+                    continue
+
+                extra_dims = [
+                    dim_name
+                    for dim_name in variable.dimensions
+                    if not self._is_time_dimension(dim_name) and dim_name not in spatial_dimensions
+                ]
+                if not extra_dims:
+                    _copy_variable(variable_name)
+                    continue
+
+                keep_dims = tuple(dim for dim in variable.dimensions if dim not in extra_dims)
+                if len(keep_dims) > 2:
+                    continue
+
+                labels_by_dim = {
+                    dim_name: self._dimension_labels(source_ds, dim_name)
+                    for dim_name in extra_dims
+                }
+                dim_positions = {dim_name: idx for idx, dim_name in enumerate(variable.dimensions)}
+
+                data = variable[:]
+                if isinstance(data, np.ma.MaskedArray):
+                    fill_value = getattr(variable, "_FillValue", np.nan)
+                    data = data.filled(fill_value)
+
+                index_ranges = [range(len(labels_by_dim[dim_name])) for dim_name in extra_dims]
+                for dim_indices in itertools.product(*index_ranges):
+                    index_slices = [slice(None)] * len(variable.dimensions)
+                    label_parts = []
+
+                    for dim_name, index_value in zip(extra_dims, dim_indices):
+                        index_slices[dim_positions[dim_name]] = index_value
+                        label_token = self._sanitize_netcdf_token(
+                            labels_by_dim[dim_name][index_value],
+                            fallback=f"{dim_name}_{index_value + 1}"
+                        )
+                        label_parts.append(label_token)
+
+                    flattened_name = self._build_flattened_variable_name(variable_name, label_parts, used_names)
+                    fill_value = getattr(variable, "_FillValue", None)
+                    _ensure_dimensions(keep_dims)
+                    if fill_value is None:
+                        out_var = sidecar_ds.createVariable(
+                            flattened_name,
+                            variable.datatype,
+                            keep_dims,
+                        )
+                    else:
+                        out_var = sidecar_ds.createVariable(
+                            flattened_name,
+                            variable.datatype,
+                            keep_dims,
+                            fill_value=fill_value,
+                        )
+
+                    for attr_name in variable.ncattrs():
+                        if attr_name == "_FillValue":
+                            continue
+                        attr_value = getattr(variable, attr_name)
+                        if attr_name in ("long_name", "standard_name"):
+                            attr_value = f"{attr_value} ({', '.join(label_parts)})"
+                        out_var.setncattr(attr_name, attr_value)
+
+                    out_var[:] = data[tuple(index_slices)]
+                    generated_names.append(flattened_name)
+
+            for variable_name, variable in sidecar_ds.variables.items():
+                for referenced_name in _referenced_variable_tokens(variable):
+                    if referenced_name not in sidecar_ds.variables:
+                        raise RuntimeError(
+                            f"Invalid sidecar linkage: variable '{variable_name}' references "
+                            f"missing variable '{referenced_name}'."
+                        )
+
+            sidecar_ds.setncattr("qgis_flatten_signature", signature)
+            sidecar_ds.setncattr("qgis_flatten_source_mtime", source_mtime)
+            sidecar_ds.setncattr("qgis_flatten_generated", "|".join(generated_names))
+
+        if progress_callback is not None and selected_variables:
+            progress_callback(len(selected_variables), len(selected_variables), "done")
+
+        return sidecar_path
+
+    def _dimension_labels(self, nc_dataset, dim_name):
+        """Return preferred labels for a dimension, using coordinate variables when available."""
+        size = len(nc_dataset.dimensions[dim_name])
+
+        if dim_name in nc_dataset.variables:
+            labels = self._labels_from_variable(nc_dataset.variables[dim_name], size)
+            if labels:
+                return labels
+
+        for variable_name, variable in nc_dataset.variables.items():
+            if len(variable.dimensions) != 1 or variable.dimensions[0] != dim_name:
+                continue
+            if variable_name.lower() == dim_name.lower():
+                continue
+            labels = self._labels_from_variable(variable, size)
+            if labels:
+                return labels
+
+        return [str(index + 1) for index in range(size)]
+
+    def _labels_from_variable(self, variable, expected_size):
+        """Return string labels extracted from a 1D coordinate-like variable."""
+        import netCDF4 as nc
+        import numpy as np
+
+        try:
+            values = variable[:]
+        except Exception:
+            return None
+
+        if isinstance(values, np.ma.MaskedArray):
+            fill_value = b"" if values.dtype.kind == "S" else ""
+            values = values.filled(fill_value)
+
+        values_array = np.asarray(values)
+        if values_array.size != expected_size:
+            return None
+
+        if values_array.dtype.kind in ("S", "U") and values_array.ndim > 1:
+            values_array = nc.chartostring(values_array)
+
+        if values_array.dtype.kind not in ("S", "U", "i", "u", "f"):
+            return None
+
+        result = []
+        for value in np.asarray(values_array).tolist():
+            if isinstance(value, float):
+                if math.isfinite(value) and float(value).is_integer():
+                    value = int(value)
+            result.append(str(value).replace("\x00", "").strip())
+        return result
+
+    def _sanitize_netcdf_token(self, value, fallback):
+        """Normalize arbitrary values into safe netCDF variable-name tokens."""
+        token = re.sub(r"[^0-9A-Za-z_]+", "_", str(value or "").strip())
+        token = token.strip("_").lower()
+        if not token:
+            token = re.sub(r"[^0-9A-Za-z_]+", "_", str(fallback).strip()).strip("_").lower()
+        if token and token[0].isdigit():
+            token = f"v_{token}"
+        return token or "value"
+
+    def _build_flattened_variable_name(self, base_name, label_parts, used_names):
+        """Build a unique flattened variable name that preserves the original variable name."""
+        base_token = self._sanitize_netcdf_token(base_name, fallback="var")
+        label_token = "_".join(part for part in label_parts if part) or "flat"
+        candidate = f"{base_token}_{label_token}"
+        candidate = candidate[:180]
+
+        suffix = 2
+        unique_name = candidate
+        while unique_name in used_names:
+            unique_name = f"{candidate}_{suffix}"
+            suffix += 1
+
+        used_names.add(unique_name)
+        return unique_name
 
     def _has_nonempty_strings(self, values):
         """Return True when the sequence contains at least one non-empty string."""
@@ -1961,7 +2645,15 @@ class Delft3DFileManager:
 
         return [str(value).replace("\x00", "").strip() for value in values]
 
-    def _load_mesh2d_layer(self, filepath, base_name, epsg, layer_name):
+    def _load_mesh2d_layer(
+        self,
+        filepath,
+        base_name,
+        epsg,
+        layer_name,
+        topology_names=None,
+        expect_data_variables=False,
+    ):
         """Load 2D mesh as native QGIS mesh layer."""
         try:
             from qgis.core import QgsMeshLayer, QgsCoordinateReferenceSystem, QgsProject
@@ -1975,24 +2667,55 @@ class Delft3DFileManager:
         if not os.path.exists(filepath):
             raise RuntimeError(f"File does not exist: {filepath}")
 
+        def _dataset_group_count(layer):
+            try:
+                provider = layer.dataProvider()
+                if provider is not None and hasattr(provider, "datasetGroupCount"):
+                    return int(provider.datasetGroupCount())
+            except Exception:
+                pass
+
+            try:
+                if hasattr(layer, "datasetGroupCount"):
+                    return int(layer.datasetGroupCount())
+            except Exception:
+                pass
+
+            return None
+
         def _apply_crs_if_missing(layer):
             if layer is not None and layer.isValid() and not layer.crs().isValid():
                 crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
                 layer.setCrs(crs)
 
-        def _is_usable_2d_mesh(layer):
+        def _is_usable_2d_mesh(layer, require_datasets=False):
             if layer is None or not layer.isValid():
                 return False
+
+            has_geometry = False
             try:
                 if layer.meshFaceCount() > 0:
-                    return True
+                    has_geometry = True
             except Exception:
                 pass
-            try:
-                ext = layer.extent()
-                return ext is not None and not ext.isEmpty()
-            except Exception:
+
+            if not has_geometry:
+                try:
+                    ext = layer.extent()
+                    has_geometry = ext is not None and not ext.isEmpty()
+                except Exception:
+                    has_geometry = False
+
+            if not has_geometry:
                 return False
+
+            if not require_datasets:
+                return True
+
+            dataset_groups = _dataset_group_count(layer)
+            if dataset_groups is None:
+                return True
+            return dataset_groups > 0
 
         def _source_matches(layer_source, target_path):
             if not layer_source:
@@ -2006,31 +2729,39 @@ class Delft3DFileManager:
             except Exception:
                 return False
 
-        # In multi-topology UGRID files, explicitly target the 2D mesh only.
-        # MDAL URI format (from MDAL sources):
-        # - "meshfile":meshname
-        # - mdal:"meshfile":meshname
+        # Prefer native-like MDAL file loading first; then try explicit topology URIs.
         quoted_file = f'"{filepath}"'
-        mdal_mesh_uri = f'{quoted_file}:Mesh2d'
-        mdal_mesh_uri_lower = f'{quoted_file}:mesh2d'
-        mdal_driver_uri = f'mdal:{quoted_file}:Mesh2d'
-        mdal_driver_uri_lower = f'mdal:{quoted_file}:mesh2d'
+        ordered_topology_names = []
+        for topology_name in (topology_names or []):
+            if topology_name and topology_name not in ordered_topology_names:
+                ordered_topology_names.append(topology_name)
+        for fallback_name in ("Mesh2d", "mesh2d"):
+            if fallback_name not in ordered_topology_names:
+                ordered_topology_names.append(fallback_name)
 
-        uri_candidates = [
-            mdal_mesh_uri,
-            mdal_mesh_uri_lower,
-            mdal_driver_uri,
-            mdal_driver_uri_lower,
-            f"{filepath}|layername=Mesh2d",
-            f"{filepath}|layerName=Mesh2d",
-        ]
+        uri_candidates = [filepath, f"mdal:{filepath}", quoted_file, f"mdal:{quoted_file}"]
 
+        for topology_name in ordered_topology_names:
+            uri_candidates.extend(
+                [
+                    f'{quoted_file}:{topology_name}',
+                    f'mdal:{quoted_file}:{topology_name}',
+                    f"{filepath}|layername={topology_name}",
+                    f"{filepath}|layerName={topology_name}",
+                ]
+            )
+
+        unique_uris = []
         for uri in uri_candidates:
+            if uri not in unique_uris:
+                unique_uris.append(uri)
+
+        for uri in unique_uris:
             for provider in ("mdal", ""):
                 mesh_layer = QgsMeshLayer(uri, layer_name, provider)
                 if not mesh_layer.isValid():
                     continue
-                if _is_usable_2d_mesh(mesh_layer):
+                if _is_usable_2d_mesh(mesh_layer, require_datasets=expect_data_variables):
                     _apply_crs_if_missing(mesh_layer)
                     QgsProject.instance().addMapLayer(mesh_layer)
                     return
@@ -2038,14 +2769,18 @@ class Delft3DFileManager:
         # Avoid false-negative warning if a valid mesh from this same source is already loaded.
         for existing_layer in QgsProject.instance().mapLayers().values():
             if isinstance(existing_layer, QgsMeshLayer) and existing_layer.isValid():
-                if _source_matches(existing_layer.source(), filepath) and _is_usable_2d_mesh(existing_layer):
+                if _source_matches(existing_layer.source(), filepath) and _is_usable_2d_mesh(
+                    existing_layer,
+                    require_datasets=expect_data_variables,
+                ):
                     _apply_crs_if_missing(existing_layer)
                     return
 
         raise RuntimeError(
             f"Failed to load mesh from {filepath}. "
-            "Ensure the file is a valid UGRID mesh in netCDF format with faces. "
-            "Supported by QGIS MDAL provider (netCDF/HDF5 with UGRID topology). "
+            f"Tried topology names: {', '.join(ordered_topology_names)}. "
+            "Ensure the file is a valid UGRID mesh in netCDF format with mesh-linked datasets. "
+            "Use native QGIS mesh import with mesh topology + variable to compare behavior. "
             "Try opening directly in QGIS (File > Open Mesh) to verify."
         )
 
@@ -2760,18 +3495,27 @@ class Delft3DFileManager:
 
     def _read_epsg_from_nc(self, nc_dataset):
         """Try to read an EPSG code from variables in a NetCDF dataset."""
+        def _parse_epsg(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                code = int(value)
+                return code if code > 0 else None
+
+            text = str(value).strip()
+            matches = re.findall(r"\d+", text)
+            for match in reversed(matches):
+                code = int(match)
+                if code > 0:
+                    return code
+            return None
+
         for vname in nc_dataset.variables:
             variable = nc_dataset[vname]
             for attr_name in ("EPSG_code", "epsg", "EPSG"):
                 value = getattr(variable, attr_name, None)
-                if value is None:
-                    continue
-                text = str(value).upper().replace("EPSG:", "").strip()
-                try:
-                    code = int(text)
-                except ValueError:
-                    continue
-                if code > 0:
+                code = _parse_epsg(value)
+                if code is not None:
                     return code
         return None
 

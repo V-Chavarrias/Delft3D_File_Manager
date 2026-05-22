@@ -7,6 +7,7 @@ A QGIS plugin to manage Delft3D files.
 - Reads point-cloud `.xyn` files as point layers with optional generated names.
 - Reads `.xyz` point files as 2D point layers with a `z` attribute.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
+- Detects morphodynamic NetCDF variables with extra dimensions and flattens selected variables to QGIS-compatible time/space datasets.
 - Exports line features and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
@@ -118,6 +119,10 @@ All three columns must be numeric and whitespace-separated.
 Load UGRID-format NetCDF files containing 1D and/or 2D computational mesh components.
 The plugin automatically detects and creates separate layers for each component found.
 
+When a UGRID file contains morphodynamic variables with extra dimensions (for example sediment fraction or bed layer dimensions), the plugin prompts for which non-topology data variables to include. It then creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens extra dimensions into additional variables, and loads that flattened mesh file in QGIS.
+
+For large datasets, the plugin now shows a live progress bar (plus status text) during analysis, flattening, and layer loading.
+
 #### Supported Components
 
 **2D Mesh (mesh2d)**
@@ -148,6 +153,8 @@ When loading a mesh file, the following layers are created (if components exist)
 - `<file_name>_mesh1d_branches` (LineString layer, with `name` field)
 - `<file_name>_geometry_edges` (LineString layer, with `name` field)
 - `<file_name>_geometry_nodes` (Point layer, with `name` field)
+
+Flattened morphodynamic variables are stored in the sidecar file as additional derived variables whose names include the original variable name and dimension labels/values when available.
 
 #### CRS Handling
 - The plugin attempts to read EPSG code from NetCDF metadata

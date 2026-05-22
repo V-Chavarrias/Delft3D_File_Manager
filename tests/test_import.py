@@ -1,5 +1,6 @@
 import sys
 import pathlib
+import shutil
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ XYZ_01 = DATA_DIR / "xyz_01.xyz"
 CSL_01 = DATA_DIR / "csl.ini"
 CSD_01 = DATA_DIR / "csd.ini"
 GRID_01 = DATA_DIR / "grd_net.nc"
+MORPHO_01 = DATA_DIR / "morpho_small.nc"
+MIXED_1D2D_01 = DATA_DIR / "mixed_1d2d_small.nc"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
@@ -110,6 +113,245 @@ def test_route_unknown(plugin):
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
         plugin.load_file_by_extension("/fake/file.abc")
     mock_mb.warning.assert_called_once()
+
+
+def test_load_ugrid_mesh_file_morphodynamic_flattens_selected_variables(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "morpho_small.nc"
+    shutil.copyfile(MORPHO_01, src_path)
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=["sedfrac"]) as prompt_mock, \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prompt_mock.assert_called_once()
+    load_mesh2d_mock.assert_called_once()
+
+    loaded_mesh_path = pathlib.Path(load_mesh2d_mock.call_args[0][0])
+    assert loaded_mesh_path.name == "morpho_small_qgis_flat.nc"
+    assert loaded_mesh_path.exists()
+
+    with netcdf4.Dataset(str(loaded_mesh_path), "r") as ds:
+        flattened = [name for name in ds.variables.keys() if name.startswith("sedfrac_")]
+        assert len(flattened) == 2
+        for variable_name in flattened:
+            assert len(ds.variables[variable_name].dimensions) <= 2
+
+
+def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "mixed_1d2d_small.nc"
+    shutil.copyfile(MIXED_1D2D_01, src_path)
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables") as prompt_mock, \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock, \
+         patch.object(plugin, "_load_mesh1d_branches_layer") as load_mesh1d_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prompt_mock.assert_not_called()
+    load_mesh2d_mock.assert_called_once()
+    load_mesh1d_mock.assert_called_once()
+
+    node_x = load_mesh1d_mock.call_args[0][0]
+    edges = load_mesh1d_mock.call_args[0][2]
+    assert len(node_x) == 4
+    assert len(edges) == 3
+
+
+def test_load_ugrid_mesh_file_updates_status_messages(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "morpho_small.nc"
+    shutil.copyfile(MORPHO_01, src_path)
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=["sedfrac"]), \
+         patch.object(plugin, "_load_mesh2d_layer"):
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    status_bar = plugin.iface.statusBarIface.return_value
+    assert status_bar.showMessage.call_count > 0
+    status_bar.clearMessage.assert_called()
+
+
+def test_load_ugrid_mesh_file_clears_status_on_cancel(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "morpho_small.nc"
+    shutil.copyfile(MORPHO_01, src_path)
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=None):
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    status_bar = plugin.iface.statusBarIface.return_value
+    status_bar.clearMessage.assert_called()
+
+
+def test_load_ugrid_mesh_file_detects_lowercase_mesh2d_topology(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "lowercase_mesh2d.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("mesh2d_nNodes", 3)
+        ds.createDimension("mesh2d_nFaces", 1)
+        ds.createDimension("nNodesPerFace", 3)
+        ds.createDimension("time", 1)
+        ds.createDimension("nSedTot", 2)
+
+        mesh2d = ds.createVariable("mesh2d", "i4")
+        mesh2d.cf_role = "mesh_topology"
+        mesh2d.topology_dimension = 2
+        mesh2d.node_coordinates = "mesh2d_node_x mesh2d_node_y"
+        mesh2d.face_node_connectivity = "mesh2d_face_nodes"
+
+        node_x = ds.createVariable("mesh2d_node_x", "f8", ("mesh2d_nNodes",))
+        node_y = ds.createVariable("mesh2d_node_y", "f8", ("mesh2d_nNodes",))
+        face_nodes = ds.createVariable("mesh2d_face_nodes", "i4", ("mesh2d_nFaces", "nNodesPerFace"))
+        sedfrac = ds.createVariable("mesh2d_frac", "f4", ("time", "mesh2d_nFaces", "nSedTot"))
+        crs = ds.createVariable("projected_coordinate_system", "i4")
+
+        node_x[:] = [0.0, 1.0, 0.0]
+        node_y[:] = [0.0, 0.0, 1.0]
+        face_nodes[:] = [[1, 2, 3]]
+        sedfrac[:] = [[[0.7, 0.3]]]
+        crs.EPSG_code = 28992
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=["mesh2d_frac"]) as prompt_mock, \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prompt_mock.assert_called_once()
+    load_mesh2d_mock.assert_called_once()
+
+    loaded_path = pathlib.Path(load_mesh2d_mock.call_args[0][0])
+    assert loaded_path.name.endswith("_qgis_flat.nc")
+
+
+def test_load_ugrid_mesh_file_preserves_referenced_topology_variables(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "referenced_topology.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("my_nodes", 3)
+        ds.createDimension("my_faces", 1)
+        ds.createDimension("nNodesPerFace", 3)
+        ds.createDimension("time", 1)
+        ds.createDimension("nSedTot", 2)
+
+        mesh2d = ds.createVariable("mesh2d", "i4")
+        mesh2d.cf_role = "mesh_topology"
+        mesh2d.topology_dimension = 2
+        mesh2d.node_coordinates = "my_node_x my_node_y"
+        mesh2d.face_coordinates = "my_face_x my_face_y"
+        mesh2d.face_node_connectivity = "my_face_nodes"
+
+        node_x = ds.createVariable("my_node_x", "f8", ("my_nodes",))
+        node_y = ds.createVariable("my_node_y", "f8", ("my_nodes",))
+        face_x = ds.createVariable("my_face_x", "f8", ("my_faces",))
+        face_y = ds.createVariable("my_face_y", "f8", ("my_faces",))
+        face_nodes = ds.createVariable("my_face_nodes", "i4", ("my_faces", "nNodesPerFace"))
+        sedfrac = ds.createVariable("my_sedfrac", "f4", ("time", "my_faces", "nSedTot"))
+
+        sedfrac.mesh = "mesh2d"
+        sedfrac.location = "face"
+        sedfrac.coordinates = "my_face_x my_face_y"
+
+        node_x[:] = [120000.0, 121000.0, 120500.0]
+        node_y[:] = [425000.0, 425000.0, 426000.0]
+        face_x[:] = [120500.0]
+        face_y[:] = [425333.0]
+        face_nodes[:] = [[1, 2, 3]]
+        sedfrac[:] = [[[0.7, 0.3]]]
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=["my_sedfrac"]), \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    loaded_path = pathlib.Path(load_mesh2d_mock.call_args[0][0])
+    with netcdf4.Dataset(str(loaded_path), "r") as ds:
+        assert "mesh2d" in ds.variables
+        assert "my_node_x" in ds.variables
+        assert "my_node_y" in ds.variables
+        assert "my_face_nodes" in ds.variables
+        flattened = [name for name in ds.variables if name.startswith("my_sedfrac_")]
+        assert len(flattened) == 2
+        first_flattened = ds.variables[flattened[0]]
+        assert getattr(first_flattened, "mesh", None) == "mesh2d"
+        assert getattr(first_flattened, "location", None) == "face"
+        assert "my_face_x" in str(getattr(first_flattened, "coordinates", ""))
+        assert float(ds.variables["my_node_x"][:].min()) > 100000.0
+        assert float(ds.variables["my_node_y"][:].min()) > 400000.0
+
+
+def test_find_mesh2d_topology_names_prefers_cf_role_mesh_topology(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "topology_names.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("mesh2d_nNodes", 3)
+        ds.createDimension("mesh2d_nFaces", 1)
+        ds.createDimension("nNodesPerFace", 3)
+
+        topo = ds.createVariable("my_mesh", "i4")
+        topo.cf_role = "mesh_topology"
+        topo.topology_dimension = 2
+        topo.node_coordinates = "mesh2d_node_x mesh2d_node_y"
+        topo.face_node_connectivity = "mesh2d_face_nodes"
+
+        node_x = ds.createVariable("mesh2d_node_x", "f8", ("mesh2d_nNodes",))
+        node_y = ds.createVariable("mesh2d_node_y", "f8", ("mesh2d_nNodes",))
+        face_nodes = ds.createVariable("mesh2d_face_nodes", "i4", ("mesh2d_nFaces", "nNodesPerFace"))
+
+        node_x[:] = [0.0, 1.0, 0.0]
+        node_y[:] = [0.0, 0.0, 1.0]
+        face_nodes[:] = [[1, 2, 3]]
+
+    with netcdf4.Dataset(str(src_path), "r") as ds:
+        topology_names = plugin._find_mesh2d_topology_names(ds)
+
+    assert topology_names[0] == "my_mesh"
+    assert topology_names == ["my_mesh"]
+
+
+def test_load_ugrid_mesh_file_passes_topology_names_to_loader(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "topology_passthrough.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("my_nodes", 3)
+        ds.createDimension("my_faces", 1)
+        ds.createDimension("nNodesPerFace", 3)
+        ds.createDimension("time", 1)
+
+        topo = ds.createVariable("topo2d", "i4")
+        topo.cf_role = "mesh_topology"
+        topo.topology_dimension = 2
+        topo.node_coordinates = "my_node_x my_node_y"
+        topo.face_node_connectivity = "my_face_nodes"
+
+        node_x = ds.createVariable("my_node_x", "f8", ("my_nodes",))
+        node_y = ds.createVariable("my_node_y", "f8", ("my_nodes",))
+        face_nodes = ds.createVariable("my_face_nodes", "i4", ("my_faces", "nNodesPerFace"))
+        depth = ds.createVariable("waterdepth", "f4", ("time", "my_faces"))
+
+        depth.mesh = "topo2d"
+        depth.location = "face"
+
+        node_x[:] = [120000.0, 121000.0, 120500.0]
+        node_y[:] = [425000.0, 425000.0, 426000.0]
+        face_nodes[:] = [[1, 2, 3]]
+        depth[:] = [[1.0]]
+
+    with patch.object(plugin, "_find_mesh2d_topology_names", return_value=["topo2d"]), \
+         patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=[]), \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    kwargs = load_mesh2d_mock.call_args.kwargs
+    assert "topology_names" in kwargs
+    assert kwargs["topology_names"][0] == "topo2d"
+    assert kwargs["expect_data_variables"] is True
 
 
 # ---------------------------------------------------------------------------
