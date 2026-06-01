@@ -131,20 +131,34 @@ def test_route_unknown(plugin):
     mock_mb.warning.assert_called_once()
 
 
-def test_export_active_layer_uses_bridge_export_for_single_bridge_layer(plugin):
+def test_export_active_layer_uses_bridge_export_for_bridge_point_layer(plugin):
+    point_layer = MagicMock()
+    point_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    point_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    plugin.iface.activeLayer.return_value = point_layer
+
+    with patch.object(plugin, "_is_fixed_weir_point_layer", return_value=False), \
+         patch.object(plugin, "_is_bridge_point_layer", return_value=True), \
+         patch.object(plugin, "export_bridge_pliz") as bridge_export_mock, \
+         patch.object(plugin, "export_fixed_weir_pliz") as fixed_weir_export_mock:
+        plugin.export_active_layer()
+
+    bridge_export_mock.assert_called_once_with(point_layer)
+    fixed_weir_export_mock.assert_not_called()
+
+
+def test_export_active_layer_line_layer_uses_polyline_export(plugin):
     line_layer = MagicMock()
     line_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
     line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
     plugin.iface.activeLayer.return_value = line_layer
 
-    with patch.object(plugin, "_selected_bridge_line_layers", return_value=[]), \
-         patch.object(plugin, "_line_layer_has_bridge_companion", return_value=True), \
-         patch.object(plugin, "export_bridge_pliz_from_selected_layers") as bridge_export_mock, \
+    with patch.object(plugin, "export_bridge_pliz") as bridge_export_mock, \
          patch.object(plugin, "export_lines") as export_lines_mock:
         plugin.export_active_layer()
 
-    bridge_export_mock.assert_called_once_with([line_layer])
-    export_lines_mock.assert_not_called()
+    bridge_export_mock.assert_not_called()
+    export_lines_mock.assert_called_once()
 
 
 def test_export_active_layer_falls_back_to_line_export_without_bridge_companion(plugin):
@@ -153,9 +167,7 @@ def test_export_active_layer_falls_back_to_line_export_without_bridge_companion(
     line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
     plugin.iface.activeLayer.return_value = line_layer
 
-    with patch.object(plugin, "_selected_bridge_line_layers", return_value=[]), \
-         patch.object(plugin, "_line_layer_has_bridge_companion", return_value=False), \
-         patch.object(plugin, "export_bridge_pliz_from_selected_layers") as bridge_export_mock, \
+    with patch.object(plugin, "export_bridge_pliz") as bridge_export_mock, \
          patch.object(plugin, "export_lines") as export_lines_mock:
         plugin.export_active_layer()
 
@@ -220,8 +232,7 @@ def test_create_bridge_points_from_polyline_creates_points(plugin):
     add_map_layer = _add_map_layer_mock()
     add_map_layer.reset_mock()
 
-    with patch.object(plugin, "_get_name_field", return_value="name"), \
-         patch.object(plugin, "_extract_polylines", return_value=[[p1, p2, p3]]), \
+    with patch.object(plugin, "_extract_polylines", return_value=[[p1, p2, p3]]), \
          patch("Delft3DFileManager.Delft3DFileManager.QInputDialog") as mock_dialog, \
          patch("Delft3DFileManager.Delft3DFileManager.QgsVectorLayer", return_value=point_layer) as mock_vec_layer, \
          patch("Delft3DFileManager.Delft3DFileManager.QgsFeature", side_effect=created_features):
@@ -232,7 +243,87 @@ def test_create_bridge_points_from_polyline_creates_points(plugin):
     provider.addFeatures.assert_called_once()
     exported_features = provider.addFeatures.call_args[0][0]
     assert len(exported_features) == 3
-    created_features[0].setAttributes.assert_called_once_with(["bridge_a", 2.5, 1.0])
+    created_features[0].setAttributes.assert_called_once_with(["bridges", 2.5, 1.0])
+    add_map_layer.assert_called_once_with(point_layer)
+    plugin.iface.messageBar.return_value.pushSuccess.assert_called_once()
+
+
+def test_create_fixed_weir_points_from_polyline_requires_line_layer(plugin):
+    active_layer = MagicMock()
+    active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    plugin.iface.activeLayer.return_value = active_layer
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.create_fixed_weir_points_from_polyline()
+
+    mock_mb.warning.assert_called_once()
+
+
+def test_create_fixed_weir_points_from_polyline_cancelled_dialog(plugin):
+    active_layer = MagicMock()
+    active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    plugin.iface.activeLayer.return_value = active_layer
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QInputDialog") as mock_dialog:
+        mock_dialog.getDouble.return_value = (0.0, False)
+        plugin.create_fixed_weir_points_from_polyline()
+
+    add_map_layer.assert_not_called()
+
+
+def test_create_fixed_weir_points_from_polyline_creates_points(plugin):
+    feature = MagicMock()
+    feature.id.return_value = 1
+    feature.__getitem__.return_value = "weir_a"
+    feature.geometry.return_value.isEmpty.return_value = False
+
+    active_layer = MagicMock()
+    active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    active_layer.getFeatures.return_value = [feature]
+    active_layer.name.return_value = "weirs"
+    active_layer.crs.return_value.isValid.return_value = False
+    plugin.iface.activeLayer.return_value = active_layer
+
+    p1, p2 = MagicMock(), MagicMock()
+    p1.x.return_value, p1.y.return_value = 100.0, 200.0
+    p2.x.return_value, p2.y.return_value = 110.0, 210.0
+
+    point_layer = MagicMock()
+    provider = MagicMock()
+    point_layer.dataProvider.return_value = provider
+    point_layer.fields.return_value = MagicMock()
+
+    created_features = [MagicMock(), MagicMock()]
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_extract_polylines", return_value=[[p1, p2]]), \
+         patch("Delft3DFileManager.Delft3DFileManager.QInputDialog") as mock_dialog, \
+         patch("Delft3DFileManager.Delft3DFileManager.QgsVectorLayer", return_value=point_layer) as mock_vec_layer, \
+         patch("Delft3DFileManager.Delft3DFileManager.QgsFeature", side_effect=created_features):
+        mock_dialog.getDouble.side_effect = [
+            (1.0, True),
+            (0.0, True),
+            (0.0, True),
+            (10.0, True),
+            (4.0, True),
+            (4.0, True),
+            (0.0, True),
+        ]
+        plugin.create_fixed_weir_points_from_polyline()
+
+    mock_vec_layer.assert_called_once_with("Point?crs=EPSG:28992", "weirs_weir_points", "memory")
+    provider.addFeatures.assert_called_once()
+    exported_features = provider.addFeatures.call_args[0][0]
+    assert len(exported_features) == 2
+    created_features[0].setAttributes.assert_called_once_with(["weirs", 1.0, 0.0, 0.0, 10.0, 4.0, 4.0, 0.0])
     add_map_layer.assert_called_once_with(point_layer)
     plugin.iface.messageBar.return_value.pushSuccess.assert_called_once()
 
@@ -303,6 +394,162 @@ def test_export_bridge_pliz_from_selected_layers(plugin, tmp_path):
     assert lines[1] == "2 4"
     assert lines[2] == "120000.000000 450000.000000 2.500000 1.000000"
     assert lines[3] == "120100.000000 450100.000000 2.500000 1.000000"
+
+
+def test_export_bridge_pliz_from_point_layer(plugin, tmp_path):
+    out = str(tmp_path / "bridges_from_points.pliz")
+
+    layer = MagicMock()
+    layer.fields.return_value = [
+        SimpleNamespace(name=lambda: "bridge_name"),
+        SimpleNamespace(name=lambda: "width"),
+        SimpleNamespace(name=lambda: "drag_cd"),
+    ]
+
+    feature = MagicMock()
+    feature.id.return_value = 1
+    feature.geometry.return_value.isEmpty.return_value = False
+    feature.__getitem__.side_effect = lambda k: {
+        "bridge_name": "bridge_a",
+        "width": 2.5,
+        "drag_cd": 1.0,
+    }[k]
+    layer.getFeatures.return_value = [feature]
+
+    p1 = MagicMock()
+    p1.x.return_value = 120000.0
+    p1.y.return_value = 450000.0
+    p2 = MagicMock()
+    p2.x.return_value = 120100.0
+    p2.y.return_value = 450100.0
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_points", return_value=[p1, p2]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_bridge_pliz(layer)
+
+    lines = pathlib.Path(out).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "bridge_a"
+    assert lines[1] == "2 4"
+    assert lines[2] == "120000.000000 450000.000000 2.500000 1.000000"
+    assert lines[3] == "120100.000000 450100.000000 2.500000 1.000000"
+
+
+def test_export_bridge_pliz_from_point_layer_multiple_groups(plugin, tmp_path):
+    out = str(tmp_path / "bridges_grouped.pliz")
+
+    layer = MagicMock()
+    layer.fields.return_value = [
+        SimpleNamespace(name=lambda: "bridge_name"),
+        SimpleNamespace(name=lambda: "width"),
+        SimpleNamespace(name=lambda: "drag_cd"),
+    ]
+
+    feature_a1 = MagicMock()
+    feature_a1.id.return_value = 1
+    feature_a1.geometry.return_value.isEmpty.return_value = False
+    feature_a1.__getitem__.side_effect = lambda k: {
+        "bridge_name": "bridge_a",
+        "width": 2.5,
+        "drag_cd": 1.0,
+    }[k]
+
+    feature_b1 = MagicMock()
+    feature_b1.id.return_value = 2
+    feature_b1.geometry.return_value.isEmpty.return_value = False
+    feature_b1.__getitem__.side_effect = lambda k: {
+        "bridge_name": "bridge_b",
+        "width": 3.0,
+        "drag_cd": 1.2,
+    }[k]
+
+    feature_a2 = MagicMock()
+    feature_a2.id.return_value = 3
+    feature_a2.geometry.return_value.isEmpty.return_value = False
+    feature_a2.__getitem__.side_effect = lambda k: {
+        "bridge_name": "bridge_a",
+        "width": 2.5,
+        "drag_cd": 1.0,
+    }[k]
+
+    layer.getFeatures.return_value = [feature_a1, feature_b1, feature_a2]
+
+    p1 = MagicMock()
+    p1.x.return_value = 120000.0
+    p1.y.return_value = 450000.0
+    p2 = MagicMock()
+    p2.x.return_value = 120050.0
+    p2.y.return_value = 450050.0
+    p3 = MagicMock()
+    p3.x.return_value = 130000.0
+    p3.y.return_value = 460000.0
+    p4 = MagicMock()
+    p4.x.return_value = 120100.0
+    p4.y.return_value = 450100.0
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_points", side_effect=[[p1], [p2, p3], [p4]]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_bridge_pliz(layer)
+
+    lines = pathlib.Path(out).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "bridge_a"
+    assert lines[1] == "2 4"
+    assert lines[2] == "120000.000000 450000.000000 2.500000 1.000000"
+    assert lines[3] == "120100.000000 450100.000000 2.500000 1.000000"
+    assert lines[4] == "bridge_b"
+    assert lines[5] == "2 4"
+    assert lines[6] == "120050.000000 450050.000000 3.000000 1.200000"
+    assert lines[7] == "130000.000000 460000.000000 3.000000 1.200000"
+
+
+def test_export_bridge_pliz_from_point_layer_case_insensitive_fields(plugin, tmp_path):
+    out = str(tmp_path / "bridges_case_insensitive.pliz")
+
+    layer = MagicMock()
+    layer.fields.return_value = [
+        SimpleNamespace(name=lambda: "BRIDGE_NAME"),
+        SimpleNamespace(name=lambda: "Width"),
+        SimpleNamespace(name=lambda: "DRAG_CD"),
+    ]
+
+    feature = MagicMock()
+    feature.id.return_value = 1
+    feature.geometry.return_value.isEmpty.return_value = False
+    feature.__getitem__.side_effect = lambda k: {
+        "BRIDGE_NAME": "bridge_caps",
+        "Width": 2.75,
+        "DRAG_CD": 0.95,
+    }[k]
+    layer.getFeatures.return_value = [feature]
+
+    p1 = MagicMock()
+    p1.x.return_value = 120000.0
+    p1.y.return_value = 450000.0
+    p2 = MagicMock()
+    p2.x.return_value = 120010.0
+    p2.y.return_value = 450010.0
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_points", return_value=[p1, p2]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_bridge_pliz(layer)
+
+    lines = pathlib.Path(out).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "bridge_caps"
+    assert lines[1] == "2 4"
+    assert lines[2] == "120000.000000 450000.000000 2.750000 0.950000"
+    assert lines[3] == "120010.000000 450010.000000 2.750000 0.950000"
+
+
+def test_load_fixed_weir_file_invalid_column_count_warns(plugin, tmp_path):
+    bad = tmp_path / "bad_fixed_weir.pliz"
+    bad.write_text("weir_a:\n2 8\n0 0 1 0 0 10 4 4\n1 1 1 0 0 10 4 4\n", encoding="utf-8")
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_fixed_weir_file(str(bad))
+
+    mock_mb.warning.assert_called_once()
 
 
 def test_load_ugrid_mesh_file_morphodynamic_flattens_selected_variables(plugin, tmp_path):

@@ -29,7 +29,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 - **`.csl`, `.csd`** — FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
-### Import: Fixed Weir (`.fxw`, `.pliz` with more than 2 columns)
+### Import: Fixed Weir (`.fxw`, `.pliz` with 9 columns)
 
 Parse a fixed-weir text file into two memory layers:
 - a line layer containing one polyline per weir
@@ -302,42 +302,39 @@ Use the main `Export` action to export the active layer to the appropriate Delft
 
 ### Dispatch Rules
 - Active line layer: exported to the Delft3D-style polyline text format.
+- If multiple line layers are selected in the QGIS layer tree, they are exported together into one file for polyline (`.pli`, `.ldb`, `.spl`, `.pol`) and `.xy` output.
+- Active point layer with bridge fields (`bridge_name`, `width`, `drag_cd`): exported to bridge `.pliz`.
 - Active point layer with the fixed-weir fields: exported to `.pliz`.
 - Other point layers: use `Export Point Cloud (.xyn)` instead.
 
-When multiple line layers are selected in the QGIS layer tree, `Export` writes a combined bridge `.pliz` file using the selected line layers.
-For each selected line layer `<layer_name>`, a matching point layer named `<layer_name>_points` must exist with fields:
-- `bridge_name`
-- `width`
-- `drag_cd`
-
 ### Export: Polyline
 
-### Input Requirements
+#### Input Requirements
 - Active layer must be a vector line layer.
 - Supports single-part and multi-part line geometries.
-- A name field is selected automatically with this preference order:
-	`weir_name`, `name`, `naam`, `id`, then first available field.
 
-### Output Formats
+#### Output Formats
 
-**Polyline (`.pli`)** — Delft3D block format. For each exported line:
-1. Block name (feature name or fallback `feature_<id>`)
+**Polyline (`.pli`, `.ldb`, `.spl`, `.pol`)** — Delft3D block format. For each exported line:
+1. Block name derived from the source line layer name
 2. Header line: `<number_of_points> 2`
 3. One line per vertex with `x y`
 
-For multi-part geometries, each part is exported as a separate block with suffix `_1`, `_2`, etc.
+When a layer contributes multiple exported polylines, block names are suffixed as `_1`, `_2`, etc. to keep names unique within that layer.
+All four extensions write the same block format.
 
 **XY (`.xy`)** — Two-column format, compatible with tools that expect plain coordinate lists:
 - Two columns per row: `x y`
 - No name or header lines
 - Consecutive polylines are separated by a `NaN NaN` line
 - No trailing `NaN NaN` after the last polyline
+- When multiple line layers are selected, all valid polylines are written into the same file using the same separator rules.
 
-### Typical Workflow
+#### Typical Workflow
 1. Select the line layer to export.
+	Optionally select multiple line layers in the layer tree to combine them into one output file.
 2. Open `Export` from the plugin menu or toolbar.
-3. Choose output file path — use `.pli` for Delft3D block format or `.xy` for two-column format.
+3. Choose output file path — use `.pli`, `.ldb`, `.spl`, or `.pol` for Delft3D block format, or `.xy` for two-column format.
    If no known extension is typed, `.pli` is appended automatically.
 4. The plugin writes valid line features to the target file.
 
@@ -345,30 +342,58 @@ For multi-part geometries, each part is exported as a separate block with suffix
 
 Export a compatible QGIS point layer to fixed-weir `.pliz` format.
 
-### Input Requirements
+#### Input Requirements
 - Active layer must be a vector point layer.
 - The layer must contain these fields:
 	`weir_name`, `crest_lvl`, `sill_hL`, `sill_hR`, `crest_w`, `slope_L`, `slope_R`, `rough_cd`
 - `weir_name` must be non-empty.
 - Numeric fixed-weir attributes must be finite values.
 
-### Output Format
+#### Output Format
 For each `weir_name`, the plugin writes one block:
 1. Weir name line
 2. Header line: `<number_of_rows> 9`
 3. One row per point with:
 	`x y crest_lvl sill_hL sill_hR crest_w slope_L slope_R rough_cd`
 
-### Grouping And Order
+#### Grouping And Order
 - Points are grouped by `weir_name`.
 - The current feature iteration order is preserved within each weir block.
 - If a block name does not already end with `:`, the exporter adds it in the output file for importer compatibility.
 
-### Typical Workflow
+#### Typical Workflow
 1. Select a compatible fixed-weir point layer.
 2. Open `Export` from the plugin menu or toolbar.
 3. Choose output `.pliz` path.
 4. The plugin writes one fixed-weir block per `weir_name`.
+
+### Export: Bridge (`.pliz`)
+
+Export a compatible QGIS point layer to bridge `.pliz` format.
+
+#### Input Requirements
+- Active layer must be a vector point layer.
+- The layer must contain these fields:
+	`bridge_name`, `width`, `drag_cd`
+- `bridge_name` must be non-empty.
+- `width` and `drag_cd` must be finite numeric values.
+
+#### Output Format
+For each `bridge_name`, the plugin writes one block:
+1. Bridge name line
+2. Header line: `<number_of_rows> 4`
+3. One row per point with:
+	`x y width drag_cd`
+
+#### Grouping And Order
+- Points are grouped by `bridge_name`.
+- The current feature iteration order is preserved within each bridge block.
+
+#### Typical Workflow
+1. Select a compatible bridge point layer.
+2. Open `Export` from the plugin menu or toolbar.
+3. Choose output `.pliz` path.
+4. The plugin writes one bridge block per `bridge_name`.
 
 ## Point Cloud Export (`.xyn`)
 
@@ -501,6 +526,43 @@ This is useful before exporting bridge `.pliz` files that require per-vertex `wi
 	- `bridge_name`
 	- `width`
 	- `drag_cd`
+
+`bridge_name` values are derived from the active layer name.
+If multiple polylines are present in the layer, names use suffixes (`<layer_name>_1`, `<layer_name>_2`, ...).
+
+All created points receive the entered default values, which you can edit later per point.
+
+## Fixed-Weir Points From Polyline
+
+Create a fixed-weir point layer from vertices of the active polyline layer.
+This is useful before exporting fixed-weir `.pliz` files that require per-point fixed-weir attributes.
+
+### Menu Action
+- `Create Fixed-Weir Points from Polyline`
+
+### Behavior
+1. Set a polyline layer as active.
+2. Run `Create Fixed-Weir Points from Polyline`.
+3. Enter default values for:
+	- `crest_lvl`
+	- `sill_hL`
+	- `sill_hR`
+	- `crest_w`
+	- `slope_L`
+	- `slope_R`
+	- `rough_cd`
+4. The plugin creates `<active_layer_name>_weir_points` with one point per vertex and fields:
+	- `weir_name`
+	- `crest_lvl`
+	- `sill_hL`
+	- `sill_hR`
+	- `crest_w`
+	- `slope_L`
+	- `slope_R`
+	- `rough_cd`
+
+`weir_name` values are derived from the active layer name.
+If multiple polylines are present in the layer, names use suffixes (`<layer_name>_1`, `<layer_name>_2`, ...).
 
 All created points receive the entered default values, which you can edit later per point.
 

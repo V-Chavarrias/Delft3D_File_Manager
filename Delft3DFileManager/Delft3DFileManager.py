@@ -64,6 +64,7 @@ class Delft3DFileManager:
         self.bed_level_action = None
         self.create_trachytopes_action = None
         self.create_bridge_points_action = None
+        self.create_fixed_weir_points_action = None
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
@@ -117,6 +118,15 @@ class Delft3DFileManager:
         )
         self.create_bridge_points_action.triggered.connect(self.create_bridge_points_from_polyline)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.create_bridge_points_action)
+
+        self.create_fixed_weir_points_action = QAction(
+            QIcon(icon_path), "Create Fixed-Weir Points from Polyline", self.iface.mainWindow()
+        )
+        self.create_fixed_weir_points_action.setStatusTip(
+            "Create a fixed-weir point layer from active polyline vertices with default weir attributes"
+        )
+        self.create_fixed_weir_points_action.triggered.connect(self.create_fixed_weir_points_from_polyline)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.create_fixed_weir_points_action)
 
         self.update_trachytopes_action = QAction(
             QIcon(icon_path), "Set Trachytopes in Polygons", self.iface.mainWindow()
@@ -179,6 +189,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.create_trachytopes_action)
         if self.create_bridge_points_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.create_bridge_points_action)
+        if self.create_fixed_weir_points_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.create_fixed_weir_points_action)
         if self.update_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
         if self.export_trachytopes_action:
@@ -1037,12 +1049,7 @@ class Delft3DFileManager:
     def _pliz_column_count(self, filepath):
         """Return the declared data column count from a .pliz header, or None."""
         try:
-            try:
-                with open(filepath, "r", encoding="utf-8") as handle:
-                    lines = [line.strip() for line in handle if line.strip()]
-            except UnicodeDecodeError:
-                with open(filepath, "r") as handle:
-                    lines = [line.strip() for line in handle if line.strip()]
+            lines = self._read_non_empty_lines(filepath)
 
             if len(lines) < 2:
                 return False
@@ -1061,6 +1068,104 @@ class Delft3DFileManager:
         if column_count is None:
             return False
         return column_count > 2
+
+    def _read_non_empty_lines(self, filepath):
+        """Read a text file and return stripped non-empty lines."""
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                return [line.strip() for line in handle if line.strip()]
+        except UnicodeDecodeError:
+            with open(filepath, "r") as handle:
+                return [line.strip() for line in handle if line.strip()]
+
+    def _parse_pliz_blocks(self, filepath, expected_columns, block_label):
+        """Parse PLIZ-like blocks and return a list of (name, rows) pairs."""
+        lines = self._read_non_empty_lines(filepath)
+        if not lines:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "File is empty or contains no content",
+            )
+            return None
+
+        blocks = []
+        i = 0
+
+        while i < len(lines):
+            block_name = lines[i]
+            i += 1
+
+            if i >= len(lines):
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Malformed file: block '{block_name}' has no header line",
+                )
+                return None
+
+            header_parts = lines[i].split()
+            if len(header_parts) < 2:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Malformed file: block '{block_name}' has invalid header at line {i+1}",
+                )
+                return None
+
+            try:
+                nrows = int(header_parts[0])
+                ncols = int(header_parts[1])
+            except ValueError:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Malformed file: block '{block_name}' has non-integer header values",
+                )
+                return None
+
+            if ncols != expected_columns:
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Malformed {block_label} file: block '{block_name}' expected {expected_columns} columns but found {ncols}.",
+                )
+                return None
+
+            i += 1
+            rows = []
+            for row_idx in range(nrows):
+                if i >= len(lines):
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' expected {nrows} rows but ended at {row_idx}.",
+                    )
+                    return None
+
+                parts = lines[i].split()
+                if len(parts) < expected_columns:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' row {row_idx+1} has fewer than {expected_columns} values.",
+                    )
+                    return None
+
+                try:
+                    rows.append([float(value) for value in parts[:expected_columns]])
+                except ValueError as exc:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Malformed file: block '{block_name}' row {row_idx+1} has non-numeric values: {exc}",
+                    )
+                    return None
+                i += 1
+
+            blocks.append((block_name, rows))
+
+        return blocks
 
     def load_bridge_file(self, filepath):
         """Parse bridge .pliz file and create line and point layers."""
@@ -1082,106 +1187,32 @@ class Delft3DFileManager:
         )
         point_layer.updateFields()
 
-        try:
-            with open(filepath, "r", encoding="utf-8") as handle:
-                lines = [line.strip() for line in handle if line.strip()]
-        except UnicodeDecodeError:
-            with open(filepath, "r") as handle:
-                lines = [line.strip() for line in handle if line.strip()]
-
-        if not lines:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "Delft3D File Manager",
-                "File is empty or contains no content",
-            )
+        blocks = self._parse_pliz_blocks(filepath, expected_columns=4, block_label="bridge")
+        if blocks is None:
             return
 
         line_feature_count = 0
         point_feature_count = 0
-        i = 0
 
-        try:
-            while i < len(lines):
-                bridge_name = lines[i]
-                i += 1
+        for bridge_name, rows in blocks:
+            vertices = []
+            for row in rows:
+                x_coord, y_coord, width, drag_cd = row
+                point = QgsPointXY(x_coord, y_coord)
+                vertices.append(point)
 
-                if i >= len(lines):
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"Malformed file: block '{bridge_name}' has no header line",
-                    )
-                    return
+                point_feature = QgsFeature(point_layer.fields())
+                point_feature.setGeometry(QgsGeometry.fromPointXY(point))
+                point_feature.setAttributes([bridge_name, width, drag_cd])
+                point_provider.addFeature(point_feature)
+                point_feature_count += 1
 
-                header_parts = lines[i].split()
-                if len(header_parts) < 2:
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"Malformed file: block '{bridge_name}' has invalid header at line {i+1}",
-                    )
-                    return
-
-                nrows = int(header_parts[0])
-                ncols = int(header_parts[1])
-                if ncols != 4:
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"Malformed bridge file: block '{bridge_name}' expected 4 columns but found {ncols}.",
-                    )
-                    return
-
-                i += 1
-                vertices = []
-                for row_idx in range(nrows):
-                    if i >= len(lines):
-                        QMessageBox.warning(
-                            self.iface.mainWindow(),
-                            "Delft3D File Manager",
-                            f"Malformed file: block '{bridge_name}' expected {nrows} rows but ended at {row_idx}.",
-                        )
-                        return
-
-                    parts = lines[i].split()
-                    if len(parts) < 4:
-                        QMessageBox.warning(
-                            self.iface.mainWindow(),
-                            "Delft3D File Manager",
-                            f"Malformed file: block '{bridge_name}' row {row_idx+1} has fewer than 4 values.",
-                        )
-                        return
-
-                    x_coord = float(parts[0])
-                    y_coord = float(parts[1])
-                    width = float(parts[2])
-                    drag_cd = float(parts[3])
-
-                    point = QgsPointXY(x_coord, y_coord)
-                    vertices.append(point)
-
-                    point_feature = QgsFeature(point_layer.fields())
-                    point_feature.setGeometry(QgsGeometry.fromPointXY(point))
-                    point_feature.setAttributes([bridge_name, width, drag_cd])
-                    point_provider.addFeature(point_feature)
-                    point_feature_count += 1
-                    i += 1
-
-                if len(vertices) >= 2:
-                    line_feature = QgsFeature(line_layer.fields())
-                    line_feature.setGeometry(QgsGeometry.fromPolylineXY(vertices))
-                    line_feature.setAttributes([bridge_name])
-                    line_provider.addFeature(line_feature)
-                    line_feature_count += 1
-
-        except (ValueError, TypeError) as exc:
-            QMessageBox.critical(
-                self.iface.mainWindow(),
-                "Delft3D File Manager",
-                f"Error parsing bridge file: {exc}",
-            )
-            return
+            if len(vertices) >= 2:
+                line_feature = QgsFeature(line_layer.fields())
+                line_feature.setGeometry(QgsGeometry.fromPolylineXY(vertices))
+                line_feature.setAttributes([bridge_name])
+                line_provider.addFeature(line_feature)
+                line_feature_count += 1
 
         line_layer.updateExtents()
         point_layer.updateExtents()
@@ -1219,41 +1250,29 @@ class Delft3DFileManager:
         point_pr.addAttributes(point_fields)
         point_layer.updateFields()
 
-        # --- Read file ---
-        with open(filepath, 'r') as f:
-            lines = [line.strip() for line in f if line.strip()]
+        blocks = self._parse_pliz_blocks(filepath, expected_columns=9, block_label="fixed-weir")
+        if blocks is None:
+            return
 
-        i = 0
-        while i < len(lines):
-            if ":" in lines[i]:  # new weir block
-                weir_name = lines[i]
-                i += 1
-                nrows, _ = map(int, lines[i].split())
-                i += 1
+        for weir_name, rows in blocks:
+            pts = []
 
-                pts = []
+            for row in rows:
+                x_coord = row[0]
+                y_coord = row[1]
+                vals = row[2:]
+                pts.append(QgsPointXY(x_coord, y_coord))
 
-                for _ in range(nrows):
-                    parts = lines[i].split()
-                    x, y = map(float, parts[:2])
-                    vals = list(map(float, parts[2:]))  # 7 attributes
-                    pts.append(QgsPointXY(x, y))
+                point_feat = QgsFeature()
+                point_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x_coord, y_coord)))
+                point_feat.setAttributes([weir_name] + vals)
+                point_pr.addFeature(point_feat)
 
-                    # Add point feature
-                    point_feat = QgsFeature()
-                    point_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
-                    point_feat.setAttributes([weir_name] + vals)
-                    point_pr.addFeature(point_feat)
-
-                    i += 1
-
-                # Add polyline feature
+            if len(pts) >= 2:
                 poly_feat = QgsFeature()
                 poly_feat.setGeometry(QgsGeometry.fromPolylineXY(pts))
                 poly_feat.setAttributes([weir_name])
                 poly_pr.addFeature(poly_feat)
-            else:
-                i += 1
 
         # Add layers to project
         poly_layer.updateExtents()
@@ -1541,49 +1560,61 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Save exported weir file",
             "",
-            "Polyline (*.pli);;XY files (*.xy);;All files (*)"
+            "Polyline (*.pli *.ldb *.spl *.pol);;XY files (*.xy);;All files (*)"
         )
         if not output_path:
             return
 
-        if not output_path.lower().endswith(".pli") and not output_path.lower().endswith(".xy"):
+        allowed_extensions = (".pli", ".ldb", ".spl", ".pol", ".xy")
+        if not output_path.lower().endswith(allowed_extensions):
             output_path = output_path + ".pli"
 
-        name_field = self._get_name_field(layer)
+        selected_layers = self._selected_bridge_line_layers()
+        source_layers = selected_layers if len(selected_layers) > 1 else [layer]
+
         exported_count = 0
         export_as_xy = output_path.lower().endswith(".xy")
 
         with open(output_path, "w", encoding="utf-8") as handle:
             is_first_polyline = True
-            for feature in layer.getFeatures():
-                geometry = feature.geometry()
-                if not geometry or geometry.isEmpty():
-                    continue
-
-                polylines = self._extract_polylines(geometry)
-                if not polylines:
-                    continue
-
-                base_name = self._feature_name(feature, name_field)
-
-                for idx, polyline in enumerate(polylines):
-                    if len(polyline) < 2:
+            for source_layer in source_layers:
+                layer_polylines = []
+                for feature in source_layer.getFeatures():
+                    geometry = feature.geometry()
+                    if not geometry or geometry.isEmpty():
                         continue
 
-                    exported_count += 1
+                    polylines = self._extract_polylines(geometry)
+                    if not polylines:
+                        continue
 
-                    if export_as_xy:
+                    for polyline in polylines:
+                        if len(polyline) < 2:
+                            continue
+                        layer_polylines.append(polyline)
+
+                if not layer_polylines:
+                    continue
+
+                if export_as_xy:
+                    for polyline in layer_polylines:
                         if not is_first_polyline:
                             handle.write("NaN NaN\n")
                         is_first_polyline = False
                         for point in polyline:
                             handle.write(f"{point.x():.6f} {point.y():.6f}\n")
-                    else:
-                        block_name = base_name if len(polylines) == 1 else f"{base_name}_{idx + 1}"
-                        handle.write(f"{block_name}\n")
-                        handle.write(f"{len(polyline)} 2\n")
-                        for point in polyline:
-                            handle.write(f"{point.x():.6f} {point.y():.6f}\n")
+                        exported_count += 1
+                    continue
+
+                layer_name = str(source_layer.name() or "").strip() or "layer"
+                use_suffix = len(layer_polylines) > 1
+                for index, polyline in enumerate(layer_polylines, start=1):
+                    block_name = f"{layer_name}_{index}" if use_suffix else layer_name
+                    handle.write(f"{block_name}\n")
+                    handle.write(f"{len(polyline)} 2\n")
+                    for point in polyline:
+                        handle.write(f"{point.x():.6f} {point.y():.6f}\n")
+                    exported_count += 1
 
         if exported_count == 0:
             QMessageBox.warning(
@@ -1609,28 +1640,109 @@ class Delft3DFileManager:
             return
 
         if layer.geometryType() == QgsWkbTypes.LineGeometry:
-            selected_layers = self._selected_bridge_line_layers()
-            if len(selected_layers) > 1 and all(self._line_layer_has_bridge_companion(selected) for selected in selected_layers):
-                self.export_bridge_pliz_from_selected_layers(selected_layers)
-            elif self._line_layer_has_bridge_companion(layer):
-                self.export_bridge_pliz_from_selected_layers([layer])
-            else:
-                self.export_lines()
+            self.export_lines()
             return
 
         if layer.geometryType() == QgsWkbTypes.PointGeometry:
             if self._is_fixed_weir_point_layer(layer):
                 self.export_fixed_weir_pliz(layer)
+            elif self._is_bridge_point_layer(layer):
+                self.export_bridge_pliz(layer)
             else:
                 self.iface.messageBar().pushWarning(
                     "Delft3D File Manager",
-                    "Point layers without the fixed-weir fields should be exported with 'Export Point Cloud (.xyn)'",
+                    "Point layers without bridge/fixed-weir fields should be exported with 'Export Point Cloud (.xyn)'",
                 )
             return
 
         self.iface.messageBar().pushWarning(
             "Delft3D File Manager",
-            "Export supports only line layers and fixed-weir point layers",
+            "Export supports line layers, bridge point layers, and fixed-weir point layers",
+        )
+
+    def export_bridge_pliz(self, layer):
+        """Export a compatible point layer to bridge .pliz format."""
+        output_path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(),
+            "Save Bridge PLIZ file",
+            "",
+            "Bridge files (*.pliz);;All files (*)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".pliz"):
+            output_path = output_path + ".pliz"
+
+        field_names = self._resolved_bridge_point_fields(layer)
+        grouped_rows = {}
+        group_order = []
+        exported_count = 0
+
+        for feature in layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry or geometry.isEmpty():
+                continue
+
+            points = self._extract_points(geometry)
+            if not points:
+                continue
+
+            bridge_name = feature[field_names["bridge_name"]]
+            if bridge_name is None or not str(bridge_name).strip():
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Feature {feature.id()} has an empty 'bridge_name' and cannot be exported to .pliz",
+                )
+                return
+
+            bridge_name = str(bridge_name).strip()
+            if bridge_name not in grouped_rows:
+                grouped_rows[bridge_name] = []
+                group_order.append(bridge_name)
+
+            try:
+                width = float(feature[field_names["width"]])
+                drag_cd = float(feature[field_names["drag_cd"]])
+            except (TypeError, ValueError):
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Feature {feature.id()} has non-numeric bridge width/drag_cd values and cannot be exported to .pliz",
+                )
+                return
+
+            if not math.isfinite(width) or not math.isfinite(drag_cd):
+                QMessageBox.warning(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Feature {feature.id()} has non-finite bridge width/drag_cd values and cannot be exported to .pliz",
+                )
+                return
+
+            for point in points:
+                grouped_rows[bridge_name].append((point, width, drag_cd))
+                exported_count += 1
+
+        if exported_count == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid bridge point features were exported",
+            )
+            return
+
+        with open(output_path, "w", encoding="utf-8") as handle:
+            for bridge_name in group_order:
+                rows = grouped_rows[bridge_name]
+                handle.write(f"{bridge_name}\n")
+                handle.write(f"{len(rows)} 4\n")
+                for point, width, drag_cd in rows:
+                    handle.write(f"{point.x():.6f} {point.y():.6f} {width:.6f} {drag_cd:.6f}\n")
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Exported {exported_count} bridge point(s) to {os.path.basename(output_path)}",
         )
 
     def export_fixed_weir_pliz(self, layer):
@@ -1732,16 +1844,13 @@ class Delft3DFileManager:
         """Return required bridge point-layer fields."""
         return ["bridge_name", "width", "drag_cd"]
 
+    def _is_bridge_point_layer(self, layer):
+        """Return True when a point layer has the full bridge schema."""
+        return self._resolved_bridge_point_fields(layer) is not None
+
     def _resolved_bridge_point_fields(self, layer):
         """Resolve required bridge point fields case-insensitively."""
-        field_lookup = {field.name().lower(): field.name() for field in layer.fields()}
-        resolved = {}
-        for field_name in self._bridge_point_field_names():
-            actual_name = field_lookup.get(field_name.lower())
-            if actual_name is None:
-                return None
-            resolved[field_name] = actual_name
-        return resolved
+        return self._resolve_required_fields(layer, self._bridge_point_field_names())
 
     def _selected_bridge_line_layers(self):
         """Return selected vector line layers from the layer tree, if available."""
@@ -2054,9 +2163,13 @@ class Delft3DFileManager:
 
     def _resolved_fixed_weir_fields(self, layer):
         """Return actual field names for the fixed-weir schema, resolved case-insensitively."""
+        return self._resolve_required_fields(layer, self._fixed_weir_field_names())
+
+    def _resolve_required_fields(self, layer, required_fields):
+        """Resolve required field names from a layer case-insensitively."""
         field_lookup = {field.name().lower(): field.name() for field in layer.fields()}
         resolved = {}
-        for field_name in self._fixed_weir_field_names():
+        for field_name in required_fields:
             actual_name = field_lookup.get(field_name.lower())
             if actual_name is None:
                 return None
@@ -2067,6 +2180,76 @@ class Delft3DFileManager:
         """Ensure exported fixed-weir block names remain compatible with the importer."""
         name = str(name).strip()
         return name if name.endswith(":") else f"{name}:"
+
+    def _collect_polyline_vertices_with_names(self, line_layer):
+        """Return vertex list tuples (name, x, y) from a line layer."""
+        layer_name = str(line_layer.name() or "").strip() or "layer"
+        collected_polylines = []
+
+        for feature in line_layer.getFeatures():
+            geometry = feature.geometry()
+            if not geometry or geometry.isEmpty():
+                continue
+
+            polylines = self._extract_polylines(geometry)
+            if not polylines:
+                continue
+
+            for polyline in polylines:
+                if not polyline:
+                    continue
+                collected_polylines.append(polyline)
+
+        rows = []
+
+        use_suffix = len(collected_polylines) > 1
+        for polyline_index, polyline in enumerate(collected_polylines, start=1):
+            row_name = f"{layer_name}_{polyline_index}" if use_suffix else layer_name
+            for point in polyline:
+                rows.append((row_name, float(point.x()), float(point.y())))
+
+        return rows
+
+    def _create_point_layer_from_polyline_vertices(self, line_layer, output_name, output_fields, prompt_values, success_label):
+        """Create a point layer by copying line vertices and appending default prompted values."""
+        crs_authid = "EPSG:28992"
+        try:
+            layer_crs = line_layer.crs()
+            if layer_crs is not None and layer_crs.isValid():
+                authid = layer_crs.authid()
+                if authid:
+                    crs_authid = authid
+        except Exception:
+            pass
+
+        point_layer = QgsVectorLayer(f"Point?crs={crs_authid}", output_name, "memory")
+        provider = point_layer.dataProvider()
+        provider.addAttributes(output_fields)
+        point_layer.updateFields()
+
+        features = []
+        for base_name, x_coord, y_coord in self._collect_polyline_vertices_with_names(line_layer):
+            feat = QgsFeature(point_layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x_coord, y_coord)))
+            feat.setAttributes([base_name] + [float(value) for value in prompt_values])
+            features.append(feat)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No valid vertices were found in the active polyline layer.",
+            )
+            return
+
+        provider.addFeatures(features)
+        point_layer.updateExtents()
+        QgsProject.instance().addMapLayer(point_layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Created {success_label} layer '{output_name}' with {len(features)} point(s)",
+        )
 
     def _set_status_message(self, message):
         """Show an import status message when a QGIS status bar is available."""
@@ -3817,67 +4000,77 @@ class Delft3DFileManager:
         )
         if not ok:
             return
-
-        crs_authid = "EPSG:28992"
-        try:
-            layer_crs = line_layer.crs()
-            if layer_crs is not None and layer_crs.isValid():
-                authid = layer_crs.authid()
-                if authid:
-                    crs_authid = authid
-        except Exception:
-            pass
-
-        output_name = f"{line_layer.name()}_points"
-        point_layer = QgsVectorLayer(f"Point?crs={crs_authid}", output_name, "memory")
-        provider = point_layer.dataProvider()
-        provider.addAttributes(
-            [
+        self._create_point_layer_from_polyline_vertices(
+            line_layer=line_layer,
+            output_name=f"{line_layer.name()}_points",
+            output_fields=[
                 QgsField("bridge_name", QVariant.String),
                 QgsField("width", QVariant.Double),
                 QgsField("drag_cd", QVariant.Double),
-            ]
+            ],
+            prompt_values=[width, drag_cd],
+            success_label="bridge points",
         )
-        point_layer.updateFields()
 
-        name_field = self._get_name_field(line_layer)
-        features = []
-
-        for feature in line_layer.getFeatures():
-            geometry = feature.geometry()
-            if not geometry or geometry.isEmpty():
-                continue
-
-            polylines = self._extract_polylines(geometry)
-            if not polylines:
-                continue
-
-            base_name = self._feature_name(feature, name_field)
-            for part_index, polyline in enumerate(polylines):
-                if not polyline:
-                    continue
-                bridge_name = base_name if len(polylines) == 1 else f"{base_name}_{part_index + 1}"
-                for point in polyline:
-                    feat = QgsFeature(point_layer.fields())
-                    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(point.x()), float(point.y()))))
-                    feat.setAttributes([bridge_name, float(width), float(drag_cd)])
-                    features.append(feat)
-
-        if not features:
+    def create_fixed_weir_points_from_polyline(self):
+        """Create a fixed-weir point layer from vertices of the active polyline layer."""
+        line_layer = self.iface.activeLayer()
+        if line_layer is None or line_layer.type() != QgsMapLayerType.VectorLayer:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
-                "No valid vertices were found in the active polyline layer.",
+                "Select a polyline layer as active layer first.",
             )
             return
 
-        provider.addFeatures(features)
-        point_layer.updateExtents()
-        QgsProject.instance().addMapLayer(point_layer)
+        if line_layer.geometryType() != QgsWkbTypes.LineGeometry:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Active layer must be a polyline layer.",
+            )
+            return
 
-        self.iface.messageBar().pushSuccess(
-            "Delft3D File Manager",
-            f"Created bridge points layer '{output_name}' with {len(features)} point(s)",
+        prompt_specs = [
+            ("Fixed Weir Crest Level", "Default crest_lvl value for all fixed-weir points:", 1.0),
+            ("Fixed Weir Left Sill Height", "Default sill_hL value for all fixed-weir points:", 0.0),
+            ("Fixed Weir Right Sill Height", "Default sill_hR value for all fixed-weir points:", 0.0),
+            ("Fixed Weir Crest Width", "Default crest_w value for all fixed-weir points:", 10.0),
+            ("Fixed Weir Left Slope", "Default slope_L value for all fixed-weir points:", 4.0),
+            ("Fixed Weir Right Slope", "Default slope_R value for all fixed-weir points:", 4.0),
+            ("Fixed Weir Roughness", "Default rough_cd value for all fixed-weir points:", 0.0),
+        ]
+
+        values = []
+        for title, label, default_value in prompt_specs:
+            value, ok = QInputDialog.getDouble(
+                self.iface.mainWindow(),
+                title,
+                label,
+                value=default_value,
+                min=-1e12,
+                max=1e12,
+                decimals=6,
+            )
+            if not ok:
+                return
+            values.append(value)
+
+        self._create_point_layer_from_polyline_vertices(
+            line_layer=line_layer,
+            output_name=f"{line_layer.name()}_weir_points",
+            output_fields=[
+                QgsField("weir_name", QVariant.String),
+                QgsField("crest_lvl", QVariant.Double),
+                QgsField("sill_hL", QVariant.Double),
+                QgsField("sill_hR", QVariant.Double),
+                QgsField("crest_w", QVariant.Double),
+                QgsField("slope_L", QVariant.Double),
+                QgsField("slope_R", QVariant.Double),
+                QgsField("rough_cd", QVariant.Double),
+            ],
+            prompt_values=values,
+            success_label="fixed-weir points",
         )
 
     def _read_mesh_edge_coordinates(self, mesh_path):

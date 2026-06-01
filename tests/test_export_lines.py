@@ -17,11 +17,12 @@ def _make_point(x, y):
     return pt
 
 
-def _make_layer():
+def _make_layer(name="line_layer"):
     """Return a mock layer that passes the export_lines() type/geometry checks."""
     layer = MagicMock()
     layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
     layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    layer.name.return_value = name
     field = MagicMock()
     field.name.return_value = "weir_name"
     layer.fields.return_value = [field]
@@ -54,7 +55,7 @@ def test_export_lines_pli_single(plugin, tmp_path):
         plugin.export_lines()
 
     lines = open(out).read().splitlines()
-    assert lines[0] == "WeirA"
+    assert lines[0] == "line_layer"
     assert lines[1] == "2 2"
     assert lines[2] == "1.000000 2.000000"
     assert lines[3] == "3.000000 4.000000"
@@ -75,9 +76,9 @@ def test_export_lines_pli_multipart(plugin, tmp_path):
         plugin.export_lines()
 
     lines = open(out).read().splitlines()
-    assert lines[0] == "WeirA_1"
+    assert lines[0] == "line_layer_1"
     assert lines[1] == "2 2"
-    assert lines[4] == "WeirA_2"
+    assert lines[4] == "line_layer_2"
     assert lines[5] == "2 2"
 
 
@@ -97,6 +98,25 @@ def test_export_lines_pli_auto_append(plugin, tmp_path):
 
     assert os.path.exists(expected_path)
     assert not os.path.exists(bare_path)
+
+
+@pytest.mark.parametrize("ext", ["ldb", "spl", "pol"])
+def test_export_lines_polyline_alias_extensions(plugin, tmp_path, ext):
+    out = str(tmp_path / f"result.{ext}")
+    layer = _make_layer()
+    feat = _make_feature("WeirA")
+    pts = [_make_point(1.0, 2.0), _make_point(3.0, 4.0)]
+    layer.getFeatures.return_value = [feat]
+    plugin.iface.activeLayer.return_value = layer
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_polylines", return_value=[pts]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_lines()
+
+    lines = open(out).read().splitlines()
+    assert lines[0] == "line_layer"
+    assert lines[1] == "2 2"
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +199,71 @@ def test_export_lines_xy_no_trailing_nan(plugin, tmp_path):
     content = open(out).read()
     non_empty_lines = [l for l in content.splitlines() if l.strip()]
     assert non_empty_lines[-1] != "NaN NaN"
+
+
+def test_export_lines_combines_multiple_selected_layers_to_polyline_file(plugin, tmp_path):
+    out = str(tmp_path / "combined.pli")
+
+    active_layer = _make_layer("active_layer")
+    layer_a = _make_layer("layer_a")
+    layer_b = _make_layer("layer_b")
+
+    feat1 = _make_feature("WeirA", feature_id=1)
+    feat2 = _make_feature("WeirB", feature_id=2)
+    pts1 = [_make_point(1.0, 2.0), _make_point(3.0, 4.0)]
+    pts2 = [_make_point(5.0, 6.0), _make_point(7.0, 8.0)]
+
+    layer_a.getFeatures.return_value = [feat1]
+    layer_b.getFeatures.return_value = [feat2]
+    plugin.iface.activeLayer.return_value = active_layer
+
+    tree_view = MagicMock()
+    tree_view.selectedLayers.return_value = [layer_a, layer_b]
+    plugin.iface.layerTreeView.return_value = tree_view
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_polylines", side_effect=[[pts1], [pts2]]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_lines()
+
+    lines = open(out).read().splitlines()
+    assert lines[0] == "layer_a"
+    assert lines[1] == "2 2"
+    assert lines[4] == "layer_b"
+    assert lines[5] == "2 2"
+
+
+def test_export_lines_combines_multiple_selected_layers_to_xy_file(plugin, tmp_path):
+    out = str(tmp_path / "combined.xy")
+
+    active_layer = _make_layer("active_layer")
+    layer_a = _make_layer("layer_a")
+    layer_b = _make_layer("layer_b")
+
+    feat1 = _make_feature("WeirA", feature_id=1)
+    feat2 = _make_feature("WeirB", feature_id=2)
+    pts1 = [_make_point(1.0, 2.0), _make_point(3.0, 4.0)]
+    pts2 = [_make_point(5.0, 6.0), _make_point(7.0, 8.0)]
+
+    layer_a.getFeatures.return_value = [feat1]
+    layer_b.getFeatures.return_value = [feat2]
+    plugin.iface.activeLayer.return_value = active_layer
+
+    tree_view = MagicMock()
+    tree_view.selectedLayers.return_value = [layer_a, layer_b]
+    plugin.iface.layerTreeView.return_value = tree_view
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg, \
+         patch.object(plugin, "_extract_polylines", side_effect=[[pts1], [pts2]]):
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_lines()
+
+    lines = open(out).read().splitlines()
+    assert lines[0] == "1.000000 2.000000"
+    assert lines[1] == "3.000000 4.000000"
+    assert lines[2] == "NaN NaN"
+    assert lines[3] == "5.000000 6.000000"
+    assert lines[4] == "7.000000 8.000000"
 
 
 # ---------------------------------------------------------------------------
