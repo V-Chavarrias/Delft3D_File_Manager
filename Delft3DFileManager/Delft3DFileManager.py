@@ -30,7 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 
 
 class _CanvasDoubleClickFilter(QObject):
@@ -78,7 +78,7 @@ class Delft3DFileManager:
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
         self._canvas_double_click_filter = None
-        self._required_packages = ["netCDF4", "pyproj", "scipy"]
+        self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
 
     def initGui(self):
         """Create toolbar button and menu item"""
