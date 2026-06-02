@@ -1014,6 +1014,16 @@ class Delft3DFileManager:
                 return value
         return ""
 
+    def _has_any_key_case_insensitive(self, mapping, *keys):
+        """Return whether dict contains any of the provided keys (case-insensitive)."""
+        if not mapping:
+            return False
+        available = {str(existing_key).strip().lower() for existing_key in mapping.keys()}
+        for key in keys:
+            if str(key).strip().lower() in available:
+                return True
+        return False
+
     def _normalize_branch_key(self, value):
         """Normalize branch-like identifiers for tolerant matching."""
         text = "" if value is None else str(value).strip()
@@ -2095,13 +2105,30 @@ class Delft3DFileManager:
         skipped_no_values = 0
         skipped_no_chainage = 0
         skipped_no_match = 0
+        candidate_blocks = 0
+        section_names = set()
         branch_lookup = context["branch_lookup"]
 
         for block in sections:
-            if block["section"].strip().lower() != "branch":
-                continue
-
+            section_name = block["section"].strip().lower()
+            section_names.add(section_name)
             values = block["values"]
+
+            # Accept both explicit [Branch] and branch-like sections carrying required keys.
+            has_branch_key = self._has_any_key_case_insensitive(values, "branchId", "branch", "branch_id")
+            has_chainage_key = self._has_any_key_case_insensitive(values, "chainage", "chainages")
+            has_friction_key = self._has_any_key_case_insensitive(
+                values,
+                "frictionValues",
+                "frictionValue",
+                "friction",
+                "values",
+            )
+            is_candidate = (section_name == "branch") or (has_branch_key and has_chainage_key and has_friction_key)
+            if not is_candidate:
+                continue
+            candidate_blocks += 1
+
             branch_id = self._value_case_insensitive(values, "branchId", "branch", "branch_id")
             chainage_vals = self._parse_numeric_list(
                 self._value_case_insensitive(values, "chainage", "chainages")
@@ -2154,15 +2181,20 @@ class Delft3DFileManager:
                 features.append(feature)
 
         if not features:
+            section_names_text = ", ".join(sorted(name for name in section_names if name))
+            if not section_names_text:
+                section_names_text = "(none)"
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
                 (
                     "No spatial roughness features could be created. "
+                    f"Candidate roughness blocks processed={candidate_blocks}; "
                     f"Skipped blocks: missing branchId={skipped_no_branch}, "
                     f"missing chainage={skipped_no_chainage}, "
                     f"missing friction values={skipped_no_values}, "
-                    f"non-overlapping arrays={skipped_no_match}; unresolved points={unresolved}."
+                    f"non-overlapping arrays={skipped_no_match}; unresolved points={unresolved}. "
+                    f"Sections found: {section_names_text}."
                 ),
             )
             return

@@ -1436,6 +1436,59 @@ def test_load_roughness_spatial_file_accepts_case_and_alias_keys(plugin, tmp_pat
     assert add_map_layer.call_count == 1
 
 
+def test_load_roughness_spatial_file_accepts_branch_like_section_name(plugin, tmp_path):
+    roughness = tmp_path / "roughness_branch_like.ini"
+    roughness.write_text(
+        "[General]\n"
+        "fileType = roughness\n"
+        "[Branch 1]\n"
+        "branchId = B1\n"
+        "frictionType = Manning\n"
+        "functionType = absDischarge\n"
+        "chainage = 100 300\n"
+        "frictionValues = 20 30\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_roughness_spatial_file(str(roughness))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_roughness_spatial_file_reports_no_candidate_blocks(plugin, tmp_path):
+    roughness = tmp_path / "roughness_no_candidate.ini"
+    roughness.write_text(
+        "[General]\n"
+        "fileType = roughness\n"
+        "[Global]\n"
+        "frictionType = Manning\n"
+        "frictionValue = 25\n",
+        encoding="utf-8",
+    )
+
+    context = {"branch_lookup": {}, "node_lookup": {}, "epsg": 28992}
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))), \
+         patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_roughness_spatial_file(str(roughness))
+
+    mock_mb.warning.assert_called_once()
+    call_args = mock_mb.warning.call_args[0]
+    assert "Candidate roughness blocks processed=0" in call_args[2]
+
+
 # ---------------------------------------------------------------------------
 # ShorelineS .mat file import tests
 # ---------------------------------------------------------------------------
