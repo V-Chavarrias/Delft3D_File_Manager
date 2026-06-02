@@ -1290,6 +1290,36 @@ def test_load_structures_spatial_file_adds_compound_table(plugin, tmp_path):
     assert add_map_layer.call_count == 2
 
 
+def test_load_structures_spatial_file_accepts_quoted_branch_and_comma_chainage(plugin, tmp_path):
+    structures = tmp_path / "structures_quotes.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = S1\n"
+        "type = weir\n"
+        "branchId = \"B1\"\n"
+        "chainage = 500,0\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_structures_spatial_file(str(structures))
+
+    assert add_map_layer.call_count == 1
+
+
 def test_load_structures_spatial_file_compound_only_skips_grid_prompt(plugin, tmp_path):
     structures = tmp_path / "structures.ini"
     structures.write_text(
@@ -1355,6 +1385,37 @@ def test_load_roughness_spatial_file_creates_points(plugin, tmp_path):
         "functionType = absDischarge\n"
         "chainage = 100 300\n"
         "frictionValues = 20 30\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_roughness_spatial_file(str(roughness))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_roughness_spatial_file_accepts_case_and_alias_keys(plugin, tmp_path):
+    roughness = tmp_path / "roughness_alias.ini"
+    roughness.write_text(
+        "[General]\n"
+        "fileType = roughness\n"
+        "[Branch]\n"
+        "branchid = B1\n"
+        "frictiontype = Manning\n"
+        "function = absDischarge\n"
+        "chainages = 100 300\n"
+        "frictionValue = 20 30\n",
         encoding="utf-8",
     )
 

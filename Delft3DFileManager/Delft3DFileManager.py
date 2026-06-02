@@ -999,6 +999,47 @@ class Delft3DFileManager:
                 parts.append(item)
         return parts
 
+    def _value_case_insensitive(self, mapping, *keys):
+        """Get first matching value from dict using case-insensitive key lookup."""
+        if not mapping:
+            return ""
+
+        normalized = {
+            str(existing_key).strip().lower(): "" if value is None else str(value).strip()
+            for existing_key, value in mapping.items()
+        }
+        for key in keys:
+            value = normalized.get(str(key).strip().lower(), "")
+            if value:
+                return value
+        return ""
+
+    def _normalize_branch_key(self, value):
+        """Normalize branch-like identifiers for tolerant matching."""
+        text = "" if value is None else str(value).strip()
+        text = text.strip("\"'")
+        return text.lower()
+
+    def _parse_first_float(self, text):
+        """Extract first finite float from free-form text (supports comma decimal)."""
+        raw = "" if text is None else str(text).strip()
+        if not raw:
+            return None
+
+        # Normalize decimal comma and strip surrounding quotes.
+        candidate = raw.strip("\"'").replace(",", ".")
+        match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", candidate)
+        if not match:
+            return None
+
+        try:
+            value = float(match.group(0))
+        except ValueError:
+            return None
+        if not math.isfinite(value):
+            return None
+        return value
+
     def _resolve_candidate_path(self, base_dir, value):
         """Resolve path value relative to a base directory if needed."""
         raw = "" if value is None else str(value).strip()
@@ -1410,6 +1451,10 @@ class Delft3DFileManager:
         features = []
         unresolved = 0
         branch_lookup = context["branch_lookup"]
+        normalized_branch_lookup = {
+            self._normalize_branch_key(key): profile
+            for key, profile in branch_lookup.items()
+        }
         node_lookup = context["node_lookup"]
 
         for row in rows:
@@ -1736,7 +1781,8 @@ class Delft3DFileManager:
         branch_lookup = context["branch_lookup"]
 
         for record in spatial_records:
-            branch_id = str(record.get("branchId", "")).strip().lower()
+            branch_id_raw = str(record.get("branchId", "")).strip()
+            branch_id = self._normalize_branch_key(branch_id_raw)
             point_xy = None
             chainage_val = None
             resolve_status = "resolved"
@@ -1748,12 +1794,13 @@ class Delft3DFileManager:
             else:
                 profile = branch_lookup.get(branch_id)
                 if profile is None:
+                    profile = normalized_branch_lookup.get(branch_id)
+                if profile is None:
                     resolve_status = "unresolved"
-                    resolve_note = f"unknown branchId: {record.get('branchId', '')}"
+                    resolve_note = f"unknown branchId: {branch_id_raw}"
                 else:
-                    try:
-                        chainage_val = float(record.get("chainage", "0") or 0.0)
-                    except ValueError:
+                    chainage_val = self._parse_first_float(record.get("chainage", ""))
+                    if chainage_val is None:
                         resolve_status = "unresolved"
                         resolve_note = f"invalid chainage: {record.get('chainage', '')}"
                     else:
@@ -1786,7 +1833,7 @@ class Delft3DFileManager:
             feature["id"] = record.get("id", "")
             feature["name"] = record.get("name", "")
             feature["type"] = record.get("type", "")
-            feature["branchId"] = record.get("branchId", "")
+            feature["branchId"] = branch_id_raw
             feature["chainage"] = chainage_val if chainage_val is not None else None
             feature["capacity"] = cap_ref
             feature["bc_name"] = "" if bc_record is None else bc_record.get("bc_name", "")
@@ -2044,6 +2091,10 @@ class Delft3DFileManager:
 
         features = []
         unresolved = 0
+        skipped_no_branch = 0
+        skipped_no_values = 0
+        skipped_no_chainage = 0
+        skipped_no_match = 0
         branch_lookup = context["branch_lookup"]
 
         for block in sections:
@@ -2051,11 +2102,31 @@ class Delft3DFileManager:
                 continue
 
             values = block["values"]
-            branch_id = values.get("branchId", "").strip()
-            chainage_vals = self._parse_numeric_list(values.get("chainage", ""))
-            fric_vals = self._parse_numeric_list(values.get("frictionValues", ""))
+            branch_id = self._value_case_insensitive(values, "branchId", "branch", "branch_id")
+            chainage_vals = self._parse_numeric_list(
+                self._value_case_insensitive(values, "chainage", "chainages")
+            )
+            fric_vals = self._parse_numeric_list(
+                self._value_case_insensitive(
+                    values,
+                    "frictionValues",
+                    "frictionValue",
+                    "friction",
+                    "values",
+                )
+            )
             n = min(len(chainage_vals), len(fric_vals))
-            if not branch_id or n == 0:
+            if not branch_id:
+                skipped_no_branch += 1
+                continue
+            if not chainage_vals:
+                skipped_no_chainage += 1
+                continue
+            if not fric_vals:
+                skipped_no_values += 1
+                continue
+            if n == 0:
+                skipped_no_match += 1
                 continue
 
             profile = branch_lookup.get(branch_id.lower())
@@ -2075,8 +2146,8 @@ class Delft3DFileManager:
                     branch_id,
                     float(chainage_vals[idx]),
                     float(fric_vals[idx]),
-                    values.get("frictionType", "").strip(),
-                    values.get("functionType", "").strip(),
+                    self._value_case_insensitive(values, "frictionType", "friction_type"),
+                    self._value_case_insensitive(values, "functionType", "function", "function_type"),
                     os.path.basename(rough_path),
                     os.path.basename(resolved_grid),
                 ])
@@ -2086,7 +2157,13 @@ class Delft3DFileManager:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
-                "No spatial roughness features could be created.",
+                (
+                    "No spatial roughness features could be created. "
+                    f"Skipped blocks: missing branchId={skipped_no_branch}, "
+                    f"missing chainage={skipped_no_chainage}, "
+                    f"missing friction values={skipped_no_values}, "
+                    f"non-overlapping arrays={skipped_no_match}; unresolved points={unresolved}."
+                ),
             )
             return
 
