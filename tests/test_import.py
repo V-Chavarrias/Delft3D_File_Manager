@@ -1144,6 +1144,45 @@ def test_load_fm_mdu_file_passes_netfile_to_spatial_imports(plugin, tmp_path):
     plugin.load_file_by_extension.assert_any_call(str(roughness), spatial_grid_path=expected_grid)
 
 
+def test_load_fm_mdu_model_01_attempts_all_primary_imports(plugin):
+    mdu_path = MODEL_01_DIMR.parent / "FlowFM.mdu"
+    base = MODEL_01_DIMR.parent.resolve()
+    expected_grid = str((base / "grd_net.nc").resolve())
+    expected_csl = str((base / "csl.ini").resolve())
+    expected_csd = str((base / "csd.ini").resolve())
+    expected_ext = str((base / "extn.ext").resolve())
+    expected_spatial_imports = {
+        str((base / "structures.ini").resolve()),
+        str((base / "initialFields.ini").resolve()),
+        str((base / "roughness-Main.ini").resolve()),
+        str((base / "roughness-Floodplain.ini").resolve()),
+    }
+
+    plugin.load_ugrid_mesh_file = MagicMock()
+    plugin.load_cross_sections_files = MagicMock()
+    plugin.load_ext_file = MagicMock()
+    plugin.load_file_by_extension = MagicMock()
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_fixed_weir_file = MagicMock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_fm_mdu_file(str(mdu_path), import_referenced=True)
+
+    plugin.load_ugrid_mesh_file.assert_called_once_with(expected_grid)
+    plugin.load_cross_sections_files.assert_called_once_with(expected_csl, expected_csd, expected_grid)
+    plugin.load_ext_file.assert_called_once_with(expected_ext, grid_path=expected_grid)
+
+    imported_paths = {
+        args[0]
+        for args, kwargs in plugin.load_file_by_extension.call_args_list
+        if kwargs.get("spatial_grid_path") == expected_grid
+    }
+    assert expected_spatial_imports.issubset(imported_paths)
+
+    mock_mb.warning.assert_not_called()
+    mock_mb.critical.assert_not_called()
+
+
 def test_parse_bc_forcing_file(plugin, tmp_path):
     bc = tmp_path / "bc.bc"
     bc.write_text(
