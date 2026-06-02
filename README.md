@@ -21,6 +21,7 @@ A QGIS plugin to manage Delft3D files.
 - Creates trachytopes point layers from UGRID mesh edge coordinates.
 - Bulk-updates trachytope values for points inside polygons.
 - Exports trachytopes to ASCII `.arl` files.
+- Creates 1D network UGRID NetCDF files from branch polylines with optional snapped special points.
 
 ## File Import
 
@@ -636,6 +637,59 @@ This is useful before exporting fixed-weir `.pliz` files that require per-point 
 If multiple polylines are present in the layer, names use suffixes (`<layer_name>_1`, `<layer_name>_2`, ...).
 
 All created points receive the entered default values, which you can edit later per point.
+
+## Create 1D Network
+
+Create a 1D UGRID network NetCDF file from a branch polyline layer.
+
+### Menu Action
+- `Create 1D Network`
+
+### Input Requirements
+- Branch layer must be a vector polyline layer.
+- Branch layer must contain a branch-name field (for branch IDs/names in output).
+- Branches should be snapped at junctions during editing.
+- Constant mesh spacing must be positive.
+
+### Optional Special Points Layer
+- You can select an optional point layer with special locations.
+- For each valid snapped special point, the mesh generator forces grid points at:
+	- `chainage - offset_distance`
+	- `chainage + offset_distance`
+- Default offset distance is `10 m`.
+- Points outside the selected snapping tolerance are marked invalid and ignored for offset insertion.
+
+### What The Tool Prompts For
+1. Branch line layer
+2. Branch name field
+3. Constant spacing (`m`)
+4. Optional special points layer (`None` is allowed)
+5. Offset distance and snapping tolerance (only when special points are selected)
+6. Output NetCDF file path (`.nc`)
+
+### Output
+- NetCDF file with mesh/network arrays compatible with the plugin 1D import path, including:
+	- `mesh1d_node_x`, `mesh1d_node_y`
+	- `mesh1d_edge_nodes`, `mesh1d_edge_branch`
+	- `network_branch_long_name`, `network_branch_id`
+	- `network_geom_x`, `network_geom_y`, `network_geom_node_count`
+	- `network_node_x`, `network_node_y`, `network_node_id`, `network_node_long_name`
+
+### Diagnostics Layer (when special points are used)
+The plugin also creates a diagnostics point layer with:
+- `special_id`
+- `branchId`
+- `chainage_m`
+- `snap_dist_m`
+- `valid_flag`
+- `note`
+
+### Typical Workflow
+1. Enable QGIS snapping (Vertex + Segment) and draw/edit branch lines so junctions are snapped.
+2. Ensure branch names are set in the chosen branch-name field.
+3. Optionally create/edit a special points layer and snap points onto branches.
+4. Run `Create 1D Network` and fill the prompts.
+5. Inspect diagnostics (if any), then import the generated `.nc` to verify network layers.
 
 ## Installation
 1. Download the latest release ZIP from [Releases](../../releases).
