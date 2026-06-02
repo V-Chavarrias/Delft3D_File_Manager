@@ -515,6 +515,7 @@ Required Python packages:
 - `netCDF4`
 - `pyproj`
 - `scipy`
+- `defusedxml`
 
 Use one-click installer from the plugin menu:
 - `Delft3D File Manager -> Install Python Dependencies`

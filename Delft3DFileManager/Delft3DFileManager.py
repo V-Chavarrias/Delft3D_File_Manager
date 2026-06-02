@@ -30,7 +30,28 @@ import re
 import shutil
 import subprocess
 import sys
-from defusedxml import ElementTree as ET
+try:
+    from defusedxml import ElementTree as ET
+    _HAS_DEFUSEDXML = True
+except Exception:
+    import xml.etree.ElementTree as ET
+    _HAS_DEFUSEDXML = False
+
+
+def _double_click_event_type():
+    """Return the Qt enum value for mouse double-click across Qt5/Qt6."""
+    event_type = getattr(QEvent, "MouseButtonDblClick", None)
+    if event_type is None:
+        event_type = getattr(getattr(QEvent, "Type", None), "MouseButtonDblClick", None)
+    return event_type
+
+
+def _left_mouse_button_value():
+    """Return the Qt enum value for left mouse button across Qt5/Qt6."""
+    left_button = getattr(Qt, "LeftButton", None)
+    if left_button is None:
+        left_button = getattr(getattr(Qt, "MouseButton", None), "LeftButton", None)
+    return left_button
 
 
 class _CanvasDoubleClickFilter(QObject):
@@ -42,11 +63,16 @@ class _CanvasDoubleClickFilter(QObject):
         self._callback = callback
 
     def eventFilter(self, watched, event):
-        if event.type() != QEvent.MouseButtonDblClick:
+        double_click_type = _double_click_event_type()
+        if double_click_type is None or event.type() != double_click_type:
+            return False
+
+        left_button = _left_mouse_button_value()
+        if left_button is None:
             return False
 
         button = getattr(event, "button", lambda: None)()
-        if button != Qt.LeftButton:
+        if button != left_button:
             return False
 
         try:
@@ -78,10 +104,21 @@ class Delft3DFileManager:
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
         self._canvas_double_click_filter = None
+        self._active_progress_dialog = None
         self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
+        self._warned_missing_defusedxml = False
 
     def initGui(self):
         """Create toolbar button and menu item"""
+        if not _HAS_DEFUSEDXML and not self._warned_missing_defusedxml:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Optional dependency 'defusedxml' is not installed. "
+                "DIMR XML import will use the standard XML parser. "
+                "Use 'Install Python Dependencies' and restart QGIS.",
+            )
+            self._warned_missing_defusedxml = True
+
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
         self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
         self.import_action.setStatusTip(
@@ -1092,6 +1129,7 @@ class Delft3DFileManager:
 
     def load_dimr_config_file(self, filepath, spatial_grid_path=None):
         """Load a DIMR config and import referenced Delft3D FM inputs."""
+        self._close_orphan_loading_progress_dialogs()
         dimr_path = os.path.abspath(filepath)
         base_dir = os.path.dirname(dimr_path)
 
@@ -1120,8 +1158,11 @@ class Delft3DFileManager:
             if not os.path.exists(candidate):
                 missing_count += 1
                 continue
-            self.load_file_by_extension(candidate, spatial_grid_path=spatial_grid_path)
-            imported_count += 1
+            try:
+                self.load_file_by_extension(candidate, spatial_grid_path=spatial_grid_path)
+                imported_count += 1
+            finally:
+                self._close_orphan_loading_progress_dialogs()
 
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
@@ -3955,6 +3996,8 @@ class Delft3DFileManager:
 
     def _create_progress_dialog(self, title):
         """Create and show a progress dialog for long-running netCDF imports."""
+        self._close_orphan_loading_progress_dialogs()
+        self._close_progress_dialog(self._active_progress_dialog)
         try:
             dialog = QProgressDialog("Initializing...", None, 0, 100, self.iface.mainWindow())
             dialog.setWindowTitle(title)
@@ -3964,9 +4007,11 @@ class Delft3DFileManager:
             dialog.setWindowModality(Qt.WindowModal)
             dialog.setValue(0)
             dialog.show()
+            self._active_progress_dialog = dialog
             QApplication.processEvents()
             return dialog
         except Exception:
+            self._active_progress_dialog = None
             return None
 
     def _update_progress_dialog(self, dialog, value, text=None):
@@ -3985,8 +4030,60 @@ class Delft3DFileManager:
         """Close the import progress dialog when available."""
         if dialog is None:
             return
+        # Make shutdown robust across Qt5/Qt6: one failing call should not
+        # prevent the remaining cleanup steps from executing.
+        for action in (
+            lambda: dialog.setValue(100),
+            lambda: dialog.reset(),
+            lambda: dialog.hide(),
+            lambda: dialog.close(),
+            lambda: dialog.deleteLater(),
+        ):
+            try:
+                action()
+            except Exception:
+                pass
+
+        if dialog is self._active_progress_dialog:
+            self._active_progress_dialog = None
+
+        self._close_orphan_loading_progress_dialogs()
+
         try:
-            dialog.close()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _close_orphan_loading_progress_dialogs(self):
+        """Best-effort cleanup of orphan top-level loading dialogs.
+
+        In some QGIS/Qt6 runs, a progress dialog can outlive the tracked
+        reference. Sweep top-level widgets and close matching loading dialogs.
+        """
+        try:
+            widgets = QApplication.topLevelWidgets()
+        except Exception:
+            return
+
+        for widget in widgets or []:
+            try:
+                title = str(widget.windowTitle() or "")
+                if not title.lower().startswith("loading "):
+                    continue
+
+                for action in (
+                    lambda: widget.hide(),
+                    lambda: widget.close(),
+                    lambda: widget.deleteLater(),
+                ):
+                    try:
+                        action()
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+
+        try:
             QApplication.processEvents()
         except Exception:
             pass
@@ -6177,7 +6274,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Install Dependencies",
             "This will run pip in the QGIS Python environment to install:\n"
-            "- netCDF4\n- pyproj\n- scipy\n\n"
+            "- netCDF4\n- pyproj\n- scipy\n- defusedxml\n\n"
             "Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,

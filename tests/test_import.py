@@ -114,6 +114,41 @@ def test_route_xyz(plugin):
     plugin.load_xyz_file.assert_called_once_with("/fake/file.xyz")
 
 
+def test_close_progress_dialog_survives_partial_cleanup_failures(plugin):
+    class _Dialog:
+        def __init__(self):
+            self.closed = False
+            self.hidden = False
+            self.reset_called = False
+            self.deleted = False
+
+        def setValue(self, value):
+            raise RuntimeError("simulated Qt error")
+
+        def reset(self):
+            self.reset_called = True
+
+        def hide(self):
+            self.hidden = True
+
+        def close(self):
+            self.closed = True
+
+        def deleteLater(self):
+            self.deleted = True
+
+    dialog = _Dialog()
+    plugin._active_progress_dialog = dialog
+
+    plugin._close_progress_dialog(dialog)
+
+    assert dialog.reset_called is True
+    assert dialog.hidden is True
+    assert dialog.closed is True
+    assert dialog.deleted is True
+    assert plugin._active_progress_dialog is None
+
+
 def test_route_csl(plugin):
     plugin.load_cross_sections_from_selection = MagicMock()
     plugin.load_file_by_extension("/fake/file.csl")

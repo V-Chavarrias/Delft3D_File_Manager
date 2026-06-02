@@ -17,3 +17,25 @@ def test_no_direct_pyqt5_imports_in_plugin_runtime_modules():
                 violations.append(f"{rel}:{line_no}: {stripped}")
 
     assert not violations, "Direct PyQt5 imports found:\n" + "\n".join(violations)
+
+
+def test_qt6_event_and_button_enum_helpers(monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    class _QEventType:
+        MouseButtonDblClick = 123
+
+    class _QEventQt6:
+        Type = _QEventType
+
+    class _MouseButtonEnum:
+        LeftButton = 1
+
+    class _QtQt6:
+        MouseButton = _MouseButtonEnum
+
+    monkeypatch.setattr(plugin_module, "QEvent", _QEventQt6)
+    monkeypatch.setattr(plugin_module, "Qt", _QtQt6)
+
+    assert plugin_module._double_click_event_type() == 123
+    assert plugin_module._left_mouse_button_value() == 1
