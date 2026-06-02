@@ -1873,6 +1873,10 @@ class Delft3DFileManager:
         unresolved = 0
         resolved = 0
         branch_lookup = context["branch_lookup"]
+        normalized_branch_lookup = {
+            self._normalize_branch_key(key): profile
+            for key, profile in branch_lookup.items()
+        }
 
         for record in spatial_records:
             branch_id_raw = str(record.get("branchId", "")).strip()
@@ -1901,7 +1905,13 @@ class Delft3DFileManager:
                         point_xy = self._interpolate_point_on_branch(profile, chainage_val)
                         if point_xy is None:
                             resolve_status = "unresolved"
-                            resolve_note = f"chainage out of range: {chainage_val:g}"
+                            max_chainage = profile.get("length", None)
+                            if isinstance(max_chainage, (int, float)) and math.isfinite(float(max_chainage)):
+                                resolve_note = (
+                                    f"chainage out of range: requested {chainage_val:g}, max {float(max_chainage):g}"
+                                )
+                            else:
+                                resolve_note = f"chainage out of range: requested {chainage_val:g}"
 
             bc_record = None
             cap_ref = str(record.get("capacity", "")).strip()
@@ -2677,8 +2687,27 @@ class Delft3DFileManager:
         if len(points) < 2 or len(cumlen) != len(points):
             return None
 
-        if target_distance < 0.0 or target_distance > total_length:
+        if not isinstance(target_distance, (int, float)):
             return None
+        if not isinstance(total_length, (int, float)):
+            return None
+        if not math.isfinite(float(target_distance)) or not math.isfinite(float(total_length)):
+            return None
+
+        target_distance = float(target_distance)
+        total_length = float(total_length)
+        tolerance = max(1e-6, 1e-9 * max(1.0, abs(total_length)))
+
+        if target_distance < -tolerance or target_distance > total_length + tolerance:
+            return None
+
+        # Snap tiny floating-point overshoots/undershoots to branch endpoints.
+        if target_distance <= tolerance:
+            return points[0]
+        if abs(target_distance - total_length) <= tolerance:
+            return points[-1]
+
+        target_distance = min(max(target_distance, 0.0), total_length)
 
         if target_distance == 0.0:
             return points[0]

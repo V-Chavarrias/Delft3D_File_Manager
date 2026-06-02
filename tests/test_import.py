@@ -1421,6 +1421,59 @@ def test_load_structures_spatial_file_accepts_quoted_branch_and_comma_chainage(p
     assert add_map_layer.call_count == 1
 
 
+def test_interpolate_point_on_branch_clamps_small_end_overshoot(plugin):
+    profile = {
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+
+    result = plugin._interpolate_point_on_branch(profile, 1000.0 + 5e-7)
+
+    assert result == (1000.0, 0.0)
+
+
+def test_load_structures_spatial_file_reports_requested_and_max_chainage(plugin, tmp_path):
+    structures = tmp_path / "structures_out_of_range.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = S1\n"
+        "type = weir\n"
+        "branchId = B1\n"
+        "chainage = 1200\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_structures_spatial_file(str(structures))
+
+    assert add_map_layer.call_count == 1
+    layer = add_map_layer.call_args[0][0]
+    feature = layer.dataProvider.return_value.addFeatures.call_args[0][0][0]
+
+    resolve_note_values = [
+        call.args[1]
+        for call in feature.__setitem__.call_args_list
+        if len(call.args) == 2 and call.args[0] == "resolve_note"
+    ]
+    assert resolve_note_values
+    assert "requested 1200" in resolve_note_values[-1]
+    assert "max 1000" in resolve_note_values[-1]
+
+
 def test_load_structures_spatial_file_compound_only_skips_grid_prompt(plugin, tmp_path):
     structures = tmp_path / "structures.ini"
     structures.write_text(
