@@ -19,7 +19,7 @@ from qgis.core import (
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol
 )
-from PyQt5.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
+from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
 from datetime import datetime, timedelta
 import itertools
 import importlib

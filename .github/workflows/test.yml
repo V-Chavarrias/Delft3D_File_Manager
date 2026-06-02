@@ -5,6 +5,10 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout repository
@@ -13,10 +17,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: pip install -r requirements-test.txt
+
+      - name: Enforce qgis.PyQt runtime imports
+        run: |
+          if grep -R --line-number --include='*.py' -E '^\s*(from|import)\s+PyQt5' Delft3DFileManager; then
+            echo "Direct PyQt5 import detected in plugin runtime code. Use qgis.PyQt imports instead."
+            exit 1
+          fi
+
+      - name: Run Qt compatibility guard
+        run: pytest tests/test_qt_compatibility.py -v
 
       - name: Run tests
         run: pytest tests/ -v

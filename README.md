@@ -2,6 +2,9 @@
 
 A QGIS plugin to manage Delft3D files.
 
+## Compatibility
+- QGIS 3.x and QGIS 4.x
+
 ## Features
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
 - Reads point-cloud `.xyn` files as point layers with optional generated names.
@@ -648,6 +651,13 @@ Then restart QGIS and enable *Delft3D File Manager*.
 Build:
 ```bash
 python .\build_plugin.py
+```
+
+Pre-commit (recommended):
+```bash
+pip install -r requirements-test.txt
+pre-commit install
+pre-commit run --all-files
 ```
 
 Release:

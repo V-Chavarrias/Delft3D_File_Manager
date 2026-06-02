@@ -3,7 +3,7 @@
 
 import math
 
-from PyQt5.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QPainter, QPen
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -16,7 +16,10 @@ from qgis.PyQt.QtWidgets import (
 )
 
 try:
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+    try:
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    except Exception:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
     from matplotlib.figure import Figure
 
     _HAS_MATPLOTLIB = True

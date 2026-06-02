@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: no-direct-pyqt5-runtime-imports
+        name: Block direct PyQt5 runtime imports in plugin code
+        language: pygrep
+        entry: '^\s*(from|import)\s+PyQt5'
+        files: ^Delft3DFileManager/.*\.py$
+        exclude: ^Delft3DFileManager/__init__\.py$

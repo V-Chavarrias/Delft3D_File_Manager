@@ -7,10 +7,9 @@ for _mod_name in [
     "qgis",
     "qgis.core",
     "qgis.PyQt",
+    "qgis.PyQt.QtCore",
     "qgis.PyQt.QtWidgets",
     "qgis.PyQt.QtGui",
-    "PyQt5",
-    "PyQt5.QtCore",
 ]:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
