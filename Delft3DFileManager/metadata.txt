@@ -3,7 +3,7 @@ name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=3.99
 description=Imports and exports Delft3D files. 
-version=9.6.1
+version=9.9.0
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
@@ -12,6 +12,11 @@ homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
 about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
 changelog=
+    9.9.2 - Made structure type styling deterministic with fixed colors for known types and stable fallback colors for unknown types.
+    9.9.1 - Added automatic categorized styling for imported structure points by type and extended structure import summary with explicit per-type and unknown-type counts.
+    9.9.0 - Improved FM structure import to load all [Structure] blocks, including compound records in a dedicated table layer, with dynamic per-file parameter columns and per-feature resolve status.
+    9.8.0 - Added spatial imports for FM ext/structure/inifield/1dfield/roughness inputs (branch/node mapped) and enabled click plotting of linked boundary timeseries from spatial features.
+    9.7.0 - Added DIMR full-simulation import via dimr_config.xml, FM .mdu/.ext/.bc import support, and boundary-condition timeseries visualization in the Profile/Timeseries window.
     9.6.0 - Aligned bridge/fixed-weir import-export workflows to point-layer-driven bridge export and added 'Create Fixed-Weir Points from Polyline'.
     9.5.0 - Added polyline export extension aliases (.ldb/.spl/.pol) and combined multi-layer line export to one polyline or .xy file.
     9.4.0 - Reading of morphodynamic data from map-file. Creating, importing, and exporting bridge pillars. 

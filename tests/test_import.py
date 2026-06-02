@@ -125,6 +125,85 @@ def test_route_csd(plugin):
     plugin.load_cross_sections_from_selection.assert_called_once_with("/fake/file.csd")
 
 
+def test_route_dimr_config_xml(plugin):
+    plugin.load_dimr_config_file = MagicMock()
+
+    plugin.load_file_by_extension("/fake/dimr_config.xml")
+
+    plugin.load_dimr_config_file.assert_called_once_with("/fake/dimr_config.xml", spatial_grid_path=None)
+
+
+def test_route_mdu(plugin):
+    plugin.load_fm_mdu_file = MagicMock()
+
+    plugin.load_file_by_extension("/fake/model.mdu")
+
+    plugin.load_fm_mdu_file.assert_called_once_with("/fake/model.mdu", import_referenced=True, spatial_grid_path=None)
+
+
+def test_route_ext(plugin):
+    plugin.load_ext_file = MagicMock()
+
+    plugin.load_file_by_extension("/fake/forcing.ext")
+
+    plugin.load_ext_file.assert_called_once_with("/fake/forcing.ext", grid_path=None)
+
+
+def test_route_bc(plugin):
+    plugin.load_bc_file = MagicMock()
+
+    plugin.load_file_by_extension("/fake/forcing.bc")
+
+    plugin.load_bc_file.assert_called_once_with("/fake/forcing.bc")
+
+
+def test_route_ini_extforce(plugin):
+    plugin.load_ext_file = MagicMock()
+    plugin.load_ini_table_file = MagicMock()
+
+    with patch.object(plugin, "_detect_ini_file_type", return_value="extforce"):
+        plugin.load_file_by_extension("/fake/forcing.ini")
+
+    plugin.load_ext_file.assert_called_once_with("/fake/forcing.ini", grid_path=None)
+    plugin.load_ini_table_file.assert_not_called()
+
+
+def test_route_ini_generic_table(plugin):
+    plugin.load_roughness_spatial_file = MagicMock()
+
+    with patch.object(plugin, "_detect_ini_file_type", return_value="roughness"):
+        plugin.load_file_by_extension("/fake/roughness.ini")
+
+    plugin.load_roughness_spatial_file.assert_called_once_with("/fake/roughness.ini", grid_path=None)
+
+
+def test_route_ini_structure(plugin):
+    plugin.load_structures_spatial_file = MagicMock()
+
+    with patch.object(plugin, "_detect_ini_file_type", return_value="structure"):
+        plugin.load_file_by_extension("/fake/structures.ini")
+
+    plugin.load_structures_spatial_file.assert_called_once_with("/fake/structures.ini", grid_path=None)
+
+
+def test_route_ini_inifield(plugin):
+    plugin.load_ini_field_spatial_file = MagicMock()
+
+    with patch.object(plugin, "_detect_ini_file_type", return_value="inifield"):
+        plugin.load_file_by_extension("/fake/initialFields.ini")
+
+    plugin.load_ini_field_spatial_file.assert_called_once_with("/fake/initialFields.ini", grid_path=None)
+
+
+def test_route_ini_1dfield(plugin):
+    plugin.load_1d_field_spatial_file = MagicMock()
+
+    with patch.object(plugin, "_detect_ini_file_type", return_value="1dfield"):
+        plugin.load_file_by_extension("/fake/InitialWaterLevel.ini")
+
+    plugin.load_1d_field_spatial_file.assert_called_once_with("/fake/InitialWaterLevel.ini", grid_path=None)
+
+
 def test_route_unknown(plugin):
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
         plugin.load_file_by_extension("/fake/file.abc")
@@ -958,6 +1037,342 @@ def test_read_crossdef_records_includes_circular_fields(plugin, tmp_path):
     assert definitions["circ001"]["diameter"] == "1.5"
     assert definitions["circ001"]["frictiontype"] == "Manning"
     assert definitions["circ001"]["frictionvalue"] == "0.030"
+
+
+def test_read_dimr_component_input_files(plugin, tmp_path):
+    dimr = tmp_path / "dimr_config.xml"
+    dimr.write_text(
+        "<?xml version='1.0' encoding='utf-8'?>\n"
+        "<dimrConfig xmlns='http://schemas.deltares.nl/dimrConfig'>\n"
+        "  <component name='fm'>\n"
+        "    <inputFile>FlowFM.mdu</inputFile>\n"
+        "  </component>\n"
+        "  <component name='rr'>\n"
+        "    <inputFile>rr_config.xml</inputFile>\n"
+        "  </component>\n"
+        "</dimrConfig>\n",
+        encoding="utf-8",
+    )
+
+    files = plugin._read_dimr_component_input_files(str(dimr))
+
+    assert files == ["FlowFM.mdu", "rr_config.xml"]
+
+
+def test_read_mdu_primary_files(plugin, tmp_path):
+    mdu = tmp_path / "FlowFM.mdu"
+    mdu.write_text(
+        "[geometry]\n"
+        "NetFile = net.nc\n"
+        "CrossLocFile = csl.ini\n"
+        "CrossDefFile = csd.ini\n"
+        "StructureFile = structures.ini\n"
+        "IniFieldFile = initialFields.ini\n"
+        "FrictFile = roughness-main.ini;roughness-floodplain.ini\n"
+        "[external forcing]\n"
+        "ExtForceFileNew = extn.ext\n",
+        encoding="utf-8",
+    )
+
+    primary = plugin._read_mdu_primary_files(str(mdu))
+
+    assert primary["net_file"] == "net.nc"
+    assert primary["crossloc_file"] == "csl.ini"
+    assert primary["crossdef_file"] == "csd.ini"
+    assert primary["structure_file"] == "structures.ini"
+    assert primary["ext_force_file"] == "extn.ext"
+    assert primary["frict_files"] == ["roughness-main.ini", "roughness-floodplain.ini"]
+
+
+def test_load_fm_mdu_file_passes_netfile_to_spatial_imports(plugin, tmp_path):
+    mdu = tmp_path / "FlowFM.mdu"
+    mdu.write_text("[model]\nname = test\n", encoding="utf-8")
+
+    net = tmp_path / "net.nc"
+    ext = tmp_path / "extn.ext"
+    structures = tmp_path / "structures.ini"
+    inifield = tmp_path / "initialFields.ini"
+    roughness = tmp_path / "roughness-main.ini"
+
+    for path in (net, ext, structures, inifield, roughness):
+        path.write_text("", encoding="utf-8")
+
+    primary = {
+        "net_file": "net.nc",
+        "crossloc_file": "",
+        "crossdef_file": "",
+        "structure_file": "structures.ini",
+        "ext_force_file": "extn.ext",
+        "ini_field_file": "initialFields.ini",
+        "frict_files": ["roughness-main.ini"],
+        "thin_dam_file": "",
+        "fixed_weir_file": "",
+        "pillar_file": "",
+    }
+
+    plugin.load_ugrid_mesh_file = MagicMock()
+    plugin.load_cross_sections_files = MagicMock()
+    plugin.load_ext_file = MagicMock()
+    plugin.load_file_by_extension = MagicMock()
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_fixed_weir_file = MagicMock()
+
+    with patch.object(plugin, "_read_mdu_primary_files", return_value=primary):
+        plugin.load_fm_mdu_file(str(mdu), import_referenced=True)
+
+    expected_grid = str(net)
+    plugin.load_ext_file.assert_called_once_with(str(ext), grid_path=expected_grid)
+    plugin.load_file_by_extension.assert_any_call(str(structures), spatial_grid_path=expected_grid)
+    plugin.load_file_by_extension.assert_any_call(str(inifield), spatial_grid_path=expected_grid)
+    plugin.load_file_by_extension.assert_any_call(str(roughness), spatial_grid_path=expected_grid)
+
+
+def test_parse_bc_forcing_file(plugin, tmp_path):
+    bc = tmp_path / "bc.bc"
+    bc.write_text(
+        "[General]\n"
+        "fileType = boundConds\n"
+        "[forcing]\n"
+        "Name = UpstreamQ\n"
+        "Function = timeseries\n"
+        "Quantity = time\n"
+        "Unit = hours since 2000-01-01 00:00:00\n"
+        "Quantity = dischargebnd\n"
+        "Unit = m3/s\n"
+        "0 12\n"
+        "24 15\n",
+        encoding="utf-8",
+    )
+
+    rows = plugin._parse_bc_forcing_file(str(bc))
+
+    assert len(rows) == 1
+    assert rows[0]["bc_name"] == "UpstreamQ"
+    assert rows[0]["bc_function"] == "timeseries"
+    assert rows[0]["quantity_1"].lower() == "time"
+    assert rows[0]["quantity_2"].lower() == "dischargebnd"
+    assert rows[0]["series"] == [(0.0, 12.0), (24.0, 15.0)]
+
+
+def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
+    ext = tmp_path / "extn.ext"
+    bc = tmp_path / "bc.bc"
+    ext.write_text(
+        "[General]\n"
+        "fileType = extForce\n"
+        "[Boundary]\n"
+        "quantity = dischargebnd\n"
+        "nodeId = bnd_01\n"
+        "forcingfile = bc.bc\n",
+        encoding="utf-8",
+    )
+    bc.write_text(
+        "[General]\n"
+        "fileType = boundConds\n"
+        "[forcing]\n"
+        "Name = bnd_01\n"
+        "Function = timeseries\n"
+        "Quantity = time\n"
+        "Unit = h\n"
+        "Quantity = dischargebnd\n"
+        "Unit = m3/s\n"
+        "0 1\n"
+        "1 2\n",
+        encoding="utf-8",
+    )
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    context = {
+        "branch_lookup": {},
+        "node_lookup": {"bnd_01": (120000.0, 450000.0)},
+        "epsg": 28992,
+    }
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_ext_file(str(ext))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_structures_spatial_file_creates_points(plugin, tmp_path):
+    structures = tmp_path / "structures.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = S1\n"
+        "name = S1\n"
+        "type = weir\n"
+        "branchId = B1\n"
+        "chainage = 500\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))), \
+         patch.object(plugin, "_apply_structure_type_categorized_style") as style_mock:
+        plugin.load_structures_spatial_file(str(structures))
+
+    assert add_map_layer.call_count == 1
+    style_mock.assert_called_once()
+
+
+def test_parse_structures_file_keeps_type_specific_fields(plugin, tmp_path):
+    structures = tmp_path / "structures.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = W1\n"
+        "type = weir\n"
+        "branchId = B1\n"
+        "chainage = 500\n"
+        "crestWidth = 12.5\n"
+        "allowedFlowDir = both\n"
+        "[Structure]\n"
+        "id = C1\n"
+        "type = compound\n"
+        "structureIds = W1;G1;P1\n",
+        encoding="utf-8",
+    )
+
+    records = plugin._parse_structures_file(str(structures))
+
+    assert len(records) == 2
+    assert records[0]["normalized"]["crestwidth"] == "12.5"
+    assert records[0]["normalized"]["allowedflowdir"] == "both"
+    assert records[1]["structureIds"] == ["W1", "G1", "P1"]
+
+
+def test_load_structures_spatial_file_adds_compound_table(plugin, tmp_path):
+    structures = tmp_path / "structures.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = S1\n"
+        "type = weir\n"
+        "branchId = B1\n"
+        "chainage = 500\n"
+        "[Structure]\n"
+        "id = C1\n"
+        "type = compound\n"
+        "structureIds = S1\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_structures_spatial_file(str(structures))
+
+    assert add_map_layer.call_count == 2
+
+
+def test_load_structures_spatial_file_compound_only_skips_grid_prompt(plugin, tmp_path):
+    structures = tmp_path / "structures.ini"
+    structures.write_text(
+        "[General]\n"
+        "fileType = structure\n"
+        "[Structure]\n"
+        "id = C1\n"
+        "type = compound\n"
+        "structureIds = A;B\n",
+        encoding="utf-8",
+    )
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context") as resolve_mock:
+        plugin.load_structures_spatial_file(str(structures))
+
+    resolve_mock.assert_not_called()
+    assert add_map_layer.call_count == 1
+
+
+def test_load_1d_field_spatial_file_creates_points(plugin, tmp_path):
+    field = tmp_path / "InitialWaterLevel.ini"
+    field.write_text(
+        "[General]\n"
+        "fileType = 1dField\n"
+        "[Global]\n"
+        "quantity = waterlevel\n"
+        "unit = m\n"
+        "[Branch]\n"
+        "branchId = B1\n"
+        "chainage = 100 200\n"
+        "values = 1.0 2.0\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_1d_field_spatial_file(str(field))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_roughness_spatial_file_creates_points(plugin, tmp_path):
+    roughness = tmp_path / "roughness.ini"
+    roughness.write_text(
+        "[General]\n"
+        "fileType = roughness\n"
+        "[Branch]\n"
+        "branchId = B1\n"
+        "frictionType = Strickler\n"
+        "functionType = absDischarge\n"
+        "chainage = 100 300\n"
+        "frictionValues = 20 30\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_roughness_spatial_file(str(roughness))
+
+    assert add_map_layer.call_count == 1
 
 
 # ---------------------------------------------------------------------------

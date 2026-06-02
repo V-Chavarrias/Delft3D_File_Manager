@@ -13,21 +13,24 @@ from qgis.PyQt.QtWidgets import (
     QProgressDialog,
     QVBoxLayout,
 )
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
-    QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex
+    QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
+    QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol
 )
 from PyQt5.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
 from datetime import datetime, timedelta
 import itertools
 import importlib
+import json
 import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 
 class _CanvasDoubleClickFilter(QObject):
@@ -81,7 +84,9 @@ class Delft3DFileManager:
         """Create toolbar button and menu item"""
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
         self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
-        self.import_action.setStatusTip("Import Delft3D file (.fxw fixed-weir, .pli/.ldb/.pol polyline, .pliz auto-detected fixed-weir/polyline, .xyn points, .nc UGRID mesh, .csl/.csd cross-sections)")
+        self.import_action.setStatusTip(
+            "Import Delft3D file (.fxw/.pli/.ldb/.pol/.pliz/.xyn/.xyz/.nc/.mat/.csl/.csd/.ini/.mdu/.ext/.bc/dimr_config.xml)"
+        )
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
@@ -165,10 +170,10 @@ class Delft3DFileManager:
         self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
 
         self.profile_chart_action = QAction(
-            QIcon(icon_path), "Cross-Section Profile", self.iface.mainWindow()
+            QIcon(icon_path), "Profile / Timeseries", self.iface.mainWindow()
         )
         self.profile_chart_action.setStatusTip(
-            "Open the cross-section profile chart window"
+            "Open the profile/timeseries chart window for cross-sections and boundary conditions"
         )
         self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.profile_chart_action)
@@ -211,13 +216,17 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini *.mdu *.ext *.bc *.xml);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
 
-    def load_file_by_extension(self, filepath):
-        """Route file to appropriate parser based on extension."""
+    def load_file_by_extension(self, filepath, spatial_grid_path=None):
+        """Route file to appropriate parser based on extension.
+
+        spatial_grid_path is an optional UGRID path propagated by parent imports
+        (for example DIMR -> MDU) to avoid repeatedly prompting for a grid file.
+        """
         _, ext = os.path.splitext(filepath)
         ext_lower = ext.lower()
         
@@ -247,18 +256,34 @@ class Delft3DFileManager:
             self.load_ugrid_mesh_file(filepath)
         elif ext_lower == ".mat":
             self.load_shorelines_mat_file(filepath)
+        elif ext_lower == ".xml" and os.path.basename(filepath).lower() == "dimr_config.xml":
+            self.load_dimr_config_file(filepath, spatial_grid_path=spatial_grid_path)
+        elif ext_lower == ".mdu":
+            self.load_fm_mdu_file(filepath, import_referenced=True, spatial_grid_path=spatial_grid_path)
+        elif ext_lower == ".ext":
+            self.load_ext_file(filepath, grid_path=spatial_grid_path)
+        elif ext_lower == ".bc":
+            self.load_bc_file(filepath)
         elif ext_lower in [".csl", ".csd"]:
             self.load_cross_sections_from_selection(filepath)
         elif ext_lower == ".ini":
-            ini_kind = self._detect_cross_section_ini_kind(filepath)
+            ini_kind = self._detect_ini_file_type(filepath)
             if ini_kind in ("crossloc", "crossdef"):
                 self.load_cross_sections_from_selection(filepath)
+            elif ini_kind == "extforce":
+                self.load_ext_file(filepath, grid_path=spatial_grid_path)
+            elif ini_kind == "boundconds":
+                self.load_bc_file(filepath)
+            elif ini_kind == "structure":
+                self.load_structures_spatial_file(filepath, grid_path=spatial_grid_path)
+            elif ini_kind == "inifield":
+                self.load_ini_field_spatial_file(filepath, grid_path=spatial_grid_path)
+            elif ini_kind == "1dfield":
+                self.load_1d_field_spatial_file(filepath, grid_path=spatial_grid_path)
+            elif ini_kind == "roughness":
+                self.load_roughness_spatial_file(filepath, grid_path=spatial_grid_path)
             else:
-                QMessageBox.warning(
-                    self.iface.mainWindow(),
-                    "Delft3D File Manager",
-                    "Unsupported .ini file. Expected Delft3D cross-section location or definition file.",
-                )
+                self.load_ini_table_file(filepath)
         else:
             QMessageBox.warning(
                 self.iface.mainWindow(),
@@ -274,7 +299,11 @@ class Delft3DFileManager:
                 "  .xyz - Point file with elevation\n"
                 "  .nc - UGRID mesh file\n"
                 "  .mat - ShorelineS results file\n"
-                "  .csl/.csd/.ini - Cross-section location/definition files"
+                "  .csl/.csd/.ini - Cross-section location/definition or generic INI file\n"
+                "  .mdu - FM model definition file\n"
+                "  .ext - External forcing definition file\n"
+                "  .bc - Boundary condition forcing file\n"
+                "  dimr_config.xml - DIMR simulation definition"
             )
 
     def load_cross_sections_from_selection(self, selected_filepath):
@@ -503,6 +532,15 @@ class Delft3DFileManager:
         has_profile = "def_ycoords" in field_lookup or "def_diam" in field_lookup
         return has_type and has_id and has_profile
 
+    def _is_boundary_condition_layer(self, layer):
+        """Return True when layer appears to be an imported boundary-condition layer."""
+        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+            return False
+
+        field_lookup = self._field_name_map(layer)
+        required = {"bc_name", "bc_function", "series_xy"}
+        return required.issubset(set(field_lookup.keys()))
+
     def _parse_float_list(self, text):
         """Parse whitespace-separated numeric text into a list of floats."""
         if text is None:
@@ -579,6 +617,42 @@ class Delft3DFileManager:
 
         return [], {"def_type": profile_type or "unknown"}, f"Unsupported def_type: {profile_type or 'empty'}"
 
+    def _parse_series_xy_text(self, text):
+        """Parse semicolon-separated x y pairs into float tuples."""
+        if text is None:
+            return []
+
+        raw_text = str(text).strip()
+        if not raw_text:
+            return []
+
+        points = []
+        for pair_text in raw_text.split(";"):
+            tokens = pair_text.strip().split()
+            if len(tokens) < 2:
+                continue
+            try:
+                x_val = float(tokens[0])
+                y_val = float(tokens[1])
+            except ValueError:
+                continue
+            if not math.isfinite(x_val) or not math.isfinite(y_val):
+                continue
+            points.append((x_val, y_val))
+        return points
+
+    def _timeseries_from_feature(self, feature):
+        """Build displayable points and metadata for one boundary-condition feature."""
+        points = self._parse_series_xy_text(feature["series_xy"])
+        metadata = {
+            "id": "" if feature["bc_name"] is None else str(feature["bc_name"]),
+            "definitionId": "" if feature["bc_function"] is None else str(feature["bc_function"]),
+            "def_type": "" if feature["quantity_1"] is None else str(feature["quantity_1"]),
+        }
+        if points:
+            return points, metadata, ""
+        return [], metadata, "No numeric series found for this boundary condition."
+
     def _profile_metadata(self, feature):
         """Extract lightweight metadata for chart display."""
         metadata = {
@@ -599,6 +673,14 @@ class Delft3DFileManager:
         if definition_id:
             return f"Cross-section {feature_id} ({definition_id})"
         return f"Cross-section {feature_id}"
+
+    def _timeseries_title(self, feature):
+        """Build chart title for boundary-condition features."""
+        name = feature["bc_name"] if feature["bc_name"] is not None else feature.id()
+        quantity = feature["quantity_1"] if feature["quantity_1"] is not None else ""
+        if quantity:
+            return f"Boundary condition {name} ({quantity})"
+        return f"Boundary condition {name}"
 
     def _create_cross_section_profile_dialog(self):
         """Construct the profile dialog lazily to keep plugin import lightweight."""
@@ -629,10 +711,25 @@ class Delft3DFileManager:
         dialog.raise_()
         dialog.activateWindow()
 
+    def _show_timeseries_in_dialog(self, feature):
+        """Render one boundary-condition timeseries in the profile dialog."""
+        points, metadata, message = self._timeseries_from_feature(feature)
+
+        dialog = self._ensure_profile_dialog()
+        dialog.set_profile(
+            points=points,
+            title=self._timeseries_title(feature),
+            metadata=metadata,
+            message=message,
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _show_profile_message(self, message):
         """Show guidance or status text in the profile dialog."""
         dialog = self._ensure_profile_dialog()
-        dialog.set_profile(points=[], title="Cross-Section Profile", metadata={}, message=message)
+        dialog.set_profile(points=[], title="Profile / Timeseries", metadata={}, message=message)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -690,17 +787,23 @@ class Delft3DFileManager:
 
         selected_feature = self._selected_cross_section_feature(layer)
         if selected_feature is None:
-            self._show_profile_message("Select a cross-section feature.")
+            self._show_profile_message("Select a cross-section or boundary-condition feature.")
             return
 
-        self._show_profile_in_dialog(selected_feature)
+        if self._is_cross_section_layer(layer):
+            self._show_profile_in_dialog(selected_feature)
+        elif self._is_boundary_condition_layer(layer):
+            self._show_timeseries_in_dialog(selected_feature)
 
     def open_cross_section_profile_window(self):
         """Open/focus profile chart and render selected feature when available."""
         layer = self.iface.activeLayer()
-        if not self._is_cross_section_layer(layer):
+        is_cross_section = self._is_cross_section_layer(layer)
+        is_boundary = self._is_boundary_condition_layer(layer)
+
+        if not is_cross_section and not is_boundary:
             self._show_profile_message(
-                "Activate a cross-section point layer and select a feature to preview its profile."
+                "Activate a cross-section or boundary-condition layer and select a feature to preview data."
             )
             self._disconnect_profile_layer_selection()
             return
@@ -708,10 +811,13 @@ class Delft3DFileManager:
         self._set_profile_layer(layer)
         selected_feature = self._selected_cross_section_feature(layer)
         if selected_feature is None:
-            self._show_profile_message("Select a cross-section feature.")
+            self._show_profile_message("Select a cross-section or boundary-condition feature.")
             return
 
-        self._show_profile_in_dialog(selected_feature)
+        if is_cross_section:
+            self._show_profile_in_dialog(selected_feature)
+        else:
+            self._show_timeseries_in_dialog(selected_feature)
 
     def _find_nearest_feature(self, layer, map_point):
         """Return nearest feature around a map click, with a map-unit tolerance."""
@@ -750,7 +856,9 @@ class Delft3DFileManager:
     def _handle_canvas_double_click(self, map_point):
         """Handle map canvas double-click by opening profile for nearest feature."""
         layer = self.iface.activeLayer()
-        if not self._is_cross_section_layer(layer):
+        is_cross_section = self._is_cross_section_layer(layer)
+        is_boundary = self._is_boundary_condition_layer(layer)
+        if not is_cross_section and not is_boundary:
             return
 
         feature = self._find_nearest_feature(layer, map_point)
@@ -758,7 +866,1287 @@ class Delft3DFileManager:
             return
 
         self._set_profile_layer(layer)
-        self._show_profile_in_dialog(feature)
+        if is_cross_section:
+            self._show_profile_in_dialog(feature)
+        else:
+            self._show_timeseries_in_dialog(feature)
+
+    def _select_grid_file_for_spatial_import(self, start_dir):
+        """Prompt user to select a grid file needed for spatial imports."""
+        grid_path, _ = QFileDialog.getOpenFileName(
+            self.iface.mainWindow(),
+            "Select UGRID Grid (.nc) for Spatial Import",
+            start_dir,
+            "NetCDF files (*.nc);;All Files (*)",
+        )
+        return grid_path
+
+    def _read_mesh_node_lookup_from_grid(self, grid_path):
+        """Read node-id to coordinate lookup from grid file."""
+        try:
+            import netCDF4 as nc
+            import numpy as np
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
+            ) from exc
+
+        with nc.Dataset(grid_path, "r") as ds:
+            node_x = ds.variables["network_node_x"][:] if "network_node_x" in ds.variables else None
+            node_y = ds.variables["network_node_y"][:] if "network_node_y" in ds.variables else None
+            node_ids = self._read_string_array(ds, "network_node_id")
+            if not self._has_nonempty_strings(node_ids):
+                node_ids = self._read_string_array(ds, "network_node_long_name")
+
+            epsg = self._read_epsg_from_nc(ds)
+            if epsg is None:
+                epsg = 28992
+
+        if node_x is None or node_y is None or not node_ids:
+            return {}, epsg
+
+        if isinstance(node_x, np.ma.MaskedArray):
+            node_x = node_x.filled(np.nan)
+        if isinstance(node_y, np.ma.MaskedArray):
+            node_y = node_y.filled(np.nan)
+
+        node_x = np.asarray(node_x, dtype=float)
+        node_y = np.asarray(node_y, dtype=float)
+
+        lookup = {}
+        n = min(len(node_ids), len(node_x), len(node_y))
+        for idx in range(n):
+            node_id = str(node_ids[idx]).strip()
+            if not node_id:
+                continue
+            x_val = float(node_x[idx])
+            y_val = float(node_y[idx])
+            if not math.isfinite(x_val) or not math.isfinite(y_val):
+                continue
+            lookup[node_id.lower()] = (x_val, y_val)
+        return lookup, epsg
+
+    def _build_spatial_context(self, grid_path):
+        """Build reusable spatial context for branch and node-based feature placement."""
+        branch_lookup, epsg = self._read_mesh_branch_profiles_from_grid(grid_path)
+        node_lookup, node_epsg = self._read_mesh_node_lookup_from_grid(grid_path)
+        if node_epsg is not None:
+            epsg = node_epsg
+        return {
+            "branch_lookup": branch_lookup,
+            "node_lookup": node_lookup,
+            "epsg": epsg,
+        }
+
+    def _resolve_spatial_context(self, grid_path, start_dir):
+        """Resolve spatial context by using provided grid path or prompting user."""
+        chosen_grid = grid_path
+        if not chosen_grid or not os.path.exists(chosen_grid):
+            chosen_grid = self._select_grid_file_for_spatial_import(start_dir)
+            if not chosen_grid:
+                return None, None
+
+        try:
+            context = self._build_spatial_context(chosen_grid)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not build spatial context from grid: {exc}",
+            )
+            return None, None
+
+        return context, os.path.abspath(chosen_grid)
+
+    def _parse_numeric_list(self, text):
+        """Parse whitespace-separated numeric text into a list of finite floats."""
+        raw = "" if text is None else str(text).strip()
+        if not raw:
+            return []
+
+        values = []
+        for token in raw.split():
+            try:
+                value = float(token)
+            except ValueError:
+                return []
+            if not math.isfinite(value):
+                return []
+            values.append(value)
+        return values
+
+    def _series_text_from_points(self, points):
+        """Serialize sequence of numeric pairs for chart display."""
+        return ";".join(f"{x:.12g} {y:.12g}" for x, y in points)
+
+    def _bc_name_lookup(self, records):
+        """Build case-insensitive lookup of BC forcing records by name."""
+        lookup = {}
+        for record in records:
+            key = str(record.get("bc_name", "")).strip().lower()
+            if key:
+                lookup[key] = record
+        return lookup
+
+    def _split_semicolon_paths(self, text):
+        """Split semicolon-separated path values while preserving order."""
+        if text is None:
+            return []
+        parts = []
+        for token in str(text).split(";"):
+            item = token.strip()
+            if item:
+                parts.append(item)
+        return parts
+
+    def _resolve_candidate_path(self, base_dir, value):
+        """Resolve path value relative to a base directory if needed."""
+        raw = "" if value is None else str(value).strip()
+        if not raw:
+            return ""
+        if os.path.isabs(raw):
+            return raw
+        return os.path.abspath(os.path.join(base_dir, raw))
+
+    def _read_dimr_component_input_files(self, dimr_config_path):
+        """Return inputFile values found in DIMR component blocks."""
+        tree = ET.parse(dimr_config_path)
+        root = tree.getroot()
+
+        input_files = []
+        for component in root.iter():
+            if not component.tag.lower().endswith("component"):
+                continue
+            for child in component:
+                if child.tag.lower().endswith("inputfile"):
+                    value = "" if child.text is None else child.text.strip()
+                    if value:
+                        input_files.append(value)
+        return input_files
+
+    def load_dimr_config_file(self, filepath, spatial_grid_path=None):
+        """Load a DIMR config and import referenced Delft3D FM inputs."""
+        dimr_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(dimr_path)
+
+        try:
+            input_files = self._read_dimr_component_input_files(dimr_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not read dimr_config.xml: {exc}",
+            )
+            return
+
+        if not input_files:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No component inputFile entries were found in dimr_config.xml.",
+            )
+            return
+
+        imported_count = 0
+        missing_count = 0
+        for input_file in input_files:
+            candidate = self._resolve_candidate_path(base_dir, input_file)
+            if not os.path.exists(candidate):
+                missing_count += 1
+                continue
+            self.load_file_by_extension(candidate, spatial_grid_path=spatial_grid_path)
+            imported_count += 1
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"DIMR import completed: imported {imported_count} input file(s), missing {missing_count}.",
+        )
+
+    def _read_mdu_primary_files(self, filepath):
+        """Read key file references from an FM .mdu file."""
+        sections = self._parse_repeated_ini_sections(filepath)
+        primary = {
+            "net_file": "",
+            "crossloc_file": "",
+            "crossdef_file": "",
+            "structure_file": "",
+            "ext_force_file": "",
+            "ini_field_file": "",
+            "frict_files": [],
+            "thin_dam_file": "",
+            "fixed_weir_file": "",
+            "pillar_file": "",
+        }
+
+        for block in sections:
+            section = block["section"].strip().lower()
+            values = block["values"]
+
+            if section == "geometry":
+                primary["net_file"] = values.get("NetFile", "").strip()
+                primary["crossloc_file"] = values.get("CrossLocFile", "").strip()
+                primary["crossdef_file"] = values.get("CrossDefFile", "").strip()
+                primary["structure_file"] = values.get("StructureFile", "").strip()
+                primary["ini_field_file"] = values.get("IniFieldFile", "").strip()
+                primary["thin_dam_file"] = values.get("ThinDamFile", "").strip()
+                primary["fixed_weir_file"] = values.get("FixedWeirFile", "").strip()
+                primary["pillar_file"] = values.get("PillarFile", "").strip()
+                primary["frict_files"] = self._split_semicolon_paths(values.get("FrictFile", ""))
+            elif section == "external forcing":
+                ext_new = values.get("ExtForceFileNew", "").strip()
+                ext_old = values.get("ExtForceFile", "").strip()
+                primary["ext_force_file"] = ext_new or ext_old
+
+        return primary
+
+    def load_fm_mdu_file(self, filepath, import_referenced=True, spatial_grid_path=None):
+        """Load FM .mdu and optionally import referenced files."""
+        mdu_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(mdu_path)
+
+        try:
+            primary = self._read_mdu_primary_files(mdu_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not read FM MDU file: {exc}",
+            )
+            return
+
+        summary_layer = QgsVectorLayer("None", f"{os.path.splitext(os.path.basename(mdu_path))[0]}_mdu_files", "memory")
+        provider = summary_layer.dataProvider()
+        provider.addAttributes([
+            QgsField("group", QVariant.String),
+            QgsField("key", QVariant.String),
+            QgsField("path", QVariant.String),
+            QgsField("exists", QVariant.Int),
+        ])
+        summary_layer.updateFields()
+
+        summary_rows = []
+
+        def add_row(group, key, value):
+            resolved = self._resolve_candidate_path(base_dir, value)
+            exists = 1 if resolved and os.path.exists(resolved) else 0
+            feature = QgsFeature(summary_layer.fields())
+            feature.setAttributes([group, key, resolved, exists])
+            summary_rows.append(feature)
+            return resolved, bool(exists)
+
+        net_path, net_ok = add_row("geometry", "NetFile", primary["net_file"])
+        csl_path, csl_ok = add_row("geometry", "CrossLocFile", primary["crossloc_file"])
+        csd_path, csd_ok = add_row("geometry", "CrossDefFile", primary["crossdef_file"])
+        struct_path, struct_ok = add_row("geometry", "StructureFile", primary["structure_file"])
+        ext_path, ext_ok = add_row("external forcing", "ExtForceFile", primary["ext_force_file"])
+        ini_field_path, ini_field_ok = add_row("geometry", "IniFieldFile", primary["ini_field_file"])
+        thin_dam_path, thin_dam_ok = add_row("geometry", "ThinDamFile", primary["thin_dam_file"])
+        fixed_weir_path, fixed_weir_ok = add_row("geometry", "FixedWeirFile", primary["fixed_weir_file"])
+        pillar_path, pillar_ok = add_row("geometry", "PillarFile", primary["pillar_file"])
+
+        for frict_file in primary["frict_files"]:
+            add_row("geometry", "FrictFile", frict_file)
+
+        if summary_rows:
+            provider.addFeatures(summary_rows)
+            summary_layer.updateExtents()
+            QgsProject.instance().addMapLayer(summary_layer)
+
+        if not import_referenced:
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Loaded FM MDU references from {os.path.basename(mdu_path)}",
+            )
+            return
+
+        if net_ok:
+            self.load_ugrid_mesh_file(net_path)
+        if csl_ok and csd_ok and net_ok:
+            self.load_cross_sections_files(csl_path, csd_path, net_path)
+        effective_grid_path = net_path if net_ok else spatial_grid_path
+
+        if ext_ok:
+            self.load_ext_file(ext_path, grid_path=effective_grid_path)
+        if struct_ok:
+            self.load_file_by_extension(struct_path, spatial_grid_path=effective_grid_path)
+        if ini_field_ok:
+            self.load_file_by_extension(ini_field_path, spatial_grid_path=effective_grid_path)
+        for frict_file in primary["frict_files"]:
+            frict_path = self._resolve_candidate_path(base_dir, frict_file)
+            if frict_path and os.path.exists(frict_path):
+                self.load_file_by_extension(frict_path, spatial_grid_path=effective_grid_path)
+        if thin_dam_ok:
+            self.load_polyline_file(thin_dam_path)
+        if fixed_weir_ok:
+            self.load_fixed_weir_file(fixed_weir_path)
+        if pillar_ok:
+            self.load_file_by_extension(pillar_path, spatial_grid_path=effective_grid_path)
+
+    def _parse_bc_forcing_file(self, filepath):
+        """Parse Delft3D FM boundary-condition forcing blocks from a .bc file."""
+        forcing_blocks = []
+        current = None
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except UnicodeDecodeError:
+            with open(filepath, "r") as handle:
+                lines = handle.readlines()
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+
+            if line.startswith("[") and line.endswith("]"):
+                if current is not None:
+                    forcing_blocks.append(current)
+                section_name = line[1:-1].strip().lower()
+                current = {"section": section_name, "meta": {}, "series": []}
+                continue
+
+            if current is None or current.get("section") != "forcing":
+                continue
+
+            if "=" in line:
+                key, value = line.split("=", 1)
+                key_norm = key.strip().lower()
+                current["meta"].setdefault(key_norm, []).append(value.strip())
+                continue
+
+            tokens = line.split()
+            if len(tokens) < 2:
+                continue
+            try:
+                x_val = float(tokens[0])
+                y_val = float(tokens[1])
+            except ValueError:
+                continue
+            if not math.isfinite(x_val) or not math.isfinite(y_val):
+                continue
+            current["series"].append((x_val, y_val))
+
+        if current is not None:
+            forcing_blocks.append(current)
+
+        records = []
+        for block in forcing_blocks:
+            if block.get("section") != "forcing":
+                continue
+
+            meta = block["meta"]
+            quantities = meta.get("quantity", [])
+            units = meta.get("unit", [])
+
+            record = {
+                "bc_name": meta.get("name", [""])[0],
+                "bc_function": meta.get("function", [""])[0],
+                "quantity_1": quantities[0] if len(quantities) > 0 else "",
+                "unit_1": units[0] if len(units) > 0 else "",
+                "quantity_2": quantities[1] if len(quantities) > 1 else "",
+                "unit_2": units[1] if len(units) > 1 else "",
+                "series": block["series"],
+            }
+            records.append(record)
+
+        return records
+
+    def load_bc_file(self, filepath):
+        """Import FM boundary-condition forcing file as a table-like memory layer."""
+        bc_path = os.path.abspath(filepath)
+        try:
+            records = self._parse_bc_forcing_file(bc_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import BC file: {exc}",
+            )
+            return
+
+        if not records:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No [forcing] records found in boundary-condition file.",
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(bc_path))[0]
+        layer = QgsVectorLayer("None", f"{base_name}_bc", "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("source_bc", QVariant.String),
+            QgsField("bc_name", QVariant.String),
+            QgsField("bc_function", QVariant.String),
+            QgsField("quantity_1", QVariant.String),
+            QgsField("unit_1", QVariant.String),
+            QgsField("quantity_2", QVariant.String),
+            QgsField("unit_2", QVariant.String),
+            QgsField("sample_cnt", QVariant.Int),
+            QgsField("series_xy", QVariant.String),
+        ])
+        layer.updateFields()
+
+        features = []
+        for record in records:
+            feature = QgsFeature(layer.fields())
+            series_text = ";".join(f"{x:.12g} {y:.12g}" for x, y in record["series"])
+            feature.setAttributes([
+                os.path.basename(bc_path),
+                record["bc_name"],
+                record["bc_function"],
+                record["quantity_1"],
+                record["unit_1"],
+                record["quantity_2"],
+                record["unit_2"],
+                len(record["series"]),
+                series_text,
+            ])
+            features.append(feature)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} boundary-condition record(s) from {os.path.basename(bc_path)}",
+        )
+
+    def _parse_ext_file(self, filepath):
+        """Parse Delft3D FM .ext forcing links."""
+        rows = []
+        for block in self._parse_repeated_ini_sections(filepath):
+            section = block["section"].strip().lower()
+            values = block["values"]
+            if section == "boundary":
+                rows.append({
+                    "kind": "boundary",
+                    "id": values.get("nodeId", "").strip(),
+                    "quantity": values.get("quantity", "").strip(),
+                    "nodeId": values.get("nodeId", "").strip(),
+                    "branchId": "",
+                    "chainage": "",
+                    "forcingfile": values.get("forcingfile", "").strip(),
+                })
+            elif section == "lateral":
+                rows.append({
+                    "kind": "lateral",
+                    "id": values.get("id", "").strip() or values.get("name", "").strip(),
+                    "quantity": "lateral_discharge",
+                    "nodeId": "",
+                    "branchId": values.get("branchId", "").strip(),
+                    "chainage": values.get("chainage", "").strip(),
+                    "forcingfile": values.get("discharge", "").strip(),
+                })
+        return rows
+
+    def load_ext_file(self, filepath, grid_path=None):
+        """Import FM external forcing as spatial features and link BC forcing series."""
+        ext_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(ext_path)
+
+        try:
+            rows = self._parse_ext_file(ext_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import EXT file: {exc}",
+            )
+            return
+
+        context, resolved_grid = self._resolve_spatial_context(grid_path, base_dir)
+        if context is None:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Spatial import requires a valid grid file.",
+            )
+            return
+
+        bc_records_by_file = {}
+        bc_files = []
+        for row in rows:
+            resolved_bc = self._resolve_candidate_path(base_dir, row.get("forcingfile", ""))
+            if resolved_bc and os.path.exists(resolved_bc) and resolved_bc.lower().endswith(".bc"):
+                bc_files.append(resolved_bc)
+
+        for bc_path in sorted(set(bc_files)):
+            try:
+                bc_records_by_file[bc_path] = self._parse_bc_forcing_file(bc_path)
+            except Exception:
+                bc_records_by_file[bc_path] = []
+
+        layer = QgsVectorLayer(
+            f"Point?crs=EPSG:{context['epsg']}",
+            f"{os.path.splitext(os.path.basename(ext_path))[0]}_ext_spatial",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("kind", QVariant.String),
+            QgsField("id", QVariant.String),
+            QgsField("quantity", QVariant.String),
+            QgsField("nodeId", QVariant.String),
+            QgsField("branchId", QVariant.String),
+            QgsField("chainage", QVariant.Double),
+            QgsField("forcingfile", QVariant.String),
+            QgsField("bc_name", QVariant.String),
+            QgsField("bc_function", QVariant.String),
+            QgsField("quantity_1", QVariant.String),
+            QgsField("unit_1", QVariant.String),
+            QgsField("quantity_2", QVariant.String),
+            QgsField("unit_2", QVariant.String),
+            QgsField("sample_cnt", QVariant.Int),
+            QgsField("series_xy", QVariant.String),
+            QgsField("source_ext", QVariant.String),
+            QgsField("source_grid", QVariant.String),
+        ])
+        layer.updateFields()
+
+        features = []
+        unresolved = 0
+        branch_lookup = context["branch_lookup"]
+        node_lookup = context["node_lookup"]
+
+        for row in rows:
+            point_xy = None
+            row_id = str(row.get("id", "")).strip()
+            kind = str(row.get("kind", "")).strip().lower()
+
+            if kind == "boundary":
+                node_id = str(row.get("nodeId", "")).strip().lower()
+                point_xy = node_lookup.get(node_id)
+            elif kind == "lateral":
+                branch_id = str(row.get("branchId", "")).strip().lower()
+                chainage_text = str(row.get("chainage", "")).strip()
+                profile = branch_lookup.get(branch_id)
+                try:
+                    chainage_val = float(chainage_text) if chainage_text else 0.0
+                except ValueError:
+                    chainage_val = None
+                if profile is not None and chainage_val is not None:
+                    point_xy = self._interpolate_point_on_branch(profile, chainage_val)
+
+            if point_xy is None:
+                unresolved += 1
+                continue
+
+            forcing_file = str(row.get("forcingfile", "")).strip()
+            resolved_bc = self._resolve_candidate_path(base_dir, forcing_file)
+            bc_rows = bc_records_by_file.get(resolved_bc, [])
+            bc_lookup = self._bc_name_lookup(bc_rows)
+            bc_record = bc_lookup.get(row_id.lower())
+
+            if bc_record is None and kind == "boundary":
+                node_key = str(row.get("nodeId", "")).strip().lower()
+                bc_record = bc_lookup.get(node_key)
+
+            series = [] if bc_record is None else bc_record.get("series", [])
+            series_text = self._series_text_from_points(series)
+
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+            feature.setAttributes([
+                row.get("kind", ""),
+                row_id,
+                row.get("quantity", ""),
+                row.get("nodeId", ""),
+                row.get("branchId", ""),
+                float(row.get("chainage", 0.0) or 0.0) if str(row.get("chainage", "")).strip() else 0.0,
+                forcing_file,
+                "" if bc_record is None else bc_record.get("bc_name", ""),
+                "" if bc_record is None else bc_record.get("bc_function", ""),
+                "" if bc_record is None else bc_record.get("quantity_1", ""),
+                "" if bc_record is None else bc_record.get("unit_1", ""),
+                "" if bc_record is None else bc_record.get("quantity_2", ""),
+                "" if bc_record is None else bc_record.get("unit_2", ""),
+                len(series),
+                series_text,
+                os.path.basename(ext_path),
+                os.path.basename(resolved_grid),
+            ])
+            features.append(feature)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No spatial EXT features could be derived from branch/node references.",
+            )
+            return
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} spatial forcing feature(s) from {os.path.basename(ext_path)} (unresolved: {unresolved}).",
+        )
+
+    def _parse_structures_file(self, filepath):
+        """Parse [Structure] blocks from a structures file."""
+        records = []
+        for block in self._parse_repeated_ini_sections(filepath):
+            if block["section"].strip().lower() != "structure":
+                continue
+            values = block["values"]
+            normalized = {
+                str(key).strip().lower(): "" if value is None else str(value).strip()
+                for key, value in values.items()
+            }
+            structure_ids_text = normalized.get("structureids", "")
+            structure_ids = [
+                token for token in re.split(r"[;,\s]+", structure_ids_text) if token
+            ]
+            record = {
+                "id": normalized.get("id", ""),
+                "name": normalized.get("name", ""),
+                "type": normalized.get("type", ""),
+                "branchId": normalized.get("branchid", ""),
+                "chainage": normalized.get("chainage", ""),
+                "capacity": normalized.get("capacity", ""),
+                "structureIds": structure_ids,
+                "normalized": normalized,
+                "raw": values,
+            }
+            records.append(record)
+        return records
+
+    def _build_structure_dynamic_fields(self, records, excluded_keys, used_names):
+        """Build dynamic structure fields from keys present in the file."""
+        key_values = {}
+        for record in records:
+            for key, value in record.get("normalized", {}).items():
+                if key in excluded_keys:
+                    continue
+                key_values.setdefault(key, []).append(value)
+
+        def infer_qvariant(values):
+            non_empty = [str(item).strip() for item in values if str(item).strip()]
+            if not non_empty:
+                return QVariant.String
+            for item in non_empty:
+                try:
+                    number = float(item)
+                except ValueError:
+                    return QVariant.String
+                if not math.isfinite(number):
+                    return QVariant.String
+            return QVariant.Double
+
+        def make_field_name(raw_key):
+            name = re.sub(r"[^a-z0-9_]", "_", str(raw_key).strip().lower())
+            if not name:
+                name = "attr"
+            if name[0].isdigit():
+                name = f"f_{name}"
+            name = name[:48]
+
+            candidate = name
+            suffix = 1
+            while candidate in used_names:
+                base = name[:44]
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            used_names.add(candidate)
+            return candidate
+
+        mapping = {}
+        fields = []
+        for key in sorted(key_values.keys()):
+            field_name = make_field_name(key)
+            mapping[key] = field_name
+            fields.append(QgsField(field_name, infer_qvariant(key_values[key])))
+        return fields, mapping
+
+    def _set_feature_dynamic_attributes(self, feature, record, key_mapping):
+        """Populate dynamic structure attributes for a feature."""
+        values = record.get("normalized", {})
+        for key, field_name in key_mapping.items():
+            raw_value = str(values.get(key, "")).strip()
+            if raw_value == "":
+                continue
+            current_value = feature[field_name]
+            if isinstance(current_value, (float, int)):
+                try:
+                    feature[field_name] = float(raw_value)
+                except ValueError:
+                    feature[field_name] = None
+            else:
+                feature[field_name] = raw_value
+
+    def _apply_structure_type_categorized_style(self, layer):
+        """Apply categorized point styling to structures by type field."""
+        try:
+            type_values = set()
+            for feature in layer.getFeatures():
+                type_value = str(feature["type"]).strip()
+                if type_value:
+                    type_values.add(type_value)
+        except Exception:
+            return
+
+        if not type_values:
+            return
+
+        known_colors = {
+            "weir": "#D1495B",
+            "gate": "#00798C",
+            "pump": "#30638E",
+            "orifice": "#8F2D56",
+            "culvert": "#0B6E4F",
+            "bridge": "#2A9D8F",
+            "checkvalve": "#6D597A",
+            "generalstructure": "#EDAE49",
+            "dambreak": "#BC4749",
+            "longculvert": "#3F88C5",
+            "universalweir": "#D17A22",
+            "riverweir": "#A44A3F",
+            "weirgen": "#B56576",
+            "pumpstation": "#355070",
+        }
+        fallback_palette = [
+            "#0B6E4F",
+            "#D1495B",
+            "#00798C",
+            "#EDAE49",
+            "#30638E",
+            "#8F2D56",
+            "#3F88C5",
+            "#2A9D8F",
+            "#6D597A",
+            "#BC4749",
+        ]
+
+        def color_for_type(type_value):
+            type_key = str(type_value).strip().lower()
+            if type_key in known_colors:
+                return known_colors[type_key]
+
+            # Use a stable checksum to pick a fallback color for unknown types.
+            checksum = sum(ord(ch) for ch in type_key)
+            return fallback_palette[checksum % len(fallback_palette)]
+
+        categories = []
+        for type_value in sorted(type_values, key=lambda t: t.lower()):
+            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+            try:
+                symbol.setColor(QColor(color_for_type(type_value)))
+            except Exception:
+                pass
+            categories.append(QgsRendererCategory(type_value, symbol, type_value))
+
+        renderer = QgsCategorizedSymbolRenderer("type", categories)
+        layer.setRenderer(renderer)
+        try:
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def load_structures_spatial_file(self, filepath, grid_path=None):
+        """Import structures as spatial point features using branchId/chainage."""
+        structures_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(structures_path)
+
+        try:
+            records = self._parse_structures_file(structures_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not read structures file: {exc}",
+            )
+            return
+
+        compound_records = []
+        spatial_records = []
+        for record in records:
+            struct_type = str(record.get("type", "")).strip().lower()
+            if struct_type == "compound":
+                compound_records.append(record)
+            else:
+                spatial_records.append(record)
+
+        context = {"branch_lookup": {}, "node_lookup": {}, "epsg": 28992}
+        resolved_grid = ""
+        if spatial_records:
+            resolved_context, resolved_grid_path = self._resolve_spatial_context(grid_path, base_dir)
+            if resolved_context is not None:
+                context = resolved_context
+                resolved_grid = resolved_grid_path
+
+        excluded_spatial_keys = {
+            "id", "name", "type", "branchid", "chainage", "capacity", "structureids"
+        }
+        excluded_compound_keys = {"id", "name", "type", "structureids"}
+
+        spatial_field_names = {
+            "id", "name", "type", "branchid", "chainage", "capacity", "bc_name",
+            "bc_function", "quantity_1", "unit_1", "sample_cnt", "series_xy",
+            "resolve_status", "resolve_note", "source_ini", "source_grid", "raw_json"
+        }
+        compound_field_names = {
+            "id", "name", "type", "structureids", "child_count", "source_ini", "raw_json"
+        }
+
+        spatial_dynamic_fields, spatial_key_mapping = self._build_structure_dynamic_fields(
+            spatial_records, excluded_spatial_keys, spatial_field_names
+        )
+        compound_dynamic_fields, compound_key_mapping = self._build_structure_dynamic_fields(
+            compound_records, excluded_compound_keys, compound_field_names
+        )
+
+        layer = QgsVectorLayer(
+            f"Point?crs=EPSG:{context['epsg']}",
+            f"{os.path.splitext(os.path.basename(structures_path))[0]}_structures",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("id", QVariant.String),
+            QgsField("name", QVariant.String),
+            QgsField("type", QVariant.String),
+            QgsField("branchId", QVariant.String),
+            QgsField("chainage", QVariant.Double),
+            QgsField("capacity", QVariant.String),
+            QgsField("bc_name", QVariant.String),
+            QgsField("bc_function", QVariant.String),
+            QgsField("quantity_1", QVariant.String),
+            QgsField("unit_1", QVariant.String),
+            QgsField("sample_cnt", QVariant.Int),
+            QgsField("series_xy", QVariant.String),
+            QgsField("resolve_status", QVariant.String),
+            QgsField("resolve_note", QVariant.String),
+            QgsField("source_ini", QVariant.String),
+            QgsField("source_grid", QVariant.String),
+            QgsField("raw_json", QVariant.String),
+        ])
+        if spatial_dynamic_fields:
+            provider.addAttributes(spatial_dynamic_fields)
+        layer.updateFields()
+
+        features = []
+        unresolved = 0
+        resolved = 0
+        branch_lookup = context["branch_lookup"]
+
+        for record in spatial_records:
+            branch_id = str(record.get("branchId", "")).strip().lower()
+            point_xy = None
+            chainage_val = None
+            resolve_status = "resolved"
+            resolve_note = ""
+
+            if not branch_id:
+                resolve_status = "unresolved"
+                resolve_note = "missing branchId"
+            else:
+                profile = branch_lookup.get(branch_id)
+                if profile is None:
+                    resolve_status = "unresolved"
+                    resolve_note = f"unknown branchId: {record.get('branchId', '')}"
+                else:
+                    try:
+                        chainage_val = float(record.get("chainage", "0") or 0.0)
+                    except ValueError:
+                        resolve_status = "unresolved"
+                        resolve_note = f"invalid chainage: {record.get('chainage', '')}"
+                    else:
+                        point_xy = self._interpolate_point_on_branch(profile, chainage_val)
+                        if point_xy is None:
+                            resolve_status = "unresolved"
+                            resolve_note = f"chainage out of range: {chainage_val:g}"
+
+            bc_record = None
+            cap_ref = str(record.get("capacity", "")).strip()
+            if cap_ref.lower().endswith(".bc"):
+                bc_path = self._resolve_candidate_path(base_dir, cap_ref)
+                if os.path.exists(bc_path):
+                    bc_lookup = self._bc_name_lookup(self._parse_bc_forcing_file(bc_path))
+                    key_options = [str(record.get("id", "")).strip().lower(), str(record.get("name", "")).strip().lower()]
+                    for key in key_options:
+                        if key and key in bc_lookup:
+                            bc_record = bc_lookup[key]
+                            break
+
+            series = [] if bc_record is None else bc_record.get("series", [])
+
+            feature = QgsFeature(layer.fields())
+            if point_xy is not None:
+                feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+                resolved += 1
+            else:
+                unresolved += 1
+
+            feature["id"] = record.get("id", "")
+            feature["name"] = record.get("name", "")
+            feature["type"] = record.get("type", "")
+            feature["branchId"] = record.get("branchId", "")
+            feature["chainage"] = chainage_val if chainage_val is not None else None
+            feature["capacity"] = cap_ref
+            feature["bc_name"] = "" if bc_record is None else bc_record.get("bc_name", "")
+            feature["bc_function"] = "" if bc_record is None else bc_record.get("bc_function", "")
+            feature["quantity_1"] = "" if bc_record is None else bc_record.get("quantity_1", "")
+            feature["unit_1"] = "" if bc_record is None else bc_record.get("unit_1", "")
+            feature["sample_cnt"] = len(series)
+            feature["series_xy"] = self._series_text_from_points(series)
+            feature["resolve_status"] = resolve_status
+            feature["resolve_note"] = resolve_note
+            feature["source_ini"] = os.path.basename(structures_path)
+            feature["source_grid"] = os.path.basename(resolved_grid)
+            feature["raw_json"] = json.dumps(record.get("raw", {}), ensure_ascii=True)
+            self._set_feature_dynamic_attributes(feature, record, spatial_key_mapping)
+            features.append(feature)
+
+        if features:
+            provider.addFeatures(features)
+            layer.updateExtents()
+            self._apply_structure_type_categorized_style(layer)
+            QgsProject.instance().addMapLayer(layer)
+
+        compound_count = 0
+        if compound_records:
+            compound_layer = QgsVectorLayer(
+                "None",
+                f"{os.path.splitext(os.path.basename(structures_path))[0]}_structures_compound",
+                "memory",
+            )
+            compound_provider = compound_layer.dataProvider()
+            compound_provider.addAttributes([
+                QgsField("id", QVariant.String),
+                QgsField("name", QVariant.String),
+                QgsField("type", QVariant.String),
+                QgsField("structureIds", QVariant.String),
+                QgsField("child_count", QVariant.Int),
+                QgsField("source_ini", QVariant.String),
+                QgsField("raw_json", QVariant.String),
+            ])
+            if compound_dynamic_fields:
+                compound_provider.addAttributes(compound_dynamic_fields)
+            compound_layer.updateFields()
+
+            compound_features = []
+            for record in compound_records:
+                feature = QgsFeature(compound_layer.fields())
+                structure_ids = record.get("structureIds", [])
+                feature["id"] = record.get("id", "")
+                feature["name"] = record.get("name", "")
+                feature["type"] = record.get("type", "")
+                feature["structureIds"] = ";".join(structure_ids)
+                feature["child_count"] = len(structure_ids)
+                feature["source_ini"] = os.path.basename(structures_path)
+                feature["raw_json"] = json.dumps(record.get("raw", {}), ensure_ascii=True)
+                self._set_feature_dynamic_attributes(feature, record, compound_key_mapping)
+                compound_features.append(feature)
+
+            if compound_features:
+                compound_provider.addFeatures(compound_features)
+                compound_layer.updateExtents()
+                QgsProject.instance().addMapLayer(compound_layer)
+                compound_count = len(compound_features)
+
+        if not features and compound_count == 0:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No structure records were found in the selected file.",
+            )
+            return
+
+        type_counts = {}
+        all_unknown_types = set()
+        known_types = {
+            "pump", "weir", "gate", "orifice", "culvert", "bridge", "checkvalve",
+            "generalstructure", "dambreak", "longculvert", "universalweir",
+            "riverweir", "weirgen", "pumpstation", "compound"
+        }
+        for record in records:
+            type_key = str(record.get("type", "")).strip() or "(unknown)"
+            type_counts[type_key] = type_counts.get(type_key, 0) + 1
+            if type_key != "(unknown)" and type_key.lower() not in known_types:
+                all_unknown_types.add(type_key)
+        counts_text = ", ".join(f"{name}:{count}" for name, count in sorted(type_counts.items()))
+
+        summary = (
+            f"Loaded structure records from {os.path.basename(structures_path)}: "
+            f"spatial total {len(features)} (resolved {resolved}, unresolved {unresolved}), "
+            f"compound table {compound_count}, unknown types {len(all_unknown_types)}. "
+            f"Types: {counts_text}."
+        )
+        self.iface.messageBar().pushSuccess("Delft3D File Manager", summary)
+
+        if all_unknown_types:
+            unknown_text = ", ".join(sorted(all_unknown_types))
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Unknown structure type(s) imported with raw attributes: {unknown_text}.",
+            )
+
+    def load_ini_field_spatial_file(self, filepath, grid_path=None):
+        """Import iniField file by resolving its referenced dataFile."""
+        ini_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(ini_path)
+
+        sections = self._parse_repeated_ini_sections(ini_path)
+        data_file = ""
+        for block in sections:
+            if block["section"].strip().lower() != "initial":
+                continue
+            data_file = block["values"].get("dataFile", "").strip()
+            if data_file:
+                break
+
+        if not data_file:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Could not find dataFile entry in iniField file.",
+            )
+            return
+
+        resolved_data = self._resolve_candidate_path(base_dir, data_file)
+        if not os.path.exists(resolved_data):
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Referenced dataFile does not exist: {resolved_data}",
+            )
+            return
+
+        self.load_1d_field_spatial_file(resolved_data, grid_path=grid_path)
+
+    def load_1d_field_spatial_file(self, filepath, grid_path=None):
+        """Import 1dField branch chainage/value arrays as spatial points."""
+        field_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(field_path)
+
+        context, resolved_grid = self._resolve_spatial_context(grid_path, base_dir)
+        if context is None:
+            return
+
+        sections = self._parse_repeated_ini_sections(field_path)
+        layer = QgsVectorLayer(
+            f"Point?crs=EPSG:{context['epsg']}",
+            f"{os.path.splitext(os.path.basename(field_path))[0]}_field",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("branchId", QVariant.String),
+            QgsField("chainage", QVariant.Double),
+            QgsField("value", QVariant.Double),
+            QgsField("quantity", QVariant.String),
+            QgsField("unit", QVariant.String),
+            QgsField("source_ini", QVariant.String),
+            QgsField("source_grid", QVariant.String),
+        ])
+        layer.updateFields()
+
+        quantity = ""
+        unit = ""
+        for block in sections:
+            if block["section"].strip().lower() == "global":
+                quantity = block["values"].get("quantity", "").strip()
+                unit = block["values"].get("unit", "").strip()
+                break
+
+        features = []
+        unresolved = 0
+        branch_lookup = context["branch_lookup"]
+
+        for block in sections:
+            if block["section"].strip().lower() != "branch":
+                continue
+
+            values = block["values"]
+            branch_id = values.get("branchId", "").strip()
+            if not branch_id:
+                continue
+
+            chainage_vals = self._parse_numeric_list(values.get("chainage", ""))
+            value_vals = self._parse_numeric_list(values.get("values", ""))
+            n = min(len(chainage_vals), len(value_vals))
+            if n == 0:
+                continue
+
+            profile = branch_lookup.get(branch_id.lower())
+            if profile is None:
+                unresolved += n
+                continue
+
+            for idx in range(n):
+                point_xy = self._interpolate_point_on_branch(profile, chainage_vals[idx])
+                if point_xy is None:
+                    unresolved += 1
+                    continue
+
+                feature = QgsFeature(layer.fields())
+                feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+                feature.setAttributes([
+                    branch_id,
+                    float(chainage_vals[idx]),
+                    float(value_vals[idx]),
+                    quantity,
+                    unit,
+                    os.path.basename(field_path),
+                    os.path.basename(resolved_grid),
+                ])
+                features.append(feature)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No spatial 1dField features could be created.",
+            )
+            return
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} spatial 1dField point(s) from {os.path.basename(field_path)} (unresolved: {unresolved}).",
+        )
+
+    def load_roughness_spatial_file(self, filepath, grid_path=None):
+        """Import roughness branch chainage/value arrays as spatial points."""
+        rough_path = os.path.abspath(filepath)
+        base_dir = os.path.dirname(rough_path)
+
+        context, resolved_grid = self._resolve_spatial_context(grid_path, base_dir)
+        if context is None:
+            return
+
+        sections = self._parse_repeated_ini_sections(rough_path)
+        layer = QgsVectorLayer(
+            f"Point?crs=EPSG:{context['epsg']}",
+            f"{os.path.splitext(os.path.basename(rough_path))[0]}_roughness",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("branchId", QVariant.String),
+            QgsField("chainage", QVariant.Double),
+            QgsField("fric_value", QVariant.Double),
+            QgsField("fric_type", QVariant.String),
+            QgsField("function", QVariant.String),
+            QgsField("source_ini", QVariant.String),
+            QgsField("source_grid", QVariant.String),
+        ])
+        layer.updateFields()
+
+        features = []
+        unresolved = 0
+        branch_lookup = context["branch_lookup"]
+
+        for block in sections:
+            if block["section"].strip().lower() != "branch":
+                continue
+
+            values = block["values"]
+            branch_id = values.get("branchId", "").strip()
+            chainage_vals = self._parse_numeric_list(values.get("chainage", ""))
+            fric_vals = self._parse_numeric_list(values.get("frictionValues", ""))
+            n = min(len(chainage_vals), len(fric_vals))
+            if not branch_id or n == 0:
+                continue
+
+            profile = branch_lookup.get(branch_id.lower())
+            if profile is None:
+                unresolved += n
+                continue
+
+            for idx in range(n):
+                point_xy = self._interpolate_point_on_branch(profile, chainage_vals[idx])
+                if point_xy is None:
+                    unresolved += 1
+                    continue
+
+                feature = QgsFeature(layer.fields())
+                feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+                feature.setAttributes([
+                    branch_id,
+                    float(chainage_vals[idx]),
+                    float(fric_vals[idx]),
+                    values.get("frictionType", "").strip(),
+                    values.get("functionType", "").strip(),
+                    os.path.basename(rough_path),
+                    os.path.basename(resolved_grid),
+                ])
+                features.append(feature)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No spatial roughness features could be created.",
+            )
+            return
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} spatial roughness point(s) from {os.path.basename(rough_path)} (unresolved: {unresolved}).",
+        )
+
+    def load_ini_table_file(self, filepath):
+        """Import generic Delft3D INI file as repeated section/key/value table."""
+        ini_path = os.path.abspath(filepath)
+        try:
+            sections = self._parse_repeated_ini_sections(ini_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import INI file: {exc}",
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(ini_path))[0]
+        layer = QgsVectorLayer("None", f"{base_name}_ini", "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("section", QVariant.String),
+            QgsField("key", QVariant.String),
+            QgsField("value", QVariant.String),
+            QgsField("source", QVariant.String),
+        ])
+        layer.updateFields()
+
+        features = []
+        for block in sections:
+            section = block["section"]
+            for key, value in block["values"].items():
+                feature = QgsFeature(layer.fields())
+                feature.setAttributes([section, key, value, os.path.basename(ini_path)])
+                features.append(feature)
+
+        if not features:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "No key/value entries were found in the selected INI file.",
+            )
+            return
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} INI row(s) from {os.path.basename(ini_path)}",
+        )
 
     def _connect_canvas_double_click(self):
         """Connect to map canvas double-click events, failing gracefully in test stubs."""
@@ -832,6 +2220,13 @@ class Delft3DFileManager:
 
     def _detect_cross_section_ini_kind(self, filepath):
         """Detect whether an INI file is crossLoc or crossDef based on [General] fileType."""
+        file_type = self._detect_ini_file_type(filepath)
+        if file_type in ("crossloc", "crossdef"):
+            return file_type
+        return None
+
+    def _detect_ini_file_type(self, filepath):
+        """Detect generic Delft3D INI fileType from [General] block."""
         try:
             sections = self._parse_repeated_ini_sections(filepath)
         except OSError:
@@ -841,7 +2236,7 @@ class Delft3DFileManager:
             if block["section"].strip().lower() != "general":
                 continue
             file_type = block["values"].get("fileType", "").strip().lower()
-            if file_type in ("crossloc", "crossdef"):
+            if file_type:
                 return file_type
         return None
 

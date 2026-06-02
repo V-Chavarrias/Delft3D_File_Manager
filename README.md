@@ -6,8 +6,12 @@ A QGIS plugin to manage Delft3D files.
 - Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
 - Reads point-cloud `.xyn` files as point layers with optional generated names.
 - Reads `.xyz` point files as 2D point layers with a `z` attribute.
+- Imports complete Delft3D FM simulations from `dimr_config.xml` and follows linked model input files.
+- Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
+- Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
 - Detects morphodynamic NetCDF variables with extra dimensions and flattens selected variables to QGIS-compatible time/space datasets.
+- Visualizes imported boundary-condition timeseries in the existing profile popup window.
 - Exports line features and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
@@ -25,9 +29,72 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.pliz`** — Auto-detected as polyline, bridge, or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
+- **`dimr_config.xml`** — DIMR simulation config (loads referenced component input files)
+- **`.mdu`** — FM model definition file (creates a summary table and loads linked files)
+- **`.ext`** — FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
+- **`.bc`** — FM boundary-condition forcing file (creates forcing/timeseries records)
 - **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 - **`.csl`, `.csd`** — FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
+
+### Import: Full Delft3D FM Simulation (`dimr_config.xml`)
+
+Import a complete simulation setup by selecting `dimr_config.xml`.
+
+#### Workflow
+1. Parse all `<component><inputFile>` entries from the DIMR XML.
+2. Resolve paths relative to the DIMR file location.
+3. Dispatch each referenced file to the corresponding importer.
+
+This allows one-click loading of model configuration and linked FM inputs.
+
+### Import: FM Model Definition (`.mdu`)
+
+Load an FM model definition and its primary linked inputs.
+
+#### Behavior
+- Creates an `*_mdu_files` summary table with resolved paths and existence flags.
+- Loads linked mesh (`NetFile`) when available.
+- Loads cross-sections when `CrossLocFile`, `CrossDefFile`, and mesh are all available.
+- Loads linked external forcing (`ExtForceFileNew`/`ExtForceFile`) and boundary forcing files.
+- Loads linked structures/iniField/1dField/roughness files as spatial features (when branch/node references can be resolved with the selected grid).
+
+### Import: External Forcing (`.ext`) and Boundary Forcing (`.bc`)
+
+#### `.ext`
+- Imports boundary/lateral link entries into an `*_ext_spatial` point layer.
+- Resolves geometry from `nodeId` (boundaries) and `branchId + chainage` (laterals).
+- Links referenced `.bc` series by forcing identifier so features are clickable and plottable.
+
+#### `.bc`
+- Imports each `[forcing]` block into an `*_bc` table.
+- Stores forcing metadata (`name`, `function`, quantities, units).
+- Stores numeric timeseries pairs for chart display.
+
+### Import: Structures / IniField / 1dField / Roughness (`.ini`)
+
+When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`, the plugin imports these as spatial point features (not only table rows) using the FM grid as geometric context.
+
+- `structure`:
+	- Imports **all** `[Structure]` blocks found in the file.
+	- Creates a spatial `*_structures` point layer for non-compound records.
+	- Applies automatic categorized styling by the `type` field for quick per-type visualization.
+	- Uses deterministic colors for known structure types (for example weir/gate/pump), and stable fallback colors for unknown types.
+	- Creates a non-spatial `*_structures_compound` table for `type=compound` records.
+	- Keeps unresolved non-compound records in the spatial layer with `resolve_status` and `resolve_note`.
+	- Adds dynamic parameter fields from keys present in the file (for example `crestWidth`), so only existing parameters appear as columns.
+	- Supports per-type viewing by filtering the `type` field (for example `"type" = 'weir'` or `"type" = 'gate'`).
+- `inifield`: resolves referenced `dataFile` and imports the linked 1d field spatially.
+- `1dfield`: places branch value points from `chainage`/`values` arrays.
+- `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
+
+### Boundary Timeseries Viewer
+
+The **Profile / Timeseries** action now supports both:
+- FM cross-section profile previews
+- FM boundary-condition timeseries previews
+
+For boundary forcing linked through `.ext`, activate the imported `*_ext_spatial` layer and click/select a feature to display its series in the popup chart.
 
 ### Import: Fixed Weir (`.fxw`, `.pliz` with 9 columns)
 
@@ -281,14 +348,14 @@ Output attributes include:
 
 ### Profile Chart Window
 
-- Open by double-clicking a cross-section point on the map.
-- Also available from plugin menu: `Cross-Section Profile`.
+- Open by double-clicking a cross-section point or a spatial forcing feature on the map.
+- Also available from plugin menu: `Profile / Timeseries`.
 - Supports:
 	- `yz` definitions from `def_yCoords` / `def_zCoords`
 	- `circle` definitions from `def_diam`
 - Axes are labeled with units (`y [m]`, `z [m]`).
 - The window uses a matplotlib plot when matplotlib is available, and falls back to the built-in renderer otherwise.
-- The chart updates automatically when selection changes on the active cross-section layer.
+- The chart updates automatically when selection changes on the active supported layer.
 - No extra dependencies are required.
 
 ### Typical Workflow
