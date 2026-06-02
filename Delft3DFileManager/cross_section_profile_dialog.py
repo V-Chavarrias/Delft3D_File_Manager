@@ -35,6 +35,8 @@ class _ProfileChartWidget(QWidget):
         self._message = ""
         self._vertical_exaggeration = 1.0
         self._default_points = []
+        self._x_axis_label = "y [m]"
+        self._y_axis_label = "z [m]"
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
@@ -45,6 +47,11 @@ class _ProfileChartWidget(QWidget):
 
     def set_vertical_exaggeration(self, factor):
         self._vertical_exaggeration = max(0.1, float(factor))
+        self.update()
+
+    def set_axis_labels(self, x_label, y_label):
+        self._x_axis_label = str(x_label or "y [m]")
+        self._y_axis_label = str(y_label or "z [m]")
         self.update()
 
     def reset_view(self):
@@ -124,11 +131,11 @@ class _ProfileChartWidget(QWidget):
             painter.drawLine(int(x0), int(y0), int(x1), int(y1))
 
         painter.setPen(QPen(Qt.darkGray, 1))
-        painter.drawText(plot_left, plot_bottom + 20, "y [m]")
+        painter.drawText(plot_left, plot_bottom + 20, self._x_axis_label)
         painter.save()
         painter.translate(plot_left - 28, plot_top + (plot_bottom - plot_top) / 2)
         painter.rotate(-90)
-        painter.drawText(0, 0, "z [m]")
+        painter.drawText(0, 0, self._y_axis_label)
         painter.restore()
 
 
@@ -145,6 +152,8 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._default_points = []
         self._message = ""
         self._vertical_exaggeration = 1.0
+        self._x_axis_label = "y [m]"
+        self._y_axis_label = "z [m]"
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
@@ -157,6 +166,11 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._vertical_exaggeration = max(0.1, float(factor))
         self._redraw()
 
+    def set_axis_labels(self, x_label, y_label):
+        self._x_axis_label = str(x_label or "y [m]")
+        self._y_axis_label = str(y_label or "z [m]")
+        self._redraw()
+
     def reset_view(self):
         self._points = list(self._default_points)
         self._vertical_exaggeration = 1.0
@@ -164,8 +178,8 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
 
     def _redraw(self):
         self._axes.clear()
-        self._axes.set_xlabel("y [m]")
-        self._axes.set_ylabel("z [m]")
+        self._axes.set_xlabel(self._x_axis_label)
+        self._axes.set_ylabel(self._y_axis_label)
         self._axes.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
 
         if not self._points:
@@ -250,6 +264,11 @@ class CrossSectionProfileDialog(QDialog):
         self._title_label.setText(title or "Cross-Section Profile")
 
         metadata = metadata or {}
+        x_axis_label = metadata.get("x_axis_label") or "y [m]"
+        y_axis_label = metadata.get("y_axis_label") or "z [m]"
+        if hasattr(self._chart_widget, "set_axis_labels"):
+            self._chart_widget.set_axis_labels(x_axis_label, y_axis_label)
+
         parts = []
         for key in ("id", "definitionId", "def_type"):
             value = metadata.get(key)

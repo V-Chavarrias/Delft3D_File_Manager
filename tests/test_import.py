@@ -1217,6 +1217,42 @@ def test_parse_bc_forcing_file(plugin, tmp_path):
     assert rows[0]["series"] == [(0.0, 12.0), (24.0, 15.0)]
 
 
+def test_timeseries_from_feature_uses_quantity_unit_axis_labels(plugin):
+    feature = {
+        "bc_name": "UpstreamQ",
+        "bc_function": "timeseries",
+        "quantity_1": "time",
+        "unit_1": "hours since 2000-01-01 00:00:00",
+        "quantity_2": "dischargebnd",
+        "unit_2": "m3/s",
+        "series_xy": "0 12;24 15",
+    }
+
+    points, metadata, message = plugin._timeseries_from_feature(feature)
+
+    assert points == [(0.0, 12.0), (24.0, 15.0)]
+    assert metadata["x_axis_label"] == "time [hours since 2000-01-01 00:00:00]"
+    assert metadata["y_axis_label"] == "dischargebnd [m3/s]"
+    assert message == ""
+
+
+def test_timeseries_from_feature_axis_label_fallbacks(plugin):
+    feature = {
+        "bc_name": "UpstreamQ",
+        "bc_function": "timeseries",
+        "quantity_1": "",
+        "unit_1": "",
+        "quantity_2": "waterlevelbnd",
+        "unit_2": "",
+        "series_xy": "0 0.2;1 0.3",
+    }
+
+    _, metadata, _ = plugin._timeseries_from_feature(feature)
+
+    assert metadata["x_axis_label"] == "x"
+    assert metadata["y_axis_label"] == "waterlevelbnd"
+
+
 def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
     ext = tmp_path / "extn.ext"
     bc = tmp_path / "bc.bc"

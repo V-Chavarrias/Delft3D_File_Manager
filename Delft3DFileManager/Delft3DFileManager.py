@@ -641,6 +641,19 @@ class Delft3DFileManager:
             points.append((x_val, y_val))
         return points
 
+    def _format_axis_label(self, quantity, unit, fallback):
+        """Build an axis label from quantity/unit text with a fallback."""
+        quantity_text = "" if quantity is None else str(quantity).strip()
+        unit_text = "" if unit is None else str(unit).strip()
+
+        if quantity_text and unit_text:
+            return f"{quantity_text} [{unit_text}]"
+        if quantity_text:
+            return quantity_text
+        if unit_text:
+            return unit_text
+        return fallback
+
     def _timeseries_from_feature(self, feature):
         """Build displayable points and metadata for one boundary-condition feature."""
         points = self._parse_series_xy_text(feature["series_xy"])
@@ -648,6 +661,8 @@ class Delft3DFileManager:
             "id": "" if feature["bc_name"] is None else str(feature["bc_name"]),
             "definitionId": "" if feature["bc_function"] is None else str(feature["bc_function"]),
             "def_type": "" if feature["quantity_1"] is None else str(feature["quantity_1"]),
+            "x_axis_label": self._format_axis_label(feature["quantity_1"], feature["unit_1"], "x"),
+            "y_axis_label": self._format_axis_label(feature["quantity_2"], feature["unit_2"], "value"),
         }
         if points:
             return points, metadata, ""
