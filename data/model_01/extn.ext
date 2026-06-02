@@ -1,0 +1,79 @@
+[General]
+fileVersion= 2.00
+fileType   = extForce
+[Boundary]
+quantity   = dischargebnd
+nodeId     = Pegel.Martinsbruck
+forcingfile= bc.bc
+[Boundary]
+quantity   = qhbnd
+nodeId     = HQ.Wasserschloss
+forcingfile= bc.bc
+[Boundary]
+quantity   = qhbnd
+nodeId     = HQRel.Runserau
+forcingfile= bc.bc
+[Boundary]
+quantity   = qhbnd
+nodeId     = HQRel.UW_Runserau
+forcingfile= bc.bc
+[Lateral]
+id         = lateral_A12Ma_Kj.1_0.000000
+name       = lateral_A12Ma_Kj.1_0.000000
+branchId   = A12Ma_Kj.1
+chainage   = 0
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A12Ma_Kj.2_1151.000000
+name       = lateral_A12Ma_Kj.2_1151.000000
+branchId   = A12Ma_Kj.2
+chainage   = 1.151000000000E+03
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A12Ma_Kj.2_3897.000000
+name       = lateral_A12Ma_Kj.2_3897.000000
+branchId   = A12Ma_Kj.2
+chainage   = 3.897000000000E+03
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A11Kj_Pr.1_2615.000000
+name       = lateral_A11Kj_Pr.1_2615.000000
+branchId   = A11Kj_Pr.1
+chainage   = 2.615000000000E+03
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A11Kj_Pr.1_4066.000000
+name       = lateral_A11Kj_Pr.1_4066.000000
+branchId   = A11Kj_Pr.1
+chainage   = 4.066000000000E+03
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A11Kj_Pr.1_10619.000000
+name       = lateral_A11Kj_Pr.1_10619.000000
+branchId   = A11Kj_Pr.1
+chainage   = 1.061900000000E+04
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A11Kj_Pr.1_10857.000000
+name       = lateral_A11Kj_Pr.1_10857.000000
+branchId   = A11Kj_Pr.1
+chainage   = 1.085700000000E+04
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A11Kj_Pr.2_546.000000
+name       = lateral_A11Kj_Pr.2_546.000000
+branchId   = A11Kj_Pr.2
+chainage   = 5.460000000000E+02
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A10Pr_Ru.1_1071.000000
+name       = lateral_A10Pr_Ru.1_1071.000000
+branchId   = A10Pr_Ru.1
+chainage   = 1.071000000000E+03
+discharge  = bc.bc
+[Lateral]
+id         = lateral_A10Pr_Ru.1_2940.000000
+name       = lateral_A10Pr_Ru.1_2940.000000
+branchId   = A10Pr_Ru.1
+chainage   = 2.940000000000E+03
+discharge  = bc.bc

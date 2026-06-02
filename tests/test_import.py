@@ -17,6 +17,7 @@ GRID_01 = DATA_DIR / "grd_net.nc"
 MORPHO_01 = DATA_DIR / "morpho_small.nc"
 MIXED_1D2D_01 = DATA_DIR / "mixed_1d2d_small.nc"
 BRIDGES_01 = DATA_DIR / "bridges.pliz"
+MODEL_01_DIMR = DATA_DIR / "model_01" / "dimr_config.xml"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
@@ -1059,6 +1060,22 @@ def test_read_dimr_component_input_files(plugin, tmp_path):
     assert files == ["FlowFM.mdu", "rr_config.xml"]
 
 
+def test_load_dimr_model_01_imports_without_problem(plugin):
+    plugin.load_file_by_extension = MagicMock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_dimr_config_file(str(MODEL_01_DIMR))
+
+    expected_mdu = str((MODEL_01_DIMR.parent / "FlowFM.mdu").resolve())
+    plugin.load_file_by_extension.assert_called_once_with(expected_mdu, spatial_grid_path=None)
+    mock_mb.warning.assert_not_called()
+    mock_mb.critical.assert_not_called()
+    plugin.iface.messageBar.return_value.pushSuccess.assert_called_once_with(
+        "Delft3D File Manager",
+        "DIMR import completed: imported 1 input file(s), missing 0.",
+    )
+
+
 def test_read_mdu_primary_files(plugin, tmp_path):
     mdu = tmp_path / "FlowFM.mdu"
     mdu.write_text(
@@ -1190,10 +1207,12 @@ def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
         "epsg": 28992,
     }
 
-    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))), \
+         patch.object(plugin, "_apply_boundary_type_categorized_style") as style_mock:
         plugin.load_ext_file(str(ext))
 
     assert add_map_layer.call_count == 1
+    style_mock.assert_called_once()
 
 
 def test_load_structures_spatial_file_creates_points(plugin, tmp_path):
@@ -1487,6 +1506,34 @@ def test_load_roughness_spatial_file_reports_no_candidate_blocks(plugin, tmp_pat
     mock_mb.warning.assert_called_once()
     call_args = mock_mb.warning.call_args[0]
     assert "Candidate roughness blocks processed=0" in call_args[2]
+
+
+def test_load_roughness_spatial_file_global_defaults_create_midpoint_features(plugin, tmp_path):
+    roughness = tmp_path / "roughness_global.ini"
+    roughness.write_text(
+        "[General]\n"
+        "fileType = roughness\n"
+        "[Global]\n"
+        "frictionType = Manning\n"
+        "frictionValue = 25\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_roughness_spatial_file(str(roughness))
+
+    assert add_map_layer.call_count == 1
 
 
 # ---------------------------------------------------------------------------

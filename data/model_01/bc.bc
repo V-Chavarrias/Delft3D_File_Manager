@@ -1,0 +1,163 @@
+[General] 
+fileVersion           = 1.01                 
+fileType              = boundConds    
+
+[forcing] 
+Name                            = Pegel.Martinsbruck 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = dischargebnd 
+Unit                            = m³/s 
+0.000000 55.000000
+60.000000 55.000000
+
+[forcing] 
+Name                            = HQ.Wasserschloss 
+Function                        = qhtable 
+Quantity                        = qhbnd discharge 
+Unit                            = m³/s 
+Quantity                        = qhbnd waterlevel 
+Unit                            = m 
+0.000000 500.000000
+0.000000 1070.500000
+10.000000 1072.000000
+100.000000 1073.000000
+200.000000 1075.000000
+
+[forcing] 
+Name                            = HQRel.Runserau 
+Function                        = qhtable 
+Quantity                        = qhbnd discharge 
+Unit                            = m³/s 
+Quantity                        = qhbnd waterlevel 
+Unit                            = m 
+0.000000 848.000000
+3.000000 853.000000
+100.000000 855.000000
+200.000000 860.000000
+
+[forcing] 
+Name                            = HQRel.UW_Runserau 
+Function                        = qhtable 
+Quantity                        = qhbnd discharge 
+Unit                            = m³/s 
+Quantity                        = qhbnd waterlevel 
+Unit                            = m 
+0.000000 848.000000
+25.000000 848.700000
+100.000000 850.000000
+1000.000000 855.000000
+
+[forcing] 
+Name                            = lateral_A12Ma_Kj.1_0.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+-24.000000 0.000000
+-10.000000 0.000000
+0.000000 0.000000
+120.000000 0.000000
+
+[forcing] 
+Name                            = lateral_A12Ma_Kj.2_1151.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 1.000000
+60.000000 1.000000
+
+[forcing] 
+Name                            = lateral_A12Ma_Kj.2_3897.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 3.000000
+60.000000 3.000000
+
+[forcing] 
+Name                            = lateral_A11Kj_Pr.1_2615.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 3.000000
+60.000000 3.000000
+
+[forcing] 
+Name                            = lateral_A11Kj_Pr.1_4066.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 3.000000
+60.000000 3.000000
+
+[forcing] 
+Name                            = lateral_A11Kj_Pr.1_10619.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 3.000000
+60.000000 3.000000
+
+[forcing] 
+Name                            = lateral_A11Kj_Pr.1_10857.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 3.000000
+60.000000 3.000000
+
+[forcing] 
+Name                            = lateral_A11Kj_Pr.2_546.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 6.000000
+60.000000 6.000000
+
+[forcing] 
+Name                            = lateral_A10Pr_Ru.1_1071.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 2.000000
+60.000000 2.000000
+
+[forcing] 
+Name                            = lateral_A10Pr_Ru.1_2940.000000 
+Function                        = timeseries 
+Time-interpolation              = linear 
+Quantity                        = time 
+Unit                            = hours since 2000-01-01 00:00:00 
+Quantity                        = lateral_discharge 
+Unit                            = m³/s 
+0.000000 1.000000
+60.000000 1.000000

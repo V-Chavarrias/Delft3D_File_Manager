@@ -1439,6 +1439,7 @@ class Delft3DFileManager:
         provider = layer.dataProvider()
         provider.addAttributes([
             QgsField("kind", QVariant.String),
+            QgsField("bc_type", QVariant.String),
             QgsField("id", QVariant.String),
             QgsField("quantity", QVariant.String),
             QgsField("nodeId", QVariant.String),
@@ -1502,11 +1503,17 @@ class Delft3DFileManager:
 
             series = [] if bc_record is None else bc_record.get("series", [])
             series_text = self._series_text_from_points(series)
+            bc_type = str(row.get("quantity", "")).strip()
+            if not bc_type and bc_record is not None:
+                bc_type = str(bc_record.get("quantity_2", "")).strip() or str(bc_record.get("bc_function", "")).strip()
+            if not bc_type:
+                bc_type = kind or "unknown"
 
             feature = QgsFeature(layer.fields())
             feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
             feature.setAttributes([
                 row.get("kind", ""),
+                bc_type,
                 row_id,
                 row.get("quantity", ""),
                 row.get("nodeId", ""),
@@ -1536,6 +1543,7 @@ class Delft3DFileManager:
 
         provider.addFeatures(features)
         layer.updateExtents()
+        self._apply_boundary_type_categorized_style(layer)
         QgsProject.instance().addMapLayer(layer)
 
         self.iface.messageBar().pushSuccess(
@@ -1697,6 +1705,67 @@ class Delft3DFileManager:
             categories.append(QgsRendererCategory(type_value, symbol, type_value))
 
         renderer = QgsCategorizedSymbolRenderer("type", categories)
+        layer.setRenderer(renderer)
+        try:
+            layer.triggerRepaint()
+        except Exception:
+            pass
+
+    def _apply_boundary_type_categorized_style(self, layer):
+        """Apply categorized point styling to boundary-condition spatial features."""
+        try:
+            type_values = set()
+            for feature in layer.getFeatures():
+                type_value = str(feature["bc_type"]).strip()
+                if type_value:
+                    type_values.add(type_value)
+        except Exception:
+            return
+
+        if not type_values:
+            return
+
+        known_colors = {
+            "dischargebnd": "#1D3557",
+            "waterlevelbnd": "#0077B6",
+            "salinitybnd": "#2A9D8F",
+            "temperaturebnd": "#E76F51",
+            "sedimentbnd": "#8D6E63",
+            "lateral_discharge": "#6A4C93",
+            "timeseries": "#3A86FF",
+            "constant": "#FF006E",
+        }
+        fallback_palette = [
+            "#0B6E4F",
+            "#D1495B",
+            "#00798C",
+            "#EDAE49",
+            "#30638E",
+            "#8F2D56",
+            "#3F88C5",
+            "#2A9D8F",
+            "#6D597A",
+            "#BC4749",
+        ]
+
+        def color_for_type(type_value):
+            type_key = str(type_value).strip().lower()
+            if type_key in known_colors:
+                return known_colors[type_key]
+
+            checksum = sum(ord(ch) for ch in type_key)
+            return fallback_palette[checksum % len(fallback_palette)]
+
+        categories = []
+        for type_value in sorted(type_values, key=lambda t: t.lower()):
+            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+            try:
+                symbol.setColor(QColor(color_for_type(type_value)))
+            except Exception:
+                pass
+            categories.append(QgsRendererCategory(type_value, symbol, type_value))
+
+        renderer = QgsCategorizedSymbolRenderer("bc_type", categories)
         layer.setRenderer(renderer)
         try:
             layer.triggerRepaint()
@@ -2108,6 +2177,15 @@ class Delft3DFileManager:
         candidate_blocks = 0
         section_names = set()
         branch_lookup = context["branch_lookup"]
+        normalized_branch_lookup = {
+            self._normalize_branch_key(key): profile
+            for key, profile in branch_lookup.items()
+        }
+        global_values = {}
+        for block in sections:
+            if block["section"].strip().lower() == "global":
+                global_values = block["values"]
+                break
 
         for block in sections:
             section_name = block["section"].strip().lower()
@@ -2156,7 +2234,10 @@ class Delft3DFileManager:
                 skipped_no_match += 1
                 continue
 
-            profile = branch_lookup.get(branch_id.lower())
+            normalized_branch_id = self._normalize_branch_key(branch_id)
+            profile = branch_lookup.get(normalized_branch_id)
+            if profile is None:
+                profile = normalized_branch_lookup.get(normalized_branch_id)
             if profile is None:
                 unresolved += n
                 continue
@@ -2179,6 +2260,62 @@ class Delft3DFileManager:
                     os.path.basename(resolved_grid),
                 ])
                 features.append(feature)
+
+        if not features and candidate_blocks == 0:
+            global_fric_text = self._value_case_insensitive(
+                global_values,
+                "frictionValues",
+                "frictionValue",
+                "friction",
+                "values",
+            )
+            global_fric_type = self._value_case_insensitive(global_values, "frictionType", "friction_type")
+            global_function = self._value_case_insensitive(global_values, "functionType", "function", "function_type")
+            global_fric_value = self._parse_first_float(global_fric_text)
+
+            if global_fric_value is not None and branch_lookup:
+                seen_profiles = set()
+                for profile in branch_lookup.values():
+                    profile_key = id(profile)
+                    if profile_key in seen_profiles:
+                        continue
+                    seen_profiles.add(profile_key)
+
+                    length = float(profile.get("length", 0.0) or 0.0)
+                    chainage_mid = length * 0.5
+                    point_xy = self._interpolate_point_on_branch(profile, chainage_mid)
+                    if point_xy is None:
+                        points = profile.get("points", [])
+                        point_xy = points[0] if points else None
+                        if point_xy is None:
+                            continue
+                        chainage_mid = 0.0
+
+                    feature = QgsFeature(layer.fields())
+                    feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(point_xy[0], point_xy[1])))
+                    feature.setAttributes([
+                        profile.get("name", ""),
+                        float(chainage_mid),
+                        float(global_fric_value),
+                        global_fric_type,
+                        global_function,
+                        os.path.basename(rough_path),
+                        os.path.basename(resolved_grid),
+                    ])
+                    features.append(feature)
+
+                if features:
+                    provider.addFeatures(features)
+                    layer.updateExtents()
+                    QgsProject.instance().addMapLayer(layer)
+                    self.iface.messageBar().pushSuccess(
+                        "Delft3D File Manager",
+                        (
+                            f"Loaded {len(features)} spatial roughness point(s) from {os.path.basename(rough_path)} "
+                            "using global roughness defaults (one midpoint per branch)."
+                        ),
+                    )
+                    return
 
         if not features:
             section_names_text = ", ".join(sorted(name for name in section_names if name))
