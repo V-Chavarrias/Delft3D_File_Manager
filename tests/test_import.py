@@ -1164,6 +1164,8 @@ def test_load_fm_mdu_model_01_attempts_all_primary_imports(plugin):
     plugin.load_file_by_extension = MagicMock()
     plugin.load_polyline_file = MagicMock()
     plugin.load_fixed_weir_file = MagicMock()
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
 
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
         plugin.load_fm_mdu_file(str(mdu_path), import_referenced=True)
@@ -1171,6 +1173,11 @@ def test_load_fm_mdu_model_01_attempts_all_primary_imports(plugin):
     plugin.load_ugrid_mesh_file.assert_called_once_with(expected_grid)
     plugin.load_cross_sections_files.assert_called_once_with(expected_csl, expected_csd, expected_grid)
     plugin.load_ext_file.assert_called_once_with(expected_ext, grid_path=expected_grid)
+
+    add_map_layer.assert_called_once()
+    summary_layer = add_map_layer.call_args[0][0]
+    summary_rows = summary_layer.dataProvider.return_value.addFeatures.call_args[0][0]
+    assert len(summary_rows) == 11
 
     imported_paths = {
         args[0]
