@@ -45,6 +45,8 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 
 Import a complete simulation setup by selecting `dimr_config.xml`.
 
+DIMR import requires `defusedxml`. If it is missing, run `Delft3D File Manager -> Install Python Dependencies`, restart QGIS, and retry.
+
 #### Workflow
 1. Parse all `<component><inputFile>` entries from the DIMR XML.
 2. Resolve paths relative to the DIMR file location.
@@ -648,24 +650,35 @@ Create a 1D UGRID network NetCDF file from a branch polyline layer.
 ### Input Requirements
 - Branch layer must be a vector polyline layer.
 - Branch layer must contain a branch-name field (for branch IDs/names in output).
-- Branches should be snapped at junctions during editing.
+- Geometry nodes layer must be a vector point layer.
+- Geometry nodes layer must contain a node-name field.
 - Constant mesh spacing must be positive.
+- Optional branch-length field can be provided on the branch layer.
 
-### Optional Special Points Layer
-- You can select an optional point layer with special locations.
-- For each valid snapped special point, the mesh generator forces grid points at:
-	- `chainage - offset_distance`
-	- `chainage + offset_distance`
+### Optional Structures Points Layer
+- You can select an optional point layer with structure locations.
+- Each structure point is projected to the nearest branch and validated by snapping tolerance.
+- For each valid structure, the mesh generator finds the closest base mesh1d node on that branch and forces additional nodes at:
+	- `closest_mesh_node_chainage - offset_distance`
+	- `closest_mesh_node_chainage + offset_distance`
 - Default offset distance is `10 m`.
 - Points outside the selected snapping tolerance are marked invalid and ignored for offset insertion.
+
+### Branch Terminals and Junctions
+- Each branch terminal (its first and last vertex, direction-agnostic) is snapped to the nearest geometry node.
+- Junction identity is based on shared snapped terminal node names.
+- This means branch orientation is arbitrary: start-start, end-end, and start-end combinations all map to the same shared junction mesh node.
 
 ### What The Tool Prompts For
 1. Branch line layer
 2. Branch name field
-3. Constant spacing (`m`)
-4. Optional special points layer (`None` is allowed)
-5. Offset distance and snapping tolerance (only when special points are selected)
-6. Output NetCDF file path (`.nc`)
+3. Optional branch-length field (`None` is allowed)
+4. Geometry nodes point layer
+5. Geometry node name field
+6. Constant spacing (`m`)
+7. Optional structures points layer (`None` is allowed)
+8. Offset distance and snapping tolerance (only when structures layer is selected)
+9. Output NetCDF file path (`.nc`)
 
 ### Output
 - NetCDF file with mesh/network arrays compatible with the plugin 1D import path, including:
@@ -675,7 +688,7 @@ Create a 1D UGRID network NetCDF file from a branch polyline layer.
 	- `network_geom_x`, `network_geom_y`, `network_geom_node_count`
 	- `network_node_x`, `network_node_y`, `network_node_id`, `network_node_long_name`
 
-### Diagnostics Layer (when special points are used)
+### Diagnostics Layer (when structures points are used)
 The plugin also creates a diagnostics point layer with:
 - `special_id`
 - `branchId`
@@ -683,6 +696,21 @@ The plugin also creates a diagnostics point layer with:
 - `snap_dist_m`
 - `valid_flag`
 - `note`
+
+### Log File
+- A text log file is written alongside the output `.nc` using the same basename with `.log` extension.
+- The log includes at least:
+	- node-branch connectivity
+	- branch length from imposed value
+	- branch length from branch geometry
+	- number of mesh1d_nodes
+	- number of mesh1d_edges
+	- chainage of mesh1d_nodes and mesh1d_edges
+
+### Reusable Python API
+- The plugin exposes helper methods for scripted usage:
+	- `create_1d_network_from_layers(...)` for QGIS layer objects
+	- `create_1d_network_from_paths(...)` for file paths
 
 ### Typical Workflow
 1. Enable QGIS snapping (Vertex + Segment) and draw/edit branch lines so junctions are snapped.

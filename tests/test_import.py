@@ -1095,6 +1095,23 @@ def test_read_dimr_component_input_files(plugin, tmp_path):
     assert files == ["FlowFM.mdu", "rr_config.xml"]
 
 
+def test_load_dimr_config_requires_defusedxml(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    monkeypatch.setattr(plugin_module, "_HAS_DEFUSEDXML", False)
+    monkeypatch.setattr(plugin_module, "ET", None)
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_dimr_config_file(str(MODEL_01_DIMR))
+
+    plugin.iface.messageBar.return_value.pushSuccess.assert_not_called()
+    mock_mb.critical.assert_called_once()
+    message = mock_mb.critical.call_args[0][2]
+    assert "required package 'defusedxml' is not available" in message
+    assert "Install Python Dependencies" in message
+    assert "restart QGIS" in message
+
+
 def test_load_dimr_model_01_imports_without_problem(plugin):
     plugin.load_file_by_extension = MagicMock()
 

@@ -33,8 +33,8 @@ import sys
 try:
     from defusedxml import ElementTree as ET
     _HAS_DEFUSEDXML = True
-except Exception:
-    import xml.etree.ElementTree as ET
+except ImportError:
+    ET = None
     _HAS_DEFUSEDXML = False
 
 
@@ -114,9 +114,9 @@ class Delft3DFileManager:
         if not _HAS_DEFUSEDXML and not self._warned_missing_defusedxml:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
-                "Optional dependency 'defusedxml' is not installed. "
-                "DIMR XML import will use the standard XML parser. "
-                "Use 'Install Python Dependencies' and restart QGIS.",
+                "Dependency 'defusedxml' is required for DIMR XML import. "
+                "To install it, use 'Delft3D File Manager -> Install Python Dependencies', "
+                "then restart QGIS.",
             )
             self._warned_missing_defusedxml = True
 
@@ -1125,6 +1125,13 @@ class Delft3DFileManager:
 
     def _read_dimr_component_input_files(self, dimr_config_path):
         """Return inputFile values found in DIMR component blocks."""
+        if not _HAS_DEFUSEDXML or ET is None:
+            raise RuntimeError(
+                "required package 'defusedxml' is not available. "
+                "Install it via 'Delft3D File Manager -> Install Python Dependencies', "
+                "restart QGIS, and try again."
+            )
+
         tree = ET.parse(dimr_config_path)
         root = tree.getroot()
 
@@ -5868,7 +5875,7 @@ class Delft3DFileManager:
         )
 
     def create_1d_network(self):
-        """Create a 1D network NetCDF from snapped branch lines and optional special points."""
+        """Create a 1D network NetCDF from branch lines, geometry nodes, and optional structures."""
         branch_layer = self._select_vector_layer_by_geometry(
             title="Create 1D Network",
             prompt="Select branch polyline layer:",
@@ -5900,6 +5907,46 @@ class Delft3DFileManager:
         if not ok or not branch_name_field:
             return
 
+        branch_length_field = self._prompt_optional_field(
+            title="Create 1D Network",
+            prompt="Optional branch length field (imposed length):",
+            field_names=field_names,
+            default_field=None,
+        )
+        if branch_length_field is False:
+            return
+
+        geometry_nodes_layer = self._select_vector_layer_by_geometry(
+            title="Create 1D Network",
+            prompt="Select geometry nodes point layer:",
+            geometry_type=QgsWkbTypes.PointGeometry,
+            allow_none=False,
+        )
+        if geometry_nodes_layer is None:
+            return
+
+        node_field_names = [field.name() for field in geometry_nodes_layer.fields()]
+        if not node_field_names:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "Geometry nodes layer must contain a node-name attribute field.",
+            )
+            return
+
+        default_node_field = self._get_name_field(geometry_nodes_layer)
+        node_default_index = node_field_names.index(default_node_field) if default_node_field in node_field_names else 0
+        node_name_field, ok = QInputDialog.getItem(
+            self.iface.mainWindow(),
+            "Create 1D Network",
+            "Select geometry node name field:",
+            node_field_names,
+            node_default_index,
+            False,
+        )
+        if not ok or not node_name_field:
+            return
+
         spacing_m, ok = QInputDialog.getDouble(
             self.iface.mainWindow(),
             "Create 1D Network",
@@ -5914,7 +5961,7 @@ class Delft3DFileManager:
 
         special_layer = self._select_vector_layer_by_geometry(
             title="Create 1D Network",
-            prompt="Optional special points layer:",
+            prompt="Optional structures points layer:",
             geometry_type=QgsWkbTypes.PointGeometry,
             allow_none=True,
         )
@@ -5927,7 +5974,7 @@ class Delft3DFileManager:
             offset_m, ok = QInputDialog.getDouble(
                 self.iface.mainWindow(),
                 "Create 1D Network",
-                "Special-point offset distance [m] (upstream/downstream):",
+                "Structure offset distance [m] (+/- from closest mesh node):",
                 value=10.0,
                 min=0.0,
                 max=1e12,
@@ -5939,7 +5986,7 @@ class Delft3DFileManager:
             snap_tolerance_m, ok = QInputDialog.getDouble(
                 self.iface.mainWindow(),
                 "Create 1D Network",
-                "Maximum snap distance [m] for special points:",
+                "Maximum snap distance [m] for structure points:",
                 value=0.25,
                 min=0.0,
                 max=1e12,
@@ -5959,58 +6006,196 @@ class Delft3DFileManager:
         if not output_path.lower().endswith(".nc"):
             output_path = f"{output_path}.nc"
 
-        branch_profiles, epsg = self._read_branch_profiles_from_line_layer(branch_layer, branch_name_field)
-        if not branch_profiles:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "Delft3D File Manager",
-                "No valid branches were found in the selected branch layer.",
-            )
-            return
-
-        special_constraints = []
-        if special_layer is not None:
-            special_constraints = self._collect_special_point_constraints(
-                special_layer=special_layer,
-                branch_profiles=branch_profiles,
-                snap_tolerance=snap_tolerance_m,
-            )
-            self._create_special_points_diagnostics_layer(special_layer, special_constraints)
-
-        mesh_data = self._build_mesh_from_profiles(
-            branch_profiles=branch_profiles,
-            spacing=spacing_m,
-            special_constraints=special_constraints,
-            offset_distance=offset_m,
-        )
-        if mesh_data is None or mesh_data.get("n_edges", 0) == 0:
-            QMessageBox.warning(
-                self.iface.mainWindow(),
-                "Delft3D File Manager",
-                "Could not generate a valid 1D mesh. Check branch geometry and spacing.",
-            )
-            return
-
         try:
-            self._write_1d_network_netcdf(output_path, mesh_data, epsg)
+            result = self.create_1d_network_from_layers(
+                branch_layer=branch_layer,
+                branch_name_field=branch_name_field,
+                spacing_m=spacing_m,
+                geometry_nodes_layer=geometry_nodes_layer,
+                node_name_field=node_name_field,
+                output_path=output_path,
+                branch_length_field=branch_length_field,
+                structures_layer=special_layer,
+                structure_offset_m=offset_m,
+                structure_snap_tolerance_m=snap_tolerance_m,
+                create_diagnostics_layer=True,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
-                f"Failed to write 1D network NetCDF: {exc}",
+                f"Failed to create 1D network: {exc}",
             )
             return
 
-        accepted_special = sum(1 for item in special_constraints if item.get("valid_flag", 0) == 1)
-        rejected_special = sum(1 for item in special_constraints if item.get("valid_flag", 0) != 1)
+        mesh_data = result["mesh_data"]
+        structure_constraints = result["structure_constraints"]
+        accepted_special = sum(1 for item in structure_constraints if item.get("valid_flag", 0) == 1)
+        rejected_special = sum(1 for item in structure_constraints if item.get("valid_flag", 0) != 1)
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
             (
                 f"Created 1D network: branches={mesh_data['n_branches']}, nodes={mesh_data['n_nodes']}, "
-                f"edges={mesh_data['n_edges']}, special accepted={accepted_special}, "
-                f"special rejected={rejected_special}."
+                f"edges={mesh_data['n_edges']}, structures accepted={accepted_special}, "
+                f"structures rejected={rejected_special}."
             ),
         )
+
+    def _prompt_optional_field(self, title, prompt, field_names, default_field=None):
+        """Prompt for an optional field and return selected field name or None."""
+        labels = ["<None>"] + list(field_names)
+        default_index = 0
+        if default_field and default_field in field_names:
+            default_index = labels.index(default_field)
+
+        selected_label, ok = QInputDialog.getItem(
+            self.iface.mainWindow(),
+            title,
+            prompt,
+            labels,
+            default_index,
+            False,
+        )
+        if not ok:
+            return False
+        if selected_label == "<None>":
+            return None
+        return selected_label
+
+    def create_1d_network_from_paths(
+        self,
+        branch_layer_path,
+        branch_name_field,
+        spacing_m,
+        geometry_nodes_layer_path,
+        node_name_field,
+        output_path,
+        branch_length_field=None,
+        structures_layer_path=None,
+        structure_offset_m=10.0,
+        structure_snap_tolerance_m=0.25,
+        log_path=None,
+        create_diagnostics_layer=False,
+    ):
+        """Create a 1D network from file paths and write NetCDF and log outputs."""
+        branch_layer = self._load_vector_layer_from_path(
+            branch_layer_path,
+            QgsWkbTypes.LineGeometry,
+            "branch",
+        )
+        geometry_nodes_layer = self._load_vector_layer_from_path(
+            geometry_nodes_layer_path,
+            QgsWkbTypes.PointGeometry,
+            "geometry nodes",
+        )
+
+        structures_layer = None
+        if structures_layer_path:
+            structures_layer = self._load_vector_layer_from_path(
+                structures_layer_path,
+                QgsWkbTypes.PointGeometry,
+                "structures",
+            )
+
+        return self.create_1d_network_from_layers(
+            branch_layer=branch_layer,
+            branch_name_field=branch_name_field,
+            spacing_m=spacing_m,
+            geometry_nodes_layer=geometry_nodes_layer,
+            node_name_field=node_name_field,
+            output_path=output_path,
+            branch_length_field=branch_length_field,
+            structures_layer=structures_layer,
+            structure_offset_m=structure_offset_m,
+            structure_snap_tolerance_m=structure_snap_tolerance_m,
+            log_path=log_path,
+            create_diagnostics_layer=create_diagnostics_layer,
+        )
+
+    def _load_vector_layer_from_path(self, layer_path, geometry_type, label):
+        """Load and validate a vector layer from disk."""
+        layer = QgsVectorLayer(str(layer_path), os.path.basename(str(layer_path)), "ogr")
+        if layer is None or not layer.isValid():
+            raise RuntimeError(f"Could not load {label} layer from path: {layer_path}")
+        if layer.geometryType() != geometry_type:
+            raise RuntimeError(f"Layer '{layer_path}' is not a valid {label} geometry type.")
+        return layer
+
+    def create_1d_network_from_layers(
+        self,
+        branch_layer,
+        branch_name_field,
+        spacing_m,
+        geometry_nodes_layer,
+        node_name_field,
+        output_path,
+        branch_length_field=None,
+        structures_layer=None,
+        structure_offset_m=10.0,
+        structure_snap_tolerance_m=0.25,
+        log_path=None,
+        create_diagnostics_layer=False,
+    ):
+        """Create a 1D network from QGIS layers and write NetCDF and log outputs."""
+        if branch_layer is None or not branch_layer.isValid():
+            raise RuntimeError("Branch layer is invalid.")
+        if geometry_nodes_layer is None or not geometry_nodes_layer.isValid():
+            raise RuntimeError("Geometry nodes layer is invalid.")
+        if branch_name_field not in [field.name() for field in branch_layer.fields()]:
+            raise RuntimeError(f"Branch name field '{branch_name_field}' is not present in branch layer.")
+        if node_name_field not in [field.name() for field in geometry_nodes_layer.fields()]:
+            raise RuntimeError(f"Node name field '{node_name_field}' is not present in geometry nodes layer.")
+        if spacing_m is None or float(spacing_m) <= 0.0:
+            raise RuntimeError("Spacing must be greater than zero.")
+        if branch_length_field and branch_length_field not in [field.name() for field in branch_layer.fields()]:
+            raise RuntimeError(f"Branch length field '{branch_length_field}' is not present in branch layer.")
+
+        geometry_nodes = self._read_geometry_nodes_from_layer(geometry_nodes_layer, node_name_field)
+        if not geometry_nodes:
+            raise RuntimeError("No valid geometry nodes were found in the selected node layer.")
+
+        branch_profiles, epsg = self._read_branch_profiles_from_line_layer(
+            branch_layer=branch_layer,
+            branch_name_field=branch_name_field,
+            geometry_nodes=geometry_nodes,
+            branch_length_field=branch_length_field,
+        )
+        if not branch_profiles:
+            raise RuntimeError("No valid branches were found in the selected branch layer.")
+
+        structure_constraints = []
+        if structures_layer is not None:
+            structure_constraints = self._collect_special_point_constraints(
+                special_layer=structures_layer,
+                branch_profiles=branch_profiles,
+                snap_tolerance=structure_snap_tolerance_m,
+            )
+            if create_diagnostics_layer:
+                self._create_special_points_diagnostics_layer(structures_layer, structure_constraints)
+
+        mesh_data = self._build_mesh_from_profiles(
+            branch_profiles=branch_profiles,
+            spacing=float(spacing_m),
+            special_constraints=structure_constraints,
+            offset_distance=float(structure_offset_m),
+        )
+        if mesh_data is None or mesh_data.get("n_edges", 0) == 0:
+            raise RuntimeError("Could not generate a valid 1D mesh. Check geometry and spacing.")
+
+        self._write_1d_network_netcdf(output_path, mesh_data, epsg)
+
+        if not log_path:
+            log_path = os.path.splitext(output_path)[0] + ".log"
+        self._write_1d_network_log(log_path, mesh_data)
+
+        return {
+            "mesh_data": mesh_data,
+            "branch_profiles": branch_profiles,
+            "structure_constraints": structure_constraints,
+            "epsg": epsg,
+            "log_path": log_path,
+            "output_path": output_path,
+        }
 
     def _select_vector_layer_by_geometry(self, title, prompt, geometry_type, allow_none=False):
         """Prompt user to select a vector layer by geometry type."""
@@ -6090,7 +6275,62 @@ class Delft3DFileManager:
             "length": cumlen[-1],
         }
 
-    def _read_branch_profiles_from_line_layer(self, branch_layer, branch_name_field):
+    def _read_geometry_nodes_from_layer(self, nodes_layer, node_name_field):
+        """Read geometry nodes from point layer and enforce unique node names."""
+        nodes = []
+        used_names = set()
+
+        for feature in nodes_layer.getFeatures():
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+
+            points = self._extract_points(geometry)
+            if not points:
+                continue
+
+            point = points[0]
+            x = float(point.x())
+            y = float(point.y())
+            if not (math.isfinite(x) and math.isfinite(y)):
+                continue
+
+            name_value = feature[node_name_field]
+            node_name = str(name_value).strip() if name_value is not None else ""
+            if not node_name:
+                node_name = f"node_{feature.id()}"
+
+            key = node_name.lower()
+            if key in used_names:
+                raise RuntimeError(f"Duplicate geometry node name encountered: '{node_name}'")
+
+            used_names.add(key)
+            nodes.append({
+                "name": node_name,
+                "x": x,
+                "y": y,
+            })
+
+        return nodes
+
+    def _nearest_geometry_node(self, xy, geometry_nodes):
+        """Return nearest geometry node and distance to coordinate tuple (x, y)."""
+        x, y = float(xy[0]), float(xy[1])
+        best = None
+        for node in geometry_nodes:
+            dx = x - float(node["x"])
+            dy = y - float(node["y"])
+            dist = math.hypot(dx, dy)
+            if best is None or dist < best["distance"]:
+                best = {
+                    "name": node["name"],
+                    "x": float(node["x"]),
+                    "y": float(node["y"]),
+                    "distance": dist,
+                }
+        return best
+
+    def _read_branch_profiles_from_line_layer(self, branch_layer, branch_name_field, geometry_nodes, branch_length_field=None):
         """Read branch profiles from a branch polyline layer."""
         profiles = []
         used_names = set()
@@ -6134,9 +6374,55 @@ class Delft3DFileManager:
                     candidate,
                 )
                 if profile is not None:
-                    profiles.append(profile)
+                    points = profile["points"]
+                    start_raw = points[0]
+                    end_raw = points[-1]
+
+                    start_node = self._nearest_geometry_node(start_raw, geometry_nodes)
+                    end_node = self._nearest_geometry_node(end_raw, geometry_nodes)
+                    if start_node is None or end_node is None:
+                        continue
+
+                    snapped_points = list(points)
+                    snapped_points[0] = (start_node["x"], start_node["y"])
+                    snapped_points[-1] = (end_node["x"], end_node["y"])
+
+                    snapped_profile = self._build_profile_from_points(snapped_points, candidate)
+                    if snapped_profile is None:
+                        continue
+
+                    imposed_length = None
+                    if branch_length_field:
+                        raw_length = feature[branch_length_field]
+                        try:
+                            imposed = float(raw_length)
+                            if math.isfinite(imposed) and imposed > 0.0:
+                                imposed_length = imposed
+                        except Exception:
+                            imposed_length = None
+
+                    snapped_profile["geometry_length"] = float(snapped_profile["length"])
+                    snapped_profile["effective_length"] = float(imposed_length) if imposed_length is not None else float(snapped_profile["geometry_length"])
+                    snapped_profile["imposed_length"] = imposed_length
+                    snapped_profile["terminal_nodes"] = (start_node["name"], end_node["name"])
+                    snapped_profile["terminal_snap_distances"] = (float(start_node["distance"]), float(end_node["distance"]))
+                    snapped_profile["feature_id"] = feature.id()
+
+                    profiles.append(snapped_profile)
 
         return profiles, epsg
+
+    def _effective_chainage_to_geometry_chainage(self, profile, effective_chainage):
+        """Map effective chainage to geometry chainage for interpolation on original geometry."""
+        geometry_length = float(profile.get("geometry_length", profile.get("length", 0.0)))
+        effective_length = float(profile.get("effective_length", geometry_length))
+        if geometry_length <= 0.0 or effective_length <= 0.0:
+            return None
+
+        c_eff = float(effective_chainage)
+        c_eff = max(0.0, min(effective_length, c_eff))
+        ratio = c_eff / effective_length
+        return ratio * geometry_length
 
     def _project_point_on_profile(self, point_xy, profile):
         """Project point to profile; return chainage, distance, projected xy."""
@@ -6163,11 +6449,19 @@ class Delft3DFileManager:
             proj_x = x0 + t * dx
             proj_y = y0 + t * dy
             dist = math.hypot(px - proj_x, py - proj_y)
-            chainage = cumlen[idx] + t * math.sqrt(seg_len_sq)
+            chainage_geom = cumlen[idx] + t * math.sqrt(seg_len_sq)
+
+            geometry_length = float(profile.get("geometry_length", profile.get("length", 0.0)))
+            effective_length = float(profile.get("effective_length", geometry_length))
+            if geometry_length > 0.0 and effective_length > 0.0:
+                chainage_effective = (chainage_geom / geometry_length) * effective_length
+            else:
+                chainage_effective = chainage_geom
 
             if best is None or dist < best["distance"]:
                 best = {
-                    "chainage": chainage,
+                    "chainage": chainage_effective,
+                    "chainage_geometry": chainage_geom,
                     "distance": dist,
                     "x": proj_x,
                     "y": proj_y,
@@ -6297,7 +6591,7 @@ class Delft3DFileManager:
 
     def _generate_branch_chainages(self, profile, spacing, offset_distance, special_chainages):
         """Generate branch chainages from constant spacing and special-point offsets."""
-        length = float(profile.get("length", 0.0))
+        length = float(profile.get("effective_length", profile.get("length", 0.0)))
         if length <= 0.0:
             return []
 
@@ -6333,6 +6627,34 @@ class Delft3DFileManager:
                 deduped.append(c)
         return deduped
 
+    def _apply_structure_offsets_to_chainages(self, base_chainages, structure_chainages, offset_distance, branch_length):
+        """Insert +/- offset chainages around the closest base mesh node to each structure."""
+        chainages = list(base_chainages)
+        if not base_chainages:
+            return chainages
+
+        offset = float(offset_distance)
+        if offset <= 0.0:
+            return chainages
+
+        for structure_chainage in structure_chainages:
+            target = float(structure_chainage)
+            closest = min(base_chainages, key=lambda c: abs(float(c) - target))
+            c_up = float(closest) - offset
+            c_dn = float(closest) + offset
+            if 0.0 <= c_up <= branch_length:
+                chainages.append(c_up)
+            if 0.0 <= c_dn <= branch_length:
+                chainages.append(c_dn)
+
+        chainages = sorted(chainages)
+        deduped = []
+        tolerance = 1e-6
+        for c in chainages:
+            if not deduped or abs(c - deduped[-1]) > tolerance:
+                deduped.append(c)
+        return deduped
+
     def _build_mesh_from_profiles(self, branch_profiles, spacing, special_constraints, offset_distance):
         """Build mesh node/edge arrays from branch profiles and optional constraints."""
         branch_special = {}
@@ -6348,17 +6670,24 @@ class Delft3DFileManager:
         nodes = []
         edges = []
         edge_branch = []
+        edge_offset = []
+        edge_x = []
+        edge_y = []
         branch_names = []
         geom_node_x = []
         geom_node_y = []
         geom_node_count = []
+        branch_node_chainages = []
+        branch_edge_chainages = []
+        branch_geometry_lengths = []
+        branch_effective_lengths = []
 
         node_index_by_key = {}
+        terminal_node_index_by_name = {}
         key_tol = 1e-3
 
         for branch_idx, profile in enumerate(branch_profiles):
             branch_name = profile["name"]
-            branch_names.append(branch_name)
 
             profile_points = profile.get("points", [])
             geom_node_count.append(len(profile_points))
@@ -6367,34 +6696,108 @@ class Delft3DFileManager:
                 geom_node_y.append(float(y))
 
             special_chainages = branch_special.get(branch_name.lower(), [])
-            chainages = self._generate_branch_chainages(profile, spacing, offset_distance, special_chainages)
+            base_chainages = self._generate_branch_chainages(profile, spacing, 0.0, [])
+            if not base_chainages:
+                continue
+
+            branch_length = float(profile.get("effective_length", profile.get("length", 0.0)))
+            chainages = self._apply_structure_offsets_to_chainages(
+                base_chainages=base_chainages,
+                structure_chainages=special_chainages,
+                offset_distance=offset_distance,
+                branch_length=branch_length,
+            )
             if len(chainages) < 2:
                 continue
 
             branch_node_ids = []
-            for chainage in chainages:
-                xy = self._interpolate_point_on_branch(profile, chainage)
+            branch_node_entries = []
+            terminal_names = profile.get("terminal_nodes", (None, None))
+            for chainage_idx, chainage in enumerate(chainages):
+                geom_chainage = self._effective_chainage_to_geometry_chainage(profile, chainage)
+                if geom_chainage is None:
+                    continue
+
+                xy = self._interpolate_point_on_branch(profile, geom_chainage)
                 if xy is None:
                     continue
                 x, y = float(xy[0]), float(xy[1])
                 key = (int(round(x / key_tol)), int(round(y / key_tol)))
-                node_id = node_index_by_key.get(key)
+
+                terminal_name = None
+                if chainage_idx == 0:
+                    terminal_name = terminal_names[0]
+                elif chainage_idx == len(chainages) - 1:
+                    terminal_name = terminal_names[1]
+
+                node_id = None
+                if terminal_name:
+                    node_id = terminal_node_index_by_name.get(str(terminal_name).strip().lower())
+
+                if node_id is None:
+                    node_id = node_index_by_key.get(key)
+
                 if node_id is None:
                     node_id = len(nodes)
                     nodes.append((x, y))
                     node_index_by_key[key] = node_id
+
+                if terminal_name:
+                    terminal_node_index_by_name[str(terminal_name).strip().lower()] = node_id
+
                 branch_node_ids.append(node_id)
+                branch_node_entries.append(
+                    {
+                        "node_id": int(node_id),
+                        "chainage": float(chainage),
+                        "geometry_chainage": float(geom_chainage),
+                        "terminal_name": terminal_name or "",
+                    }
+                )
 
             if len(branch_node_ids) < 2:
                 continue
 
+            branch_names.append(branch_name)
+            branch_geometry_lengths.append(float(profile.get("geometry_length", profile.get("length", 0.0))))
+            branch_effective_lengths.append(float(profile.get("effective_length", profile.get("length", 0.0))))
+
+            branch_edges_for_profile = []
             for idx in range(1, len(branch_node_ids)):
                 start_node = int(branch_node_ids[idx - 1])
                 end_node = int(branch_node_ids[idx])
                 if start_node == end_node:
                     continue
                 edges.append((start_node, end_node))
-                edge_branch.append(branch_idx)
+                edge_branch.append(len(branch_names) - 1)
+                c0 = float(branch_node_entries[idx - 1]["chainage"])
+                c1 = float(branch_node_entries[idx]["chainage"])
+                edge_offset.append(0.5 * (c0 + c1))
+                x0, y0 = nodes[start_node]
+                x1, y1 = nodes[end_node]
+                edge_x.append(0.5 * (float(x0) + float(x1)))
+                edge_y.append(0.5 * (float(y0) + float(y1)))
+                branch_edges_for_profile.append(
+                    {
+                        "start_node": start_node,
+                        "end_node": end_node,
+                        "start_chainage": c0,
+                        "end_chainage": c1,
+                    }
+                )
+
+            branch_node_chainages.append(
+                {
+                    "branch_name": branch_name,
+                    "entries": branch_node_entries,
+                    "geometry_length": float(profile.get("geometry_length", profile.get("length", 0.0))),
+                    "effective_length": float(profile.get("effective_length", profile.get("length", 0.0))),
+                    "imposed_length": profile.get("imposed_length"),
+                    "terminal_nodes": profile.get("terminal_nodes", ("", "")),
+                    "terminal_snap_distances": profile.get("terminal_snap_distances", (None, None)),
+                }
+            )
+            branch_edge_chainages.append({"branch_name": branch_name, "entries": branch_edges_for_profile})
 
         if not nodes or not edges:
             return None
@@ -6403,42 +6806,183 @@ class Delft3DFileManager:
         node_y = [xy[1] for xy in nodes]
         node_ids = [f"node_{idx + 1}" for idx in range(len(nodes))]
 
+        mesh1d_node_branch = [-1] * len(nodes)
+        mesh1d_node_offset = [0.0] * len(nodes)
+        for branch_idx, branch_info in enumerate(branch_node_chainages):
+            for entry in branch_info.get("entries", []):
+                node_id = int(entry["node_id"])
+                if mesh1d_node_branch[node_id] < 0:
+                    mesh1d_node_branch[node_id] = branch_idx
+                    mesh1d_node_offset[node_id] = float(entry["chainage"])
+
+        network_node_names = []
+        network_node_x = []
+        network_node_y = []
+        network_node_index_by_name = {}
+
+        def _get_or_create_network_node(node_name, mesh_node_id):
+            key = str(node_name or "").strip().lower()
+            if not key:
+                key = f"network_node_{len(network_node_names) + 1}"
+            if key in network_node_index_by_name:
+                return network_node_index_by_name[key]
+
+            idx = len(network_node_names)
+            network_node_index_by_name[key] = idx
+            network_node_names.append(str(node_name) if node_name else f"network_node_{idx + 1}")
+            network_node_x.append(float(node_x[int(mesh_node_id)]))
+            network_node_y.append(float(node_y[int(mesh_node_id)]))
+            return idx
+
+        network_edge_nodes = []
+        network_branch_order = []
+        network_branch_type = []
+        for branch_idx, branch_info in enumerate(branch_node_chainages):
+            entries = branch_info.get("entries", [])
+            if len(entries) < 2:
+                continue
+
+            terminal_nodes = branch_info.get("terminal_nodes", ("", ""))
+            n0 = _get_or_create_network_node(terminal_nodes[0], entries[0]["node_id"])
+            n1 = _get_or_create_network_node(terminal_nodes[1], entries[-1]["node_id"])
+            network_edge_nodes.append((n0, n1))
+            network_branch_order.append(branch_idx + 1)
+            network_branch_type.append(1)
+
         return {
             "node_x": node_x,
             "node_y": node_y,
             "node_ids": node_ids,
+            "mesh1d_node_branch": mesh1d_node_branch,
+            "mesh1d_node_offset": mesh1d_node_offset,
             "edges": edges,
             "edge_branch": edge_branch,
+            "edge_offset": edge_offset,
+            "edge_x": edge_x,
+            "edge_y": edge_y,
             "branch_names": branch_names,
+            "network_branch_order": network_branch_order,
+            "network_branch_type": network_branch_type,
+            "network_edge_nodes": network_edge_nodes,
+            "network_edge_length": branch_effective_lengths,
+            "network_node_names": network_node_names,
+            "network_node_x": network_node_x,
+            "network_node_y": network_node_y,
             "geom_node_x": geom_node_x,
             "geom_node_y": geom_node_y,
             "geom_node_count": geom_node_count,
+            "branch_node_chainages": branch_node_chainages,
+            "branch_edge_chainages": branch_edge_chainages,
             "n_nodes": len(node_x),
             "n_edges": len(edges),
             "n_branches": len(branch_names),
         }
 
-    def _write_netcdf_string_array(self, nc_dataset, var_name, dim_name, values):
+    def _write_1d_network_log(self, log_path, mesh_data):
+        """Write detailed 1D network creation diagnostics to a text log."""
+        branch_nodes = mesh_data.get("branch_node_chainages", [])
+        branch_edges = mesh_data.get("branch_edge_chainages", [])
+
+        node_to_branches = {}
+        for branch_info in branch_nodes:
+            branch_name = branch_info.get("branch_name", "")
+            for entry in branch_info.get("entries", []):
+                node_id = int(entry.get("node_id", -1))
+                if node_id < 0:
+                    continue
+                node_to_branches.setdefault(node_id, set()).add(branch_name)
+
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("1D Network Creation Log\n")
+            handle.write("=======================\n\n")
+            handle.write(f"mesh1d_nodes={mesh_data.get('n_nodes', 0)}\n")
+            handle.write(f"mesh1d_edges={mesh_data.get('n_edges', 0)}\n")
+            handle.write(f"branches={mesh_data.get('n_branches', 0)}\n\n")
+
+            handle.write("Branch Lengths\n")
+            handle.write("--------------\n")
+            for branch_info in branch_nodes:
+                imposed = branch_info.get("imposed_length")
+                imposed_text = f"{float(imposed):.6f}" if imposed is not None else "<none>"
+                handle.write(
+                    f"{branch_info.get('branch_name', '')}: imposed={imposed_text}, "
+                    f"geometry={float(branch_info.get('geometry_length', 0.0)):.6f}, "
+                    f"effective={float(branch_info.get('effective_length', 0.0)):.6f}\n"
+                )
+
+            handle.write("\nNode-Branch Connectivity\n")
+            handle.write("------------------------\n")
+            for node_id in sorted(node_to_branches.keys()):
+                connected = sorted(node_to_branches[node_id])
+                handle.write(f"node_{node_id + 1}: {', '.join(connected)}\n")
+
+            handle.write("\nBranch Node Chainages\n")
+            handle.write("---------------------\n")
+            for branch_info in branch_nodes:
+                handle.write(f"[{branch_info.get('branch_name', '')}]\n")
+                terminal_nodes = branch_info.get("terminal_nodes", ("", ""))
+                terminal_snaps = branch_info.get("terminal_snap_distances", (None, None))
+                handle.write(
+                    f"terminal_nodes={terminal_nodes[0]}|{terminal_nodes[1]}, "
+                    f"terminal_snap_distances={terminal_snaps[0]}|{terminal_snaps[1]}\n"
+                )
+                for entry in branch_info.get("entries", []):
+                    handle.write(
+                        f"node_{int(entry['node_id']) + 1}: chainage={float(entry['chainage']):.6f}, "
+                        f"geometry_chainage={float(entry['geometry_chainage']):.6f}, "
+                        f"terminal={entry.get('terminal_name', '')}\n"
+                    )
+
+            handle.write("\nBranch Edge Chainages\n")
+            handle.write("---------------------\n")
+            for branch_info in branch_edges:
+                handle.write(f"[{branch_info.get('branch_name', '')}]\n")
+                for entry in branch_info.get("entries", []):
+                    handle.write(
+                        f"node_{int(entry['start_node']) + 1}->node_{int(entry['end_node']) + 1}: "
+                        f"chainage={float(entry['start_chainage']):.6f}->{float(entry['end_chainage']):.6f}\n"
+                    )
+
+    def _write_netcdf_string_array(self, nc_dataset, var_name, dim_name, values, strlen_dim=None):
         """Write list of strings to a NetCDF fixed-length char array variable."""
-        import netCDF4 as nc
         import numpy as np
 
-        values = [str(v or "") for v in values]
+        normalized_values = []
+        for value in values:
+            if value is None:
+                normalized_values.append("")
+                continue
+            if isinstance(value, (bytes, np.bytes_)):
+                normalized_values.append(value.decode("utf-8", errors="replace"))
+                continue
+            normalized_values.append(str(value))
+
+        values = normalized_values
         max_len = max(1, max(len(v) for v in values) if values else 1)
-        strlen_dim = f"{dim_name}_strlen"
+        strlen_dim = strlen_dim or f"{dim_name}_strlen"
         if strlen_dim not in nc_dataset.dimensions:
             nc_dataset.createDimension(strlen_dim, max_len)
         elif len(nc_dataset.dimensions[strlen_dim]) < max_len:
             raise RuntimeError(f"Dimension '{strlen_dim}' is too small for values.")
 
+        target_len = len(nc_dataset.dimensions[strlen_dim])
+
+        # Store char arrays as (nValues, strlen) so NetCDF decoders (MATLAB ncread,
+        # netCDF4.chartostring) interpret each row as one string.
         var = nc_dataset.createVariable(var_name, "S1", (dim_name, strlen_dim))
         if values:
-            as_array = np.asarray(values, dtype=f"S{max_len}")
-            var[:, :] = nc.stringtochar(as_array)
+            char_matrix = np.full((len(values), target_len), b" ", dtype="S1")
+            for idx, value in enumerate(values):
+                encoded = value.encode("utf-8", errors="replace")[:target_len]
+                if not encoded:
+                    continue
+                row = np.frombuffer(encoded, dtype="S1")
+                char_matrix[idx, : len(row)] = row
+            var[:, :] = char_matrix
         return var
 
     def _write_1d_network_netcdf(self, output_path, mesh_data, epsg):
-        """Write generated 1D network and mesh arrays to a UGRID-like NetCDF file."""
+        """Write generated 1D network and mesh arrays to Delft3D-compatible UGRID 1D NetCDF."""
         try:
             import netCDF4 as nc
             import numpy as np
@@ -6447,53 +6991,205 @@ class Delft3DFileManager:
                 "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
             ) from exc
 
-        with nc.Dataset(output_path, "w", format="NETCDF4") as ds:
-            ds.createDimension("mesh1d_nNodes", mesh_data["n_nodes"])
-            ds.createDimension("mesh1d_nEdges", mesh_data["n_edges"])
-            ds.createDimension("nNetworkBranches", mesh_data["n_branches"])
-            ds.createDimension("network_nNodes", mesh_data["n_nodes"])
-            ds.createDimension("network_nGeomNodes", len(mesh_data["geom_node_x"]))
+        with nc.Dataset(output_path, "w", format="NETCDF3_CLASSIC") as ds:
+            network_nEdges = len(mesh_data.get("network_edge_nodes", []))
+            network_nNodes = len(mesh_data.get("network_node_x", []))
+            network_nGeometryNodes = len(mesh_data.get("geom_node_x", []))
+            mesh1d_nNodes = mesh_data["n_nodes"]
+            mesh1d_nEdges = mesh_data["n_edges"]
+
+            ds.createDimension("network_nEdges", network_nEdges)
+            ds.createDimension("network_nNodes", network_nNodes)
+            ds.createDimension("network_nGeometryNodes", network_nGeometryNodes)
+            ds.createDimension("mesh1d_nNodes", mesh1d_nNodes)
+            ds.createDimension("mesh1d_nEdges", mesh1d_nEdges)
+            ds.createDimension("strLengthIds", 40)
+            ds.createDimension("strLengthLongNames", 80)
             ds.createDimension("Two", 2)
+
+            network_var = ds.createVariable("network", "i4")
+            network_edge_nodes_var = ds.createVariable("network_edge_nodes", "i4", ("network_nEdges", "Two"))
+            network_edge_length_var = ds.createVariable("network_edge_length", "f8", ("network_nEdges",))
+            network_node_x_var = ds.createVariable("network_node_x", "f8", ("network_nNodes",))
+            network_node_y_var = ds.createVariable("network_node_y", "f8", ("network_nNodes",))
+
+            network_geometry_var = ds.createVariable("network_geometry", "i4")
+            network_geom_node_count_var = ds.createVariable("network_geom_node_count", "i4", ("network_nEdges",))
+            network_geom_x_var = ds.createVariable("network_geom_x", "f8", ("network_nGeometryNodes",))
+            network_geom_y_var = ds.createVariable("network_geom_y", "f8", ("network_nGeometryNodes",))
+            network_branch_order_var = ds.createVariable("network_branch_order", "i4", ("network_nEdges",))
+            network_branch_type_var = ds.createVariable("network_branch_type", "i4", ("network_nEdges",))
 
             node_x_var = ds.createVariable("mesh1d_node_x", "f8", ("mesh1d_nNodes",))
             node_y_var = ds.createVariable("mesh1d_node_y", "f8", ("mesh1d_nNodes",))
             edge_nodes_var = ds.createVariable("mesh1d_edge_nodes", "i4", ("mesh1d_nEdges", "Two"))
             edge_branch_var = ds.createVariable("mesh1d_edge_branch", "i4", ("mesh1d_nEdges",))
+            node_branch_var = ds.createVariable("mesh1d_node_branch", "i4", ("mesh1d_nNodes",))
+            node_offset_var = ds.createVariable("mesh1d_node_offset", "f8", ("mesh1d_nNodes",))
+            edge_offset_var = ds.createVariable("mesh1d_edge_offset", "f8", ("mesh1d_nEdges",))
+            edge_x_var = ds.createVariable("mesh1d_edge_x", "f8", ("mesh1d_nEdges",))
+            edge_y_var = ds.createVariable("mesh1d_edge_y", "f8", ("mesh1d_nEdges",))
+            projected_crs = ds.createVariable("projected_coordinate_system", "i4")
+
+            network_var.assignValue(1)
+            network_geometry_var.assignValue(1)
+
+            network_edge_nodes_var[:, :] = np.asarray(mesh_data.get("network_edge_nodes", []), dtype=np.int32)
+            network_edge_length_var[:] = np.asarray(mesh_data.get("network_edge_length", []), dtype=float)
+            network_node_x_var[:] = np.asarray(mesh_data.get("network_node_x", []), dtype=float)
+            network_node_y_var[:] = np.asarray(mesh_data.get("network_node_y", []), dtype=float)
+            network_geom_node_count_var[:] = np.asarray(mesh_data["geom_node_count"], dtype=np.int32)
+            network_geom_x_var[:] = np.asarray(mesh_data["geom_node_x"], dtype=float)
+            network_geom_y_var[:] = np.asarray(mesh_data["geom_node_y"], dtype=float)
+            network_branch_order_var[:] = np.asarray(mesh_data.get("network_branch_order", []), dtype=np.int32)
+            network_branch_type_var[:] = np.asarray(mesh_data.get("network_branch_type", []), dtype=np.int32)
+
+            network_branch_id_var = self._write_netcdf_string_array(
+                ds,
+                "network_branch_id",
+                "network_nEdges",
+                mesh_data["branch_names"],
+                strlen_dim="strLengthIds",
+            )
+            network_branch_long_name_var = self._write_netcdf_string_array(
+                ds,
+                "network_branch_long_name",
+                "network_nEdges",
+                mesh_data["branch_names"],
+                strlen_dim="strLengthLongNames",
+            )
+            network_node_id_var = self._write_netcdf_string_array(
+                ds,
+                "network_node_id",
+                "network_nNodes",
+                mesh_data.get("network_node_names", []),
+                strlen_dim="strLengthIds",
+            )
+            network_node_long_name_var = self._write_netcdf_string_array(
+                ds,
+                "network_node_long_name",
+                "network_nNodes",
+                mesh_data.get("network_node_names", []),
+                strlen_dim="strLengthLongNames",
+            )
 
             node_x_var[:] = np.asarray(mesh_data["node_x"], dtype=float)
             node_y_var[:] = np.asarray(mesh_data["node_y"], dtype=float)
             edge_nodes_var[:, :] = np.asarray(mesh_data["edges"], dtype=np.int32)
             edge_branch_var[:] = np.asarray(mesh_data["edge_branch"], dtype=np.int32)
+            node_branch_var[:] = np.asarray(mesh_data.get("mesh1d_node_branch", []), dtype=np.int32)
+            node_offset_var[:] = np.asarray(mesh_data.get("mesh1d_node_offset", []), dtype=float)
+            edge_offset_var[:] = np.asarray(mesh_data.get("edge_offset", []), dtype=float)
+            edge_x_var[:] = np.asarray(mesh_data.get("edge_x", []), dtype=float)
+            edge_y_var[:] = np.asarray(mesh_data.get("edge_y", []), dtype=float)
+            mesh_node_id_var = self._write_netcdf_string_array(
+                ds,
+                "mesh1d_node_id",
+                "mesh1d_nNodes",
+                mesh_data["node_ids"],
+                strlen_dim="strLengthIds",
+            )
+            mesh_node_long_name_var = self._write_netcdf_string_array(
+                ds,
+                "mesh1d_node_long_name",
+                "mesh1d_nNodes",
+                mesh_data["node_ids"],
+                strlen_dim="strLengthLongNames",
+            )
 
-            geom_x_var = ds.createVariable("network_geom_x", "f8", ("network_nGeomNodes",))
-            geom_y_var = ds.createVariable("network_geom_y", "f8", ("network_nGeomNodes",))
-            geom_count_var = ds.createVariable("network_geom_node_count", "i4", ("nNetworkBranches",))
-            geom_x_var[:] = np.asarray(mesh_data["geom_node_x"], dtype=float)
-            geom_y_var[:] = np.asarray(mesh_data["geom_node_y"], dtype=float)
-            geom_count_var[:] = np.asarray(mesh_data["geom_node_count"], dtype=np.int32)
+            projected_crs.assignValue(int(epsg))
+            projected_crs.epsg = int(epsg)
+            projected_crs.EPSG_code = int(epsg)
 
-            network_node_x_var = ds.createVariable("network_node_x", "f8", ("network_nNodes",))
-            network_node_y_var = ds.createVariable("network_node_y", "f8", ("network_nNodes",))
-            network_node_x_var[:] = np.asarray(mesh_data["node_x"], dtype=float)
-            network_node_y_var[:] = np.asarray(mesh_data["node_y"], dtype=float)
+            network_var.cf_role = "mesh_topology"
+            network_var.long_name = "Topology data of 1D network"
+            network_var.edge_dimension = "network_nEdges"
+            network_var.edge_geometry = "network_geometry"
+            network_var.edge_node_connectivity = "network_edge_nodes"
+            network_var.node_coordinates = "network_node_x network_node_y"
+            network_var.node_dimension = "network_nNodes"
+            network_var.topology_dimension = 1
+            network_var.node_id = "network_node_id"
+            network_var.node_long_name = "network_node_long_name"
+            network_var.branch_id = "network_branch_id"
+            network_var.branch_long_name = "network_branch_long_name"
+            network_var.edge_length = "network_edge_length"
 
-            self._write_netcdf_string_array(ds, "network_branch_long_name", "nNetworkBranches", mesh_data["branch_names"])
-            self._write_netcdf_string_array(ds, "network_branch_id", "nNetworkBranches", mesh_data["branch_names"])
-            self._write_netcdf_string_array(ds, "network_node_id", "network_nNodes", mesh_data["node_ids"])
-            self._write_netcdf_string_array(ds, "network_node_long_name", "network_nNodes", mesh_data["node_ids"])
+            network_edge_nodes_var.cf_role = "edge_node_connectivity"
+            network_edge_nodes_var.long_name = "Start and end nodes of network edges"
+            network_edge_nodes_var.start_index = 0
+            network_branch_id_var.long_name = "ID of branch geometries"
+            network_branch_long_name_var.long_name = "Long name of branch geometries"
+            network_edge_length_var.long_name = "Real length of branch geometries"
+            network_edge_length_var.units = "m"
+            network_node_id_var.long_name = "ID of network nodes"
+            network_node_long_name_var.long_name = "Long name of network nodes"
+            network_node_x_var.units = "m"
+            network_node_x_var.standard_name = "projection_x_coordinate"
+            network_node_x_var.long_name = "x-coordinate of network nodes"
+            network_node_y_var.units = "m"
+            network_node_y_var.standard_name = "projection_y_coordinate"
+            network_node_y_var.long_name = "y-coordinate of network nodes"
 
+            network_geometry_var.geometry_type = "line"
+            network_geometry_var.long_name = "1D Geometry"
+            network_geometry_var.node_count = "network_geom_node_count"
+            network_geometry_var.node_coordinates = "network_geom_x network_geom_y"
+            network_geom_node_count_var.long_name = "Number of geometry nodes per branch"
+            network_geom_x_var.units = "m"
+            network_geom_x_var.standard_name = "projection_x_coordinate"
+            network_geom_x_var.long_name = "x-coordinate of branch geometry nodes"
+            network_geom_y_var.units = "m"
+            network_geom_y_var.standard_name = "projection_y_coordinate"
+            network_geom_y_var.long_name = "y-coordinate of branch geometry nodes"
+            network_branch_order_var.long_name = "Order of branches for interpolation"
+            network_branch_order_var.mesh = "network"
+            network_branch_order_var.location = "edge"
+            network_branch_type_var.long_name = "Type of branches"
+            network_branch_type_var.mesh = "network"
+            network_branch_type_var.location = "edge"
             mesh_topology = ds.createVariable("mesh1d", "i4")
             mesh_topology.cf_role = "mesh_topology"
+            mesh_topology.long_name = "Topology data of 1D mesh"
             mesh_topology.topology_dimension = 1
-            mesh_topology.node_coordinates = "mesh1d_node_x mesh1d_node_y"
+            mesh_topology.coordinate_space = "network"
             mesh_topology.edge_node_connectivity = "mesh1d_edge_nodes"
+            mesh_topology.node_dimension = "mesh1d_nNodes"
+            mesh_topology.edge_dimension = "mesh1d_nEdges"
+            mesh_topology.node_coordinates = "mesh1d_node_branch mesh1d_node_offset mesh1d_node_x mesh1d_node_y"
+            mesh_topology.edge_coordinates = "mesh1d_edge_branch mesh1d_edge_offset mesh1d_edge_x mesh1d_edge_y"
+            mesh_topology.node_id = "mesh1d_node_id"
+            mesh_topology.node_long_name = "mesh1d_node_long_name"
 
-            crs_var = ds.createVariable("crs", "i4")
-            crs_var.epsg = int(epsg)
-            crs_var.EPSG_code = int(epsg)
+            edge_nodes_var.cf_role = "edge_node_connectivity"
+            edge_nodes_var.long_name = "Start and end nodes of mesh edges"
+            edge_nodes_var.start_index = 0
+            edge_branch_var.long_name = "Index of branch on which mesh edges are located"
+            edge_branch_var.start_index = 0
+            node_branch_var.long_name = "Index of branch on which mesh nodes are located"
+            node_branch_var.start_index = 0
+            node_offset_var.long_name = "Offset along branch of mesh nodes"
+            node_offset_var.units = "m"
+            edge_offset_var.long_name = "Offset along branch of mesh edges"
+            edge_offset_var.units = "m"
+            node_x_var.units = "m"
+            node_x_var.standard_name = "projection_x_coordinate"
+            node_x_var.long_name = "x-coordinate of mesh nodes"
+            node_y_var.units = "m"
+            node_y_var.standard_name = "projection_y_coordinate"
+            node_y_var.long_name = "y-coordinate of mesh nodes"
+            edge_x_var.units = "m"
+            edge_x_var.standard_name = "projection_x_coordinate"
+            edge_x_var.long_name = "Characteristic x-coordinate of the mesh edge (e.g. midpoint)"
+            edge_y_var.units = "m"
+            edge_y_var.standard_name = "projection_y_coordinate"
+            edge_y_var.long_name = "Characteristic y-coordinate of the mesh edge (e.g. midpoint)"
 
-            node_x_var.coordinates = "mesh1d_node_x mesh1d_node_y"
-            node_y_var.coordinates = "mesh1d_node_x mesh1d_node_y"
+            ds.institution = "Deltares"
+            ds.references = "https://github.com/ugrid-conventions/ugrid-conventions"
+            ds.source = "Delft3DFileManager create_1d_network"
+            ds.history = "Created by Delft3DFileManager"
+            ds.Conventions = "CF-1.8 UGRID-1.0 Deltares-0.10"
 
     
 
