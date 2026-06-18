@@ -6590,12 +6590,17 @@ class Delft3DFileManager:
             QgsProject.instance().addMapLayer(layer)
 
     def _generate_branch_chainages(self, profile, spacing, offset_distance, special_chainages):
-        """Generate branch chainages from constant spacing and special-point offsets."""
+        """Generate branch chainages from constant spacing and special-point offsets.
+        
+        Ensures that the imposed spacing is a minimum cell length:
+        - All cells are >= spacing (no cell can be shorter than the imposed value)
+        - If dividing evenly would create a short last cell, that cell is extended
+        """
         length = float(profile.get("effective_length", profile.get("length", 0.0)))
         if length <= 0.0:
             return []
 
-        chainages = [0.0, length]
+        chainages = [0.0]
 
         spacing = float(spacing)
         if spacing > 0.0:
@@ -6604,6 +6609,16 @@ class Delft3DFileManager:
                 c = step * spacing
                 if c < length:
                     chainages.append(c)
+            
+            # Check if the last cell is too short (remainder < spacing)
+            # If so, remove the last intermediate chainage to extend the previous cell
+            if chainages[-1] > 0.0:  # Only if we have intermediate points
+                remainder = length - chainages[-1]
+                if 0.0 < remainder < spacing:
+                    # Remove the last intermediate chainage, so it absorbs the remainder
+                    chainages.pop()
+
+        chainages.append(length)  # Always add the end point
 
         if special_chainages:
             offset_distance = float(offset_distance)

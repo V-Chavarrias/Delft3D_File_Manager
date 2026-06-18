@@ -66,7 +66,10 @@ def test_imposed_length_used_for_mesh_chainage(plugin):
     assert mesh_data is not None
     branch = mesh_data["branch_node_chainages"][0]
     chainages = [item["chainage"] for item in branch["entries"]]
-    assert chainages == [0.0, 75.0, 150.0, 200.0]
+    # With the fix: spacing of 75m for 200m length should produce [0, 75, 200]
+    # Cell sizes: 75m and 125m (all >= 75m minimum spacing)
+    # Previously was [0, 75, 150, 200] with cell sizes 75, 75, 50 (last cell too short)
+    assert chainages == [0.0, 75.0, 200.0]
     assert mesh_data["network_edge_length"] == [200.0]
 
 
@@ -216,3 +219,78 @@ def test_write_1d_network_netcdf_includes_reference_schema_variables(plugin, tmp
         assert ds.variables["network_node_long_name"].dimensions == ("network_nNodes", "strLengthLongNames")
         assert ds.variables["mesh1d_node_id"].dimensions == ("mesh1d_nNodes", "strLengthIds")
         assert ds.variables["mesh1d_node_long_name"].dimensions == ("mesh1d_nNodes", "strLengthLongNames")
+
+
+def test_cell_length_minimum_constraint_no_short_cells(plugin):
+    """Test that no cell is shorter than the imposed spacing (minimum cell length).
+    
+    When branch length and spacing don't divide evenly, the last cell must be
+    extended to accommodate the remainder, ensuring all cells >= imposed spacing.
+    """
+    # Case 1: Branch length 200m with spacing 75m
+    # Current behavior (buggy): [0, 75, 150, 200] -> cells: 75, 75, 50 (last cell too short)
+    # Fixed behavior: [0, 75, 200] -> cells: 75, 125 (all cells >= 75)
+    profile_200m = _make_profile(
+        "A",
+        [(0.0, 0.0), (100.0, 0.0)],
+        ("n0", "n1"),
+        effective_length=200.0,
+    )
+
+    mesh_data = plugin._build_mesh_from_profiles(
+        branch_profiles=[profile_200m],
+        spacing=75.0,
+        special_constraints=[],
+        offset_distance=10.0,
+    )
+
+    assert mesh_data is not None
+    branch = mesh_data["branch_node_chainages"][0]
+    chainages = [item["chainage"] for item in branch["entries"]]
+    
+    # Verify all cells are >= spacing
+    for i in range(len(chainages) - 1):
+        cell_length = chainages[i + 1] - chainages[i]
+        assert cell_length >= 75.0, f"Cell from {chainages[i]} to {chainages[i+1]} is {cell_length}m, less than imposed spacing 75m"
+
+
+def test_cell_length_minimum_constraint_various_cases(plugin):
+    """Test cell length minimum constraint with various branch/spacing combinations."""
+    test_cases = [
+        # (branch_length, spacing, description)
+        (100.0, 30.0, "100m length with 30m spacing"),
+        (150.0, 50.0, "150m length with 50m spacing"),
+        (1000.0, 200.0, "1000m length with 200m spacing"),
+    ]
+    
+    for branch_length, spacing, description in test_cases:
+        profile = _make_profile(
+            "test_branch",
+            [(0.0, 0.0), (branch_length, 0.0)],
+            ("n0", "n1"),
+            effective_length=branch_length,
+        )
+
+        mesh_data = plugin._build_mesh_from_profiles(
+            branch_profiles=[profile],
+            spacing=spacing,
+            special_constraints=[],
+            offset_distance=10.0,
+        )
+
+        assert mesh_data is not None, f"Failed for case: {description}"
+        branch = mesh_data["branch_node_chainages"][0]
+        chainages = [item["chainage"] for item in branch["entries"]]
+        
+        # Verify start and end points
+        assert chainages[0] == 0.0, f"First chainage should be 0 for {description}"
+        assert abs(chainages[-1] - branch_length) < 1e-6, f"Last chainage should be {branch_length} for {description}"
+        
+        # Verify all cells are >= spacing (minimum constraint)
+        for i in range(len(chainages) - 1):
+            cell_length = chainages[i + 1] - chainages[i]
+            assert cell_length >= spacing * 0.99999, (  # Small tolerance for floating point
+                f"Case: {description}\n"
+                f"Cell from {chainages[i]} to {chainages[i+1]} is {cell_length}m, "
+                f"less than imposed spacing {spacing}m"
+            )
