@@ -3,7 +3,7 @@ name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Imports and exports Delft3D files. 
-version=9.10.0
+version=9.10.1
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
@@ -12,6 +12,7 @@ homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
 about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
 changelog=
+    9.10.1 - Cell length must be minimum.
     9.10.0 - Create 1D UGRID.
     9.9.11 - Security hardening: DIMR XML parsing now requires defusedxml; removed stdlib XML fallback and added guided install/restart messaging when missing.
     9.9.10 - Added always-on orphan loading-dialog sweep in progress create/close helpers to prevent lingering 'Loading ... Initializing' windows.
