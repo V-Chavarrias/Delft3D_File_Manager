@@ -9,6 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -121,13 +122,41 @@ def _create_chart_widget(parent=None):
     return _FallbackChartWidget(parent)
 
 
+def _qsizepolicy_value(name):
+    """Return QSizePolicy enum value across Qt5/Qt6."""
+    value = getattr(QSizePolicy, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QSizePolicy, "Policy", None), name, None)
+
+
 class HisTimeseriesDialog(QDialog):
     """Timeseries explorer driven by active selection and variable dropdowns."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # Keep the dialog user-resizable in both directions on Qt5/Qt6.
+        fixed_size_hint = getattr(Qt, "MSWindowsFixedSizeDialogHint", None)
+        if fixed_size_hint is None:
+            fixed_size_hint = getattr(getattr(Qt, "WindowType", None), "MSWindowsFixedSizeDialogHint", None)
+        if fixed_size_hint is not None:
+            self.setWindowFlag(fixed_size_hint, False)
+
+        window_flag = getattr(Qt, "Window", None)
+        if window_flag is None:
+            window_flag = getattr(getattr(Qt, "WindowType", None), "Window", None)
+        if window_flag is not None:
+            self.setWindowFlag(window_flag, True)
+
+        self.setSizeGripEnabled(True)
         self.setWindowTitle("HIS Timeseries Explorer")
+        self.setMinimumSize(760, 420)
         self.resize(980, 560)
+        expanding_policy = _qsizepolicy_value("Expanding")
+        preferred_policy = _qsizepolicy_value("Preferred")
+        if expanding_policy is not None:
+            self.setSizePolicy(expanding_policy, expanding_policy)
 
         self._on_controls_changed = None
         self._on_plot_requested = None
@@ -157,9 +186,13 @@ class HisTimeseriesDialog(QDialog):
         self._message_label.setStyleSheet("color: #666666;")
 
         self._chart_widget = _create_chart_widget(self)
+        if expanding_policy is not None:
+            self._chart_widget.setSizePolicy(expanding_policy, expanding_policy)
 
         self._series_list = QListWidget(self)
         self._series_list.setMinimumWidth(280)
+        if preferred_policy is not None and expanding_policy is not None:
+            self._series_list.setSizePolicy(preferred_policy, expanding_policy)
 
         chart_and_series_row = QHBoxLayout()
         chart_and_series_row.addWidget(self._chart_widget, stretch=5)
