@@ -3,7 +3,7 @@ name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Imports and exports Delft3D files. 
-version=9.11.0
+version=9.11.1
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
@@ -12,6 +12,7 @@ homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
 about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
 changelog=
+    9.11.1 - Solving some bugs and critical QGIS conditions. 
     9.11.0 - Added partitioned map and his file reading.
     9.10.3 - Added partition import mode prompt to choose between owner-masked sidecar rendering and direct raw partition rendering (ghost overlap visible).
     9.10.2 - Added partitioned UGRID mesh import workflow: sibling partition discovery, owner-domain ghost masking sidecars, grouped multi-part loading, and synchronized dataset/renderer behavior across partitions.
