@@ -4440,12 +4440,6 @@ class Delft3DFileManager:
         self._close_orphan_loading_progress_dialogs()
         self._close_progress_dialog(self._active_progress_dialog)
 
-        # QGIS 4 / Qt6 can keep native/MDAL "Initializing..." windows alive.
-        # Use status-bar progress only to avoid sticky popup regressions.
-        if _is_qt6_runtime():
-            self._active_progress_dialog = None
-            return None
-
         try:
             dialog = QProgressDialog("Initializing...", None, 0, 100, self.iface.mainWindow())
             dialog.setObjectName(_IMPORT_PROGRESS_DIALOG_OBJECT_NAME)
@@ -4453,7 +4447,16 @@ class Delft3DFileManager:
             dialog.setAutoClose(True)
             dialog.setAutoReset(False)
             dialog.setMinimumDuration(0)
-            dialog.setWindowModality(Qt.WindowModal)
+            # Qt6 showed sticky modal progress windows in some partitioned imports.
+            # Keep the dialog visible but non-modal on Qt6.
+            if _is_qt6_runtime():
+                non_modal = getattr(Qt, "NonModal", None)
+                if non_modal is None:
+                    non_modal = getattr(getattr(Qt, "WindowModality", None), "NonModal", None)
+                if non_modal is not None:
+                    dialog.setWindowModality(non_modal)
+            else:
+                dialog.setWindowModality(Qt.WindowModal)
             dialog.setValue(0)
             dialog.show()
             self._active_progress_dialog = dialog
@@ -4465,7 +4468,7 @@ class Delft3DFileManager:
 
     def _schedule_orphan_progress_cleanup(self, delays_ms=None):
         """Schedule deferred orphan cleanup sweeps for late-spawned dialogs."""
-        delays = list(delays_ms) if delays_ms is not None else [180]
+        delays = list(delays_ms) if delays_ms is not None else [180, 650, 1400]
         for delay_ms in delays:
             try:
                 QTimer.singleShot(delay_ms, self._close_orphan_loading_progress_dialogs)
