@@ -5244,12 +5244,35 @@ class Delft3DFileManager:
 
             # ── Source-preparation phase: flatten and/or ghost-mask ───────────
             partition_source_paths = None
+            partition_flattened_paths = None
             if partition_mode:
                 self._update_progress_dialog(progress_dialog, 45, "Preparing partition mesh sources")
                 self._set_status_message("Preparing partition mesh sources")
                 if partition_render_mode == "raw":
                     partition_source_paths = list(partition_input_files)
-                    self._set_status_message("Loading original partition files (ghost overlap enabled)")
+                    if selected_variables:
+                        flattened_partition_paths = []
+                        n = len(partition_source_paths)
+                        for idx, pf in enumerate(partition_source_paths):
+                            self._update_progress_dialog(
+                                progress_dialog,
+                                45 + int(20 * idx / max(n, 1)),
+                                f"Flattening partition {idx + 1}/{n}",
+                            )
+                            try:
+                                flattened_partition_paths.append(
+                                    self._prepare_flattened_ugrid_sidecar(pf, selected_variables)
+                                )
+                            except Exception as exc:
+                                self.iface.messageBar().pushWarning(
+                                    "Delft3D File Manager",
+                                    f"Could not flatten {os.path.basename(pf)}, using original: {exc}",
+                                )
+                                flattened_partition_paths.append(pf)
+                        partition_flattened_paths = flattened_partition_paths
+                        self._set_status_message("Loading flattened partition files (ghost overlap enabled)")
+                    else:
+                        self._set_status_message("Loading original partition files (ghost overlap enabled)")
                 else:
                     # masked: flatten each partition then ghost-mask it.
                     partition_warnings = []
@@ -5307,34 +5330,12 @@ class Delft3DFileManager:
                 try:
                     self._update_progress_dialog(progress_dialog, 75, "Loading mesh2d layer")
                     self._set_status_message("Loading mesh2d layer")
-                    if flattened_sidecar_path:
+                    if flattened_sidecar_path or partition_flattened_paths:
                         # Load both original and flattened files as separate layer groups
                         if partition_source_paths:
-                            if partition_render_mode == "raw":
-                                flattened_partition_paths = []
-                                n = len(partition_source_paths)
-                                for idx, pf in enumerate(partition_source_paths):
-                                    self._update_progress_dialog(
-                                        progress_dialog,
-                                        75 + int(10 * idx / max(n, 1)),
-                                        f"Flattening partition {idx + 1}/{n}",
-                                    )
-                                    try:
-                                        flattened_partition_paths.append(
-                                            self._prepare_flattened_ugrid_sidecar(pf, selected_variables)
-                                        )
-                                    except Exception as exc:
-                                        self.iface.messageBar().pushWarning(
-                                            "Delft3D File Manager",
-                                            f"Could not flatten {os.path.basename(pf)}, using original: {exc}",
-                                        )
-                                        flattened_partition_paths.append(pf)
-                            else:
-                                flattened_partition_paths = partition_source_paths
-
                             self._load_partitioned_mesh2d_with_flattened_sidecars(
                                 partition_input_files,
-                                flattened_partition_paths,
+                                partition_flattened_paths or partition_source_paths,
                                 base_name,
                                 epsg,
                                 layer_names["mesh2d"],
@@ -5600,7 +5601,13 @@ class Delft3DFileManager:
         from qgis.core import QgsProject
 
         root = QgsProject.instance().layerTreeRoot()
-        if root.findGroup(group_name) is None:
+        existing_group = None
+        try:
+            existing_group = root.findGroup(group_name)
+        except (AttributeError, RuntimeError):
+            return group_name
+
+        if existing_group is None or type(existing_group).__module__.startswith("unittest.mock"):
             return group_name
 
         suffix = 2

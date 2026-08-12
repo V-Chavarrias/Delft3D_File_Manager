@@ -1116,17 +1116,41 @@ def test_load_ugrid_mesh_file_morphodynamic_flattens_selected_variables(plugin, 
         plugin.load_ugrid_mesh_file(str(src_path))
 
     prompt_mock.assert_called_once()
-    load_mesh2d_mock.assert_called_once()
+    assert load_mesh2d_mock.call_count == 2
 
-    loaded_mesh_path = pathlib.Path(load_mesh2d_mock.call_args[0][0])
-    assert loaded_mesh_path.name == "morpho_small_qgis_flat.nc"
-    assert loaded_mesh_path.exists()
+    loaded_paths = [pathlib.Path(call.args[0]) for call in load_mesh2d_mock.call_args_list]
+    assert loaded_paths[0].name == "morpho_small.nc"
+    assert loaded_paths[1].name == "morpho_small_qgis_flat.nc"
+    assert loaded_paths[0].exists()
+    assert loaded_paths[1].exists()
 
-    with netcdf4.Dataset(str(loaded_mesh_path), "r") as ds:
+    with netcdf4.Dataset(str(loaded_paths[1]), "r") as ds:
         flattened = [name for name in ds.variables.keys() if name.startswith("sedfrac_")]
         assert len(flattened) == 2
         for variable_name in flattened:
             assert len(ds.variables[variable_name].dimensions) <= 2
+
+
+def test_load_ugrid_mesh_file_morphodynamic_prompt_only_shows_flattenable_variables(plugin):
+    class DummyVar:
+        def __init__(self, dimensions, dtype="f4"):
+            self.dimensions = dimensions
+            self.dtype = dtype
+
+    class DummyDataset:
+        def __init__(self):
+            self.variables = {
+                "waterlevel": DummyVar(("time", "mesh2d_nFaces")),
+                "sedfrac": DummyVar(("time", "mesh2d_nFaces", "nSedTot")),
+                "mesh2d": DummyVar(())
+            }
+
+    analysis = plugin._analyze_ugrid_data_variables(DummyDataset())
+
+    assert analysis["has_morphodynamic"] is True
+    assert analysis["flattenable_names"] == ["sedfrac"]
+    assert "waterlevel" in analysis["candidate_names"]
+    assert "waterlevel" not in analysis["flattenable_names"]
 
 
 def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
@@ -1439,6 +1463,28 @@ def test_load_ugrid_mesh_file_loads_real_partition_fixture_set_in_raw_mode(plugi
     load_partitioned_mock.assert_called_once()
     loaded_names = [pathlib.Path(path).name for path in load_partitioned_mock.call_args[0][0]]
     assert loaded_names == PARTITIONED_DELTA_MAP_NAMES
+
+
+def test_load_ugrid_mesh_file_partition_raw_mode_with_morpho_uses_flattened_sidecars(plugin):
+    pytest.importorskip("netCDF4")
+
+    with patch.object(plugin, "_analyze_ugrid_data_variables", return_value={
+        "candidate_names": ["sedfrac"],
+        "flattenable_names": ["sedfrac"],
+        "default_selected": ["sedfrac"],
+        "has_morphodynamic": True,
+    }), \
+         patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=["sedfrac"]), \
+         patch.object(plugin, "_prompt_for_partition_render_mode", return_value="raw"), \
+         patch.object(plugin, "_prepare_flattened_ugrid_sidecar", side_effect=lambda path, vars, progress_callback=None: f"{path}_flat"), \
+         patch.object(plugin, "_load_partitioned_mesh2d_with_flattened_sidecars") as load_partitioned_flat_mock:
+        plugin.load_ugrid_mesh_file(str(PARTITIONED_DELTA_MAP_0000))
+
+    load_partitioned_flat_mock.assert_called_once()
+    original_paths = [pathlib.Path(path).name for path in load_partitioned_flat_mock.call_args.args[0]]
+    flattened_paths = [pathlib.Path(path).name for path in load_partitioned_flat_mock.call_args.args[1]]
+    assert original_paths == PARTITIONED_DELTA_MAP_NAMES
+    assert all(name.endswith("_flat") for name in flattened_paths)
 
 
 def test_prepare_partition_mesh_sources_real_estuary_fixture_masks_ghosts(plugin, tmp_path):

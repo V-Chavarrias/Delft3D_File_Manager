@@ -14,7 +14,9 @@ A QGIS plugin to manage Delft3D files.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
 - Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
-- Detects morphodynamic NetCDF variables with extra dimensions and flattens selected variables to QGIS-compatible time/space datasets.
+- Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
+- Writes a flattened NetCDF side-car and loads the original plus flattened datasets as separate layers, with flattened layers tagged as `morpho`.
+- For partitioned mesh imports, loads regular and flattened partitions into separate grouping layers.
 - Visualizes imported boundary-condition timeseries in the existing profile popup window.
 - Visualizes HIS timeseries in a dedicated explorer window with variable dropdown selection and Add/New plot modes.
 - Exports line features and fixed-weir point layers with the main `Export` action.
