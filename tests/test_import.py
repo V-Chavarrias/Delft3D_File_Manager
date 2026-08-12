@@ -161,6 +161,12 @@ def test_is_his_netcdf_file_detects_small_fixture(plugin):
     assert plugin._is_his_netcdf_file(str(HIS_01))
 
 
+def test_is_his_netcdf_file_rejects_map_fixture(plugin):
+    pytest.importorskip("netCDF4")
+
+    assert not plugin._is_his_netcdf_file(str(MIXED_1D2D_01))
+
+
 def test_resolve_his_schema_from_fixture(plugin):
     nc = pytest.importorskip("netCDF4")
 

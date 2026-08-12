@@ -4645,9 +4645,27 @@ class Delft3DFileManager:
             if schema is None:
                 return False
 
-            has_obs = schema["station_count"] > 0 or schema["cross_section_count"] > 0
-            has_global = bool(schema.get("global_variables"))
-            return has_obs or has_global
+            # HIS detection must rely on observation schema, not generic global
+            # time-series variables that are also present in regular map outputs.
+            has_station_schema = any(
+                [
+                    schema.get("station_dim"),
+                    schema.get("station_name_var"),
+                    schema.get("station_x_var"),
+                    schema.get("station_y_var"),
+                    schema.get("station_geom_count_var"),
+                ]
+            )
+            has_cross_section_schema = any(
+                [
+                    schema.get("cross_section_dim"),
+                    schema.get("cross_name_var"),
+                    schema.get("cross_geom_count_var"),
+                ]
+            )
+            has_obs_schema = has_station_schema or has_cross_section_schema
+            has_obs_entities = schema["station_count"] > 0 or schema["cross_section_count"] > 0
+            return bool(has_obs_schema and has_obs_entities)
 
     def _resolve_his_schema(self, nc_dataset):
         """Resolve Delft3D FM HIS variable/dimension names into one schema map."""
