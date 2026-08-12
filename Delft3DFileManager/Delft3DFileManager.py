@@ -21,14 +21,16 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt, QTimer, QT_VERSION_STR
 from datetime import datetime, timedelta
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 import itertools
 import importlib
+import io
 import json
 import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 import glob
 try:
@@ -9371,21 +9373,70 @@ class Delft3DFileManager:
         unexpected = [p for p in packages if p not in allowed]
         if unexpected:
             raise ValueError(f"Refusing to install unlisted package(s): {unexpected!r}")
-        python_exe = self._get_python_executable_for_pip()
-        cmd = [python_exe, "-m", "pip", "install"] + list(packages)
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            return result
+
+        def _result(returncode, stdout="", stderr=""):
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        def _invoke_pip(pip_main, pip_args):
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+            try:
+                with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+                    exit_code = pip_main(list(pip_args))
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 1
+                return _result(code, stdout_buffer.getvalue(), stderr_buffer.getvalue())
+            except Exception as exc:
+                return _result(1, stdout_buffer.getvalue(), f"{stderr_buffer.getvalue()}\n{exc}".strip())
+
+            if exit_code is None:
+                exit_code = 0
+            return _result(int(exit_code), stdout_buffer.getvalue(), stderr_buffer.getvalue())
+
+        pip_main = None
+        try:
+            pip_module = importlib.import_module("pip._internal.cli.main")
+            pip_main = getattr(pip_module, "main", None)
+        except Exception:
+            pip_main = None
+
+        if callable(pip_main):
+            result = _invoke_pip(pip_main, ["install"] + list(packages))
+            if result.returncode == 0:
+                return result
+        else:
+            result = _result(1, stderr="pip is not available in this Python environment.")
 
         # Try to bootstrap pip when not available, then retry once.
-        ensurepip_result = subprocess.run(
-            [python_exe, "-m", "ensurepip", "--upgrade"],
-            capture_output=True,
-            text=True,
-        )
-        if ensurepip_result.returncode == 0:
-            return subprocess.run(cmd, capture_output=True, text=True)
-        return result
+        ensure_stdout = io.StringIO()
+        ensure_stderr = io.StringIO()
+        try:
+            import ensurepip
+            with redirect_stdout(ensure_stdout), redirect_stderr(ensure_stderr):
+                ensurepip.bootstrap(upgrade=True)
+            ensure_result = _result(0, ensure_stdout.getvalue(), ensure_stderr.getvalue())
+        except Exception as exc:
+            ensure_result = _result(1, ensure_stdout.getvalue(), f"{ensure_stderr.getvalue()}\n{exc}".strip())
+
+        if ensure_result.returncode != 0:
+            return result
+
+        # Reload pip after ensurepip and retry once.
+        try:
+            importlib.invalidate_caches()
+            pip_module = importlib.import_module("pip._internal.cli.main")
+            pip_main = getattr(pip_module, "main", None)
+        except Exception:
+            pip_main = None
+
+        if not callable(pip_main):
+            return _result(
+                1,
+                stdout=result.stdout,
+                stderr=(result.stderr + "\n" + "pip bootstrap completed but pip module is still unavailable.").strip(),
+            )
+
+        return _invoke_pip(pip_main, ["install"] + list(packages))
 
     def _get_python_executable_for_pip(self):
         """Return a Python executable path suitable for running pip.

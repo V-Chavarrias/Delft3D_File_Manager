@@ -782,6 +782,13 @@ pre-commit install
 pre-commit run --all-files
 ```
 
+Security guardrails (for contributors and coding agents):
+- Do not introduce shell-command execution for dependency installation or file import/export paths.
+- Avoid high-risk calls such as `subprocess.run`, `subprocess.Popen`, `os.system`, `eval`, and `exec` unless explicitly approved and reviewed.
+- Prefer in-process Python APIs (for example `pip` or `ensurepip`) over spawning external commands.
+- Keep package installation restricted to the internal allowlist (`self._required_packages`) and never pass user-controlled strings into command execution.
+- If process execution is absolutely required in future work, use strict allowlists, argument lists (never shell strings), and document the threat model in the pull request.
+
 Release:
 ```
 git tag v1.0

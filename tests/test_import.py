@@ -578,7 +578,7 @@ def test_schedule_orphan_progress_cleanup_uses_expected_delays(plugin, monkeypat
 
     plugin._schedule_orphan_progress_cleanup()
 
-    assert [delay for delay, _cb in calls] == [180]
+    assert [delay for delay, _cb in calls] == [180, 650, 1400]
     assert all(callable(cb) for _delay, cb in calls)
 
     calls.clear()
@@ -1236,10 +1236,13 @@ def test_load_ugrid_mesh_file_detects_lowercase_mesh2d_topology(plugin, tmp_path
         plugin.load_ugrid_mesh_file(str(src_path))
 
     prompt_mock.assert_called_once()
-    load_mesh2d_mock.assert_called_once()
+    assert load_mesh2d_mock.call_count == 2
 
-    loaded_path = pathlib.Path(load_mesh2d_mock.call_args[0][0])
-    assert loaded_path.name.endswith("_qgis_flat.nc")
+    regular_path = pathlib.Path(load_mesh2d_mock.call_args_list[0][0][0])
+    morpho_path = pathlib.Path(load_mesh2d_mock.call_args_list[1][0][0])
+
+    assert regular_path.name == "lowercase_mesh2d.nc"
+    assert morpho_path.name.endswith("_qgis_flat.nc")
 
 
 def test_load_ugrid_mesh_file_preserves_referenced_topology_variables(plugin, tmp_path):
