@@ -18,6 +18,15 @@ MORPHO_01 = DATA_DIR / "morpho_small.nc"
 MIXED_1D2D_01 = DATA_DIR / "mixed_1d2d_small.nc"
 BRIDGES_01 = DATA_DIR / "bridges.pliz"
 MODEL_01_DIMR = DATA_DIR / "model_01" / "dimr_config.xml"
+PARTITIONED_DELTA_MAP_0000 = DATA_DIR / "delta_0000_map.nc"
+PARTITIONED_DELTA_MAP_NAMES = [
+    "delta_0000_map.nc",
+    "delta_0001_map.nc",
+    "delta_0002_map.nc",
+    "delta_0003_map.nc",
+]
+PARTITIONED_ESTRUARY_MAP_0000 = DATA_DIR / "estuary_0000_map.nc"
+PARTITIONED_ESTRUARY_MAP_0001 = DATA_DIR / "estuary_0001_map.nc"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
@@ -1304,6 +1313,46 @@ def test_discover_partition_mesh_files_non_partitioned_returns_input(plugin, tmp
 
     assert len(result) == 1
     assert pathlib.Path(result[0]).resolve() == source.resolve()
+
+
+def test_load_ugrid_mesh_file_loads_real_partition_fixture_set_in_raw_mode(plugin):
+    pytest.importorskip("netCDF4")
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=[]), \
+         patch.object(plugin, "_prompt_for_partition_render_mode", return_value="raw"), \
+         patch.object(plugin, "_load_partitioned_mesh2d_layers") as load_partitioned_mock:
+        plugin.load_ugrid_mesh_file(str(PARTITIONED_DELTA_MAP_0000))
+
+    load_partitioned_mock.assert_called_once()
+    loaded_names = [pathlib.Path(path).name for path in load_partitioned_mock.call_args[0][0]]
+    assert loaded_names == PARTITIONED_DELTA_MAP_NAMES
+
+
+def test_prepare_partition_mesh_sources_real_estuary_fixture_masks_ghosts(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    part0 = tmp_path / PARTITIONED_ESTRUARY_MAP_0000.name
+    part1 = tmp_path / PARTITIONED_ESTRUARY_MAP_0001.name
+    shutil.copyfile(PARTITIONED_ESTRUARY_MAP_0000, part0)
+    shutil.copyfile(PARTITIONED_ESTRUARY_MAP_0001, part1)
+
+    source_paths, warnings = plugin._prepare_partition_mesh_sources([str(part0), str(part1)], selected_variables=[])
+
+    assert warnings == []
+    assert [pathlib.Path(p).name for p in source_paths] == [
+        "estuary_0000_map_qgis_owner.nc",
+        "estuary_0001_map_qgis_owner.nc",
+    ]
+
+    with netcdf4.Dataset(source_paths[0], "r") as ds0:
+        vals0 = ds0.variables["mesh2d_s1"][:]
+        assert float(vals0[0, 0]) == 100.0
+        assert vals0.mask[0, 1]
+
+    with netcdf4.Dataset(source_paths[1], "r") as ds1:
+        vals1 = ds1.variables["mesh2d_s1"][:]
+        assert vals1.mask[0, 0]
+        assert float(vals1[0, 1]) == 400.0
 
 
 def test_prepare_partition_ghost_sidecar_masks_non_owner_faces(plugin, tmp_path):
