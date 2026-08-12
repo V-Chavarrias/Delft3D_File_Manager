@@ -149,6 +149,322 @@ def test_close_progress_dialog_survives_partial_cleanup_failures(plugin):
     assert plugin._active_progress_dialog is None
 
 
+def test_close_orphan_loading_progress_dialogs_closes_marked_progress_dialog(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    main_window = object()
+    plugin.iface.mainWindow.return_value = main_window
+
+    class _Widget:
+        def __init__(self, object_name, title, label, parent):
+            self._object_name = object_name
+            self._title = title
+            self._label = label
+            self._parent = parent
+            self.hidden = False
+            self.closed = False
+            self.deleted = False
+
+        def objectName(self):
+            return self._object_name
+
+        def windowTitle(self):
+            return self._title
+
+        def labelText(self):
+            return self._label
+
+        def parentWidget(self):
+            return self._parent
+
+        def hide(self):
+            self.hidden = True
+
+        def close(self):
+            self.closed = True
+
+        def deleteLater(self):
+            self.deleted = True
+
+    matched = _Widget(plugin_module._IMPORT_PROGRESS_DIALOG_OBJECT_NAME, "", "", object())
+    untouched = _Widget("", "Normal dialog", "", object())
+
+    class _App:
+        @staticmethod
+        def topLevelWidgets():
+            return [matched, untouched]
+
+        @staticmethod
+        def processEvents():
+            return None
+
+    monkeypatch.setattr(plugin_module, "QApplication", _App)
+
+    plugin._close_orphan_loading_progress_dialogs()
+
+    assert matched.hidden is True
+    assert matched.closed is True
+    assert matched.deleted is True
+    assert untouched.hidden is False
+    assert untouched.closed is False
+    assert untouched.deleted is False
+
+
+def test_close_orphan_loading_progress_dialogs_closes_initializing_label_on_main_window(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    main_window = object()
+    plugin.iface.mainWindow.return_value = main_window
+
+    class _Widget:
+        def __init__(self, object_name, title, label, parent):
+            self._object_name = object_name
+            self._title = title
+            self._label = label
+            self._parent = parent
+            self.hidden = False
+            self.closed = False
+            self.deleted = False
+
+        def objectName(self):
+            return self._object_name
+
+        def windowTitle(self):
+            return self._title
+
+        def labelText(self):
+            return self._label
+
+        def parentWidget(self):
+            return self._parent
+
+        def hide(self):
+            self.hidden = True
+
+        def close(self):
+            self.closed = True
+
+        def deleteLater(self):
+            self.deleted = True
+
+    matched = _Widget("", "Please wait", "Initializing...", main_window)
+    untouched = _Widget("", "Please wait", "Initializing...", object())
+
+    class _App:
+        @staticmethod
+        def topLevelWidgets():
+            return [matched, untouched]
+
+        @staticmethod
+        def processEvents():
+            return None
+
+    monkeypatch.setattr(plugin_module, "QApplication", _App)
+
+    plugin._close_orphan_loading_progress_dialogs()
+
+    assert matched.hidden is True
+    assert matched.closed is True
+    assert matched.deleted is True
+    assert untouched.hidden is False
+    assert untouched.closed is False
+    assert untouched.deleted is False
+
+
+def test_close_orphan_loading_progress_dialogs_closes_parentless_modal_progress(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    main_window = object()
+    plugin.iface.mainWindow.return_value = main_window
+
+    class _Qt:
+        WindowModal = 1
+        ApplicationModal = 2
+
+    class _Widget:
+        def __init__(self, parent, modality):
+            self._parent = parent
+            self._modality = modality
+            self.hidden = False
+            self.closed = False
+            self.deleted = False
+
+        def objectName(self):
+            return ""
+
+        def windowTitle(self):
+            return ""
+
+        def labelText(self):
+            return ""
+
+        def parentWidget(self):
+            return self._parent
+
+        def windowModality(self):
+            return self._modality
+
+        def setValue(self, value):
+            return None
+
+        def reset(self):
+            raise RuntimeError("simulated reset failure")
+
+        def hide(self):
+            self.hidden = True
+
+        def close(self):
+            self.closed = True
+
+        def deleteLater(self):
+            self.deleted = True
+
+    matched = _Widget(None, _Qt.WindowModal)
+    untouched = _Widget(None, 999)
+
+    class _App:
+        @staticmethod
+        def topLevelWidgets():
+            return [matched, untouched]
+
+        @staticmethod
+        def allWidgets():
+            return []
+
+        @staticmethod
+        def processEvents():
+            return None
+
+    monkeypatch.setattr(plugin_module, "QApplication", _App)
+    monkeypatch.setattr(plugin_module, "Qt", _Qt)
+
+    plugin._close_orphan_loading_progress_dialogs()
+
+    assert matched.hidden is True
+    assert matched.closed is True
+    assert matched.deleted is True
+    assert untouched.hidden is False
+    assert untouched.closed is False
+    assert untouched.deleted is False
+
+
+def test_load_mesh2d_layer_disposes_failed_probe_candidates(plugin, monkeypatch, tmp_path):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    mesh_path = tmp_path / "mesh_probe.nc"
+    mesh_path.write_text("placeholder", encoding="utf-8")
+
+    created_layers = []
+    added_layers = []
+
+    class _FakeProvider:
+        @staticmethod
+        def datasetGroupCount():
+            return 1
+
+    class _FakeExtent:
+        @staticmethod
+        def isEmpty():
+            return False
+
+    class _FakeCrs:
+        @staticmethod
+        def isValid():
+            return False
+
+    class _FakeMeshLayer:
+        def __init__(self, uri, layer_name, provider):
+            self.uri = uri
+            self.layer_name = layer_name
+            self.provider = provider
+            self.deleted = False
+            self.crs_set = None
+            self._valid = len(created_layers) > 0
+            created_layers.append(self)
+
+        def isValid(self):
+            return self._valid
+
+        def meshFaceCount(self):
+            return 1 if self._valid else 0
+
+        def extent(self):
+            return _FakeExtent()
+
+        def dataProvider(self):
+            return _FakeProvider()
+
+        def crs(self):
+            return _FakeCrs()
+
+        def setCrs(self, crs):
+            self.crs_set = crs
+
+        def source(self):
+            return self.uri
+
+        def deleteLater(self):
+            self.deleted = True
+
+    class _FakeCrsFactory:
+        def __init__(self, authid):
+            self.authid = authid
+
+    class _FakeProjectInstance:
+        @staticmethod
+        def mapLayers():
+            return {}
+
+        @staticmethod
+        def addMapLayer(layer):
+            added_layers.append(layer)
+
+    class _FakeProject:
+        @staticmethod
+        def instance():
+            return _FakeProjectInstance()
+
+    monkeypatch.setattr(_qgis_core, "QgsMeshLayer", _FakeMeshLayer)
+    monkeypatch.setattr(_qgis_core, "QgsCoordinateReferenceSystem", _FakeCrsFactory)
+    monkeypatch.setattr(_qgis_core, "QgsProject", _FakeProject)
+
+    loaded_layer = plugin._load_mesh2d_layer(
+        str(mesh_path),
+        "mesh_probe",
+        28992,
+        "mesh_probe_mesh2d",
+        topology_names=["Mesh2d"],
+        expect_data_variables=False,
+    )
+
+    assert loaded_layer is created_layers[1]
+    assert created_layers[0].deleted is True
+    assert added_layers == [created_layers[1]]
+
+
+def test_schedule_orphan_progress_cleanup_uses_expected_delays(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    calls = []
+
+    class _Timer:
+        @staticmethod
+        def singleShot(delay_ms, callback):
+            calls.append((delay_ms, callback))
+
+    monkeypatch.setattr(plugin_module, "QTimer", _Timer)
+
+    plugin._schedule_orphan_progress_cleanup()
+
+    assert [delay for delay, _cb in calls] == [180]
+    assert all(callable(cb) for _delay, cb in calls)
+
+    calls.clear()
+    plugin._schedule_orphan_progress_cleanup([0, 300])
+    assert [delay for delay, _cb in calls] == [0, 300]
+    assert all(callable(cb) for _delay, cb in calls)
+
+
 def test_route_csl(plugin):
     plugin.load_cross_sections_from_selection = MagicMock()
     plugin.load_file_by_extension("/fake/file.csl")
@@ -836,6 +1152,64 @@ def test_load_ugrid_mesh_file_preserves_referenced_topology_variables(plugin, tm
         assert float(ds.variables["my_node_y"][:].min()) > 400000.0
 
 
+def test_load_ugrid_mesh_file_always_closes_progress_on_partition_prepare_error(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "mixed_1d2d_small.nc"
+    shutil.copyfile(MIXED_1D2D_01, src_path)
+
+    with patch.object(plugin, "_discover_partition_mesh_files", return_value=[str(src_path), str(src_path)]), \
+            patch.object(plugin, "_prompt_for_partition_render_mode", return_value="masked"), \
+         patch.object(plugin, "_prepare_partition_mesh_sources", side_effect=RuntimeError("boom")), \
+         patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=[]), \
+         patch.object(plugin, "_close_progress_dialog") as close_mock, \
+         patch("Delft3DFileManager.Delft3DFileManager.QMessageBox"):
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    assert any(call.args and call.args[0] is not None for call in close_mock.call_args_list)
+
+
+def test_load_ugrid_mesh_file_partition_raw_mode_skips_owner_filter_prepare(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "mixed_1d2d_small.nc"
+    shutil.copyfile(MIXED_1D2D_01, src_path)
+
+    partition_files = [str(src_path), str(src_path)]
+
+    with patch.object(plugin, "_discover_partition_mesh_files", return_value=partition_files), \
+         patch.object(plugin, "_prompt_for_partition_render_mode", return_value="raw"), \
+         patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=[]), \
+         patch.object(plugin, "_prepare_partition_mesh_sources") as prepare_mock, \
+         patch.object(plugin, "_load_partitioned_mesh2d_layers") as load_partitioned_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prepare_mock.assert_not_called()
+    load_partitioned_mock.assert_called_once()
+    assert list(load_partitioned_mock.call_args[0][0]) == partition_files
+
+
+def test_load_ugrid_mesh_file_partition_masked_mode_uses_owner_filter_prepare(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "mixed_1d2d_small.nc"
+    shutil.copyfile(MIXED_1D2D_01, src_path)
+
+    partition_files = [str(src_path), str(src_path)]
+    prepared_files = [str(tmp_path / "p0_qgis_owner.nc"), str(tmp_path / "p1_qgis_owner.nc")]
+
+    with patch.object(plugin, "_discover_partition_mesh_files", return_value=partition_files), \
+         patch.object(plugin, "_prompt_for_partition_render_mode", return_value="masked"), \
+         patch.object(plugin, "_prompt_for_morphodynamic_variables", return_value=[]), \
+         patch.object(plugin, "_prepare_partition_mesh_sources", return_value=(prepared_files, [])) as prepare_mock, \
+         patch.object(plugin, "_load_partitioned_mesh2d_layers") as load_partitioned_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prepare_mock.assert_called_once_with(partition_files, [])
+    load_partitioned_mock.assert_called_once()
+    assert list(load_partitioned_mock.call_args[0][0]) == prepared_files
+
+
 def test_find_mesh2d_topology_names_prefers_cf_role_mesh_topology(plugin, tmp_path):
     netcdf4 = pytest.importorskip("netCDF4")
 
@@ -904,6 +1278,101 @@ def test_load_ugrid_mesh_file_passes_topology_names_to_loader(plugin, tmp_path):
     assert "topology_names" in kwargs
     assert kwargs["topology_names"][0] == "topo2d"
     assert kwargs["expect_data_variables"] is True
+
+
+def test_discover_partition_mesh_files_returns_sorted_siblings(plugin, tmp_path):
+    part0 = tmp_path / "RMM_dflowfm_0000_map.nc"
+    part2 = tmp_path / "RMM_dflowfm_0002_map.nc"
+    part1 = tmp_path / "RMM_dflowfm_0001_map.nc"
+    for path in (part0, part2, part1):
+        path.write_text("", encoding="utf-8")
+
+    result = plugin._discover_partition_mesh_files(str(part0))
+
+    assert [pathlib.Path(x).name for x in result] == [
+        "RMM_dflowfm_0000_map.nc",
+        "RMM_dflowfm_0001_map.nc",
+        "RMM_dflowfm_0002_map.nc",
+    ]
+
+
+def test_discover_partition_mesh_files_non_partitioned_returns_input(plugin, tmp_path):
+    source = tmp_path / "single_map.nc"
+    source.write_text("", encoding="utf-8")
+
+    result = plugin._discover_partition_mesh_files(str(source))
+
+    assert len(result) == 1
+    assert pathlib.Path(result[0]).resolve() == source.resolve()
+
+
+def test_prepare_partition_ghost_sidecar_masks_non_owner_faces(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "RRB_0000_map.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("time", 1)
+        ds.createDimension("mesh2d_nFaces", 4)
+
+        domain = ds.createVariable("mesh2d_flowelem_domain", "i4", ("mesh2d_nFaces",))
+        value = ds.createVariable("mesh2d_s1", "f4", ("time", "mesh2d_nFaces"), fill_value=-999.0)
+
+        domain[:] = [0, 1, 0, 2]
+        value[:] = [[10.0, 20.0, 30.0, 40.0]]
+
+    filtered_path, status = plugin._prepare_partition_ghost_sidecar(str(src_path))
+
+    assert status == "ok"
+    assert pathlib.Path(filtered_path).name == "RRB_0000_map_qgis_owner.nc"
+
+    with netcdf4.Dataset(filtered_path, "r") as ds:
+        import numpy as np
+
+        vals = ds.variables["mesh2d_s1"][:]
+        assert float(vals[0, 0]) == 10.0
+        assert float(vals[0, 2]) == 30.0
+        assert np.ma.is_masked(vals[0, 1])
+        assert np.ma.is_masked(vals[0, 3])
+
+
+def test_prepare_partition_ghost_sidecar_fallback_when_domain_missing(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "RRB_0001_map.nc"
+    with netcdf4.Dataset(str(src_path), "w") as ds:
+        ds.createDimension("mesh2d_nFaces", 2)
+        value = ds.createVariable("mesh2d_s1", "f4", ("mesh2d_nFaces",))
+        value[:] = [1.0, 2.0]
+
+    filtered_path, status = plugin._prepare_partition_ghost_sidecar(str(src_path))
+
+    assert pathlib.Path(filtered_path).resolve() == src_path.resolve()
+    assert status == "missing mesh2d_flowelem_domain"
+
+
+def test_prepare_partition_mesh_sources_collects_warnings(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    ok_file = tmp_path / "run_0000_map.nc"
+    missing_file = tmp_path / "run_0001_map.nc"
+
+    with netcdf4.Dataset(str(ok_file), "w") as ds:
+        ds.createDimension("mesh2d_nFaces", 2)
+        domain = ds.createVariable("mesh2d_flowelem_domain", "i4", ("mesh2d_nFaces",))
+        val = ds.createVariable("mesh2d_s1", "f4", ("mesh2d_nFaces",), fill_value=-999.0)
+        domain[:] = [0, 0]
+        val[:] = [1.0, 2.0]
+
+    with netcdf4.Dataset(str(missing_file), "w") as ds:
+        ds.createDimension("mesh2d_nFaces", 2)
+        val = ds.createVariable("mesh2d_s1", "f4", ("mesh2d_nFaces",))
+        val[:] = [3.0, 4.0]
+
+    source_paths, warnings = plugin._prepare_partition_mesh_sources([str(ok_file), str(missing_file)])
+
+    assert len(source_paths) == 2
+    assert any(pathlib.Path(p).name.endswith("_qgis_owner.nc") for p in source_paths)
+    assert any("missing mesh2d_flowelem_domain" in warning for warning in warnings)
 
 
 # ---------------------------------------------------------------------------

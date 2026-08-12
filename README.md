@@ -217,6 +217,16 @@ When a UGRID file contains morphodynamic variables with extra dimensions (for ex
 
 For large datasets, the plugin now shows a live progress bar (plus status text) during analysis, flattening, and layer loading.
 
+#### Partitioned map output (parallel runs)
+
+- When a selected mesh file matches a partitioned filename pattern like `*_0000_*.nc`, the plugin scans sibling partition files in the same folder (for example `*_0001_*.nc`, `*_0002_*.nc`).
+- The plugin keeps data in partition files and does not build a merged master mesh file.
+- During import, the plugin prompts for partition rendering mode:
+	- **Mask ghost cells (default)**: creates/reuses owner-filter sidecars (`*_qgis_owner.nc`) per partition and masks non-owner (ghost) face values using `mesh2d_flowelem_domain` and the partition id from the filename.
+	- **Load original partition files**: loads partition files directly and keeps overlap visible in ghost regions.
+- If owner masking is selected but `mesh2d_flowelem_domain` is missing, the plugin falls back to loading that partition without owner filtering and reports a warning.
+- Loaded partition meshes are grouped under one layer-tree group and synchronized for dataset-group/renderer updates to provide one logical mesh experience during time navigation.
+
 #### Supported Components
 
 **2D Mesh (mesh2d)**

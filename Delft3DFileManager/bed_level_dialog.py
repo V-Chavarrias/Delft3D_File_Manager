@@ -62,6 +62,19 @@ def _is_numeric_dtype(dtype) -> bool:
         return False
 
 
+def _dialog_exec(dialog) -> int:
+    """Execute a Qt dialog across Qt5/Qt6 (exec_ vs exec)."""
+    execute = getattr(dialog, "exec", None)
+    if callable(execute):
+        return execute()
+
+    execute_legacy = getattr(dialog, "exec_", None)
+    if callable(execute_legacy):
+        return execute_legacy()
+
+    raise AttributeError("Dialog object has neither exec nor exec_ method")
+
+
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
@@ -530,7 +543,7 @@ class BedLevelDialog(QDialog):
         dlg.setNameFilter("NetCDF files (*.nc *.nc4);;All files (*)")
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
         path = ""
-        if dlg.exec_():
+        if _dialog_exec(dlg):
             selected = dlg.selectedFiles()
             if selected:
                 path = selected[0]
@@ -544,7 +557,7 @@ class BedLevelDialog(QDialog):
         dlg.setNameFilter("NetCDF files (*.nc *.nc4);;All files (*)")
         dlg.setOption(QFileDialog.DontUseNativeDialog, True)
         path = ""
-        if dlg.exec_():
+        if _dialog_exec(dlg):
             selected = dlg.selectedFiles()
             if selected:
                 path = selected[0]

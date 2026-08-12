@@ -19,7 +19,7 @@ from qgis.core import (
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol
 )
-from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt
+from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt, QTimer, QT_VERSION_STR
 from datetime import datetime, timedelta
 import itertools
 import importlib
@@ -30,12 +30,39 @@ import re
 import shutil
 import subprocess
 import sys
+import glob
 try:
     from defusedxml import ElementTree as ET
     _HAS_DEFUSEDXML = True
 except ImportError:
     ET = None
     _HAS_DEFUSEDXML = False
+
+
+_IMPORT_PROGRESS_DIALOG_OBJECT_NAME = "Delft3DFileManagerImportProgressDialog"
+
+
+def _qt_major_version():
+    """Return Qt major version as int when available, otherwise None."""
+    raw = ""
+    try:
+        raw = str(QT_VERSION_STR or "")
+    except Exception:
+        raw = ""
+
+    if not raw:
+        return None
+
+    token = raw.split(".", 1)[0].strip()
+    if not token.isdigit():
+        return None
+    return int(token)
+
+
+def _is_qt6_runtime():
+    """Return True when plugin runs under Qt6 (QGIS4)."""
+    major = _qt_major_version()
+    return major == 6
 
 
 def _double_click_event_type():
@@ -52,6 +79,43 @@ def _left_mouse_button_value():
     if left_button is None:
         left_button = getattr(getattr(Qt, "MouseButton", None), "LeftButton", None)
     return left_button
+
+
+def _qmessagebox_icon_question():
+    """Return the QMessageBox question icon enum across Qt5/Qt6."""
+    icon = getattr(QMessageBox, "Question", None)
+    if icon is None:
+        icon = getattr(getattr(QMessageBox, "Icon", None), "Question", None)
+    return icon
+
+
+def _qmessagebox_button_role(name):
+    """Return QMessageBox button role enum by name across Qt5/Qt6."""
+    role = getattr(QMessageBox, name, None)
+    if role is None:
+        role = getattr(getattr(QMessageBox, "ButtonRole", None), name, None)
+    return role
+
+
+def _qmessagebox_standard_button(name):
+    """Return QMessageBox standard button enum by name across Qt5/Qt6."""
+    button = getattr(QMessageBox, name, None)
+    if button is None:
+        button = getattr(getattr(QMessageBox, "StandardButton", None), name, None)
+    return button
+
+
+def _dialog_exec(dialog):
+    """Execute a Qt dialog across Qt5/Qt6 (exec_ vs exec)."""
+    execute = getattr(dialog, "exec", None)
+    if callable(execute):
+        return execute()
+
+    execute_legacy = getattr(dialog, "exec_", None)
+    if callable(execute_legacy):
+        return execute_legacy()
+
+    raise AttributeError("Dialog object has neither exec nor exec_ method")
 
 
 class _CanvasDoubleClickFilter(QObject):
@@ -106,6 +170,7 @@ class Delft3DFileManager:
         self._canvas_double_click_connected = False
         self._canvas_double_click_filter = None
         self._active_progress_dialog = None
+        self._partition_mesh_sync_sessions = {}
         self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
         self._warned_missing_defusedxml = False
 
@@ -4017,8 +4082,16 @@ class Delft3DFileManager:
         """Create and show a progress dialog for long-running netCDF imports."""
         self._close_orphan_loading_progress_dialogs()
         self._close_progress_dialog(self._active_progress_dialog)
+
+        # QGIS 4 / Qt6 can keep native/MDAL "Initializing..." windows alive.
+        # Use status-bar progress only to avoid sticky popup regressions.
+        if _is_qt6_runtime():
+            self._active_progress_dialog = None
+            return None
+
         try:
             dialog = QProgressDialog("Initializing...", None, 0, 100, self.iface.mainWindow())
+            dialog.setObjectName(_IMPORT_PROGRESS_DIALOG_OBJECT_NAME)
             dialog.setWindowTitle(title)
             dialog.setAutoClose(True)
             dialog.setAutoReset(False)
@@ -4032,6 +4105,15 @@ class Delft3DFileManager:
         except Exception:
             self._active_progress_dialog = None
             return None
+
+    def _schedule_orphan_progress_cleanup(self, delays_ms=None):
+        """Schedule deferred orphan cleanup sweeps for late-spawned dialogs."""
+        delays = list(delays_ms) if delays_ms is not None else [180]
+        for delay_ms in delays:
+            try:
+                QTimer.singleShot(delay_ms, self._close_orphan_loading_progress_dialogs)
+            except Exception:
+                pass
 
     def _update_progress_dialog(self, dialog, value, text=None):
         """Update progress dialog value and optional label text."""
@@ -4079,18 +4161,87 @@ class Delft3DFileManager:
         In some QGIS/Qt6 runs, a progress dialog can outlive the tracked
         reference. Sweep top-level widgets and close matching loading dialogs.
         """
+        widgets = []
         try:
-            widgets = QApplication.topLevelWidgets()
+            widgets.extend(list(QApplication.topLevelWidgets() or []))
         except Exception:
+            pass
+        try:
+            widgets.extend(list(QApplication.allWidgets() or []))
+        except Exception:
+            pass
+        if not widgets:
             return
 
-        for widget in widgets or []:
+        try:
+            main_window = self.iface.mainWindow()
+        except Exception:
+            main_window = None
+
+        seen = set()
+        for widget in widgets:
             try:
+                wid = id(widget)
+                if wid in seen:
+                    continue
+                seen.add(wid)
+
+                object_name = ""
+                try:
+                    object_name = str(widget.objectName() or "")
+                except Exception:
+                    object_name = ""
+
                 title = str(widget.windowTitle() or "")
-                if not title.lower().startswith("loading "):
+                label_text = ""
+                try:
+                    label_text = str(widget.labelText() or "")
+                except Exception:
+                    label_text = ""
+
+                has_progress_methods = all(
+                    callable(getattr(widget, method_name, None))
+                    for method_name in ("setValue", "reset", "close")
+                )
+
+                parent_widget = None
+                try:
+                    parent_widget = widget.parentWidget()
+                except Exception:
+                    parent_widget = None
+
+                window_modality = None
+                try:
+                    window_modality = widget.windowModality()
+                except Exception:
+                    window_modality = None
+
+                qt_window_modal = getattr(Qt, "WindowModal", None)
+                qt_app_modal = getattr(Qt, "ApplicationModal", None)
+                is_modal_progress = window_modality in (qt_window_modal, qt_app_modal)
+
+                is_marked_dialog = object_name == _IMPORT_PROGRESS_DIALOG_OBJECT_NAME
+                title_loading = title.strip().lower().startswith("loading")
+                label_loading = label_text.strip().lower().startswith("initializing") or label_text.strip().lower().startswith("loading")
+                label_import = "import" in label_text.strip().lower()
+
+                if main_window is not None and not is_marked_dialog and parent_widget is not None and parent_widget is not main_window:
                     continue
 
+                if not is_marked_dialog and not title_loading and not label_loading and not label_import:
+                    if main_window is None or not has_progress_methods:
+                        continue
+
+                    if parent_widget is not main_window and not (parent_widget is None and is_modal_progress):
+                        continue
+
+                try:
+                    widget.reset()
+                except Exception:
+                    pass
+
                 for action in (
+                    lambda: widget.setValue(100),
                     lambda: widget.hide(),
                     lambda: widget.close(),
                     lambda: widget.deleteLater(),
@@ -4122,179 +4273,508 @@ class Delft3DFileManager:
         base_name = os.path.splitext(os.path.basename(filepath))[0]
         loaded_layers = []
         mesh2d_source_path = filepath
+        partition_input_files = [filepath]
+        partition_mode = False
+        partition_render_mode = "masked"
         progress_dialog = self._create_progress_dialog(f"Loading {base_name}")
-
         try:
-            self._update_progress_dialog(progress_dialog, 5, "Opening netCDF file")
-            self._set_status_message(f"Loading {os.path.basename(filepath)}")
-            with nc.Dataset(filepath, 'r') as ds:
-                # Read CRS
-                self._update_progress_dialog(progress_dialog, 15, "Reading CRS and topology")
-                self._set_status_message("Reading CRS and topology")
-                epsg = self._read_epsg_from_nc(ds)
-                if epsg is None:
-                    epsg = 28992  # Default fallback
+            try:
+                self._update_progress_dialog(progress_dialog, 5, "Opening netCDF file")
+                self._set_status_message(f"Loading {os.path.basename(filepath)}")
+                with nc.Dataset(filepath, 'r') as ds:
+                    # Read CRS
+                    self._update_progress_dialog(progress_dialog, 15, "Reading CRS and topology")
+                    self._set_status_message("Reading CRS and topology")
+                    epsg = self._read_epsg_from_nc(ds)
+                    if epsg is None:
+                        epsg = 28992  # Default fallback
 
-                # Detect components
-                mesh2d_topology_names = self._find_mesh2d_topology_names(ds)
-                has_mesh2d = bool(mesh2d_topology_names)
-                mesh1d_data = self._read_mesh1d_data(ds) if self._detect_mesh1d_exists(ds) else None
-                geom_data = self._read_geometry_data(ds) if self._detect_geometry_exists(ds) else None
-                self._update_progress_dialog(progress_dialog, 25, "Analyzing netCDF variables")
-                self._set_status_message("Analyzing netCDF variables")
-                variable_analysis = self._analyze_ugrid_data_variables(ds)
+                    # Detect components
+                    mesh2d_topology_names = self._find_mesh2d_topology_names(ds)
+                    has_mesh2d = bool(mesh2d_topology_names)
+                    if has_mesh2d:
+                        partition_input_files = self._discover_partition_mesh_files(filepath)
+                        partition_mode = len(partition_input_files) > 1
+                    mesh1d_data = self._read_mesh1d_data(ds) if self._detect_mesh1d_exists(ds) else None
+                    geom_data = self._read_geometry_data(ds) if self._detect_geometry_exists(ds) else None
+                    self._update_progress_dialog(progress_dialog, 25, "Analyzing netCDF variables")
+                    self._set_status_message("Analyzing netCDF variables")
+                    variable_analysis = self._analyze_ugrid_data_variables(ds)
 
-                if not has_mesh2d and mesh1d_data is None and geom_data is None:
-                    QMessageBox.warning(
-                        self.iface.mainWindow(),
-                        "Delft3D File Manager",
-                        f"No mesh2d, mesh1d, or geometry components found in {os.path.basename(filepath)}"
-                    )
-                    self._close_progress_dialog(progress_dialog)
-                    self._clear_status_message()
-                    return
+                    if not has_mesh2d and mesh1d_data is None and geom_data is None:
+                        QMessageBox.warning(
+                            self.iface.mainWindow(),
+                            "Delft3D File Manager",
+                            f"No mesh2d, mesh1d, or geometry components found in {os.path.basename(filepath)}"
+                        )
+                        return
 
-                # Prompt for layer names
-                self._update_progress_dialog(progress_dialog, 35, "Preparing layer names")
-                layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data)
-                if layer_names is None:
-                    self._close_progress_dialog(progress_dialog)
-                    self._clear_status_message()
-                    return
+                    # Prompt for layer names
+                    self._update_progress_dialog(progress_dialog, 35, "Preparing layer names")
+                    layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data)
+                    if layer_names is None:
+                        return
 
-        except Exception as exc:
-            QMessageBox.critical(
-                self.iface.mainWindow(),
-                "Delft3D File Manager",
-                f"Error loading mesh file: {exc}"
-            )
-            self._close_progress_dialog(progress_dialog)
-            self._clear_status_message()
-            return
-
-        if has_mesh2d and variable_analysis["has_morphodynamic"]:
-            self._update_progress_dialog(progress_dialog, 40, "Select variables to flatten")
-            self._set_status_message("Select morphodynamic variables")
-            selected_variables = self._prompt_for_morphodynamic_variables(
-                variable_analysis["candidate_names"],
-                default_selected=variable_analysis.get("default_selected"),
-            )
-            if selected_variables is None:
-                self._close_progress_dialog(progress_dialog)
-                self._clear_status_message()
+            except Exception as exc:
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Delft3D File Manager",
+                    f"Error loading mesh file: {exc}"
+                )
                 return
 
-            if selected_variables:
+            selected_variables = []
+            if has_mesh2d and variable_analysis["has_morphodynamic"]:
+                self._update_progress_dialog(progress_dialog, 40, "Select variables to flatten")
+                self._set_status_message("Select morphodynamic variables")
+                selected_variables = self._prompt_for_morphodynamic_variables(
+                    variable_analysis["candidate_names"],
+                    default_selected=variable_analysis.get("default_selected"),
+                )
+                if selected_variables is None:
+                    return
+
+                if selected_variables:
+                    try:
+                        base_progress = 45
+                        flatten_span = 20
+                        self._set_status_message("Flattening selected variables")
+                        progress_step = max(1, len(selected_variables) // 20)
+
+                        def _flatten_progress(done, total, label=None):
+                            if total <= 0:
+                                return
+                            fraction = min(1.0, max(0.0, float(done) / float(total)))
+                            progress_value = base_progress + int(flatten_span * fraction)
+                            progress_text = f"Flattening variables {done}/{total}"
+                            self._update_progress_dialog(progress_dialog, progress_value, progress_text)
+                            if done < total and (done % progress_step) != 0:
+                                return
+                            suffix = f": {label}" if label else ""
+                            self._set_status_message(f"Flattening variables {done}/{total}{suffix}")
+
+                        mesh2d_source_path = self._prepare_flattened_ugrid_sidecar(
+                            filepath,
+                            selected_variables,
+                            progress_callback=_flatten_progress,
+                        )
+                    except Exception as exc:
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Could not flatten morphodynamic variables, loading original mesh: {exc}"
+                        )
+            else:
+                self._update_progress_dialog(progress_dialog, 65, "Loading mesh layers")
+
+            partition_source_paths = None
+            if has_mesh2d and partition_mode:
+                partition_render_mode = self._prompt_for_partition_render_mode(partition_input_files)
+                if partition_render_mode is None:
+                    return
+
+                self._update_progress_dialog(progress_dialog, 68, "Preparing partition mesh sources")
+                self._set_status_message("Preparing partition mesh sources")
+                if partition_render_mode == "raw":
+                    partition_source_paths = list(partition_input_files)
+                    self._set_status_message("Loading original partition files (ghost overlap enabled)")
+                else:
+                    partition_warnings = []
+                    try:
+                        partition_source_paths, partition_warnings = self._prepare_partition_mesh_sources(
+                            partition_input_files,
+                            selected_variables,
+                        )
+                    except Exception as exc:
+                        partition_source_paths = None
+                        partition_warnings.append(f"partition preparation failed: {exc}")
+
+                    if partition_warnings:
+                        warning_text = "; ".join(str(item) for item in partition_warnings)
+                        self.iface.messageBar().pushWarning(
+                            "Delft3D File Manager",
+                            f"Partition ownership filtering fallback: {warning_text}",
+                        )
+
+            # Load mesh2d
+            if has_mesh2d:
                 try:
-                    base_progress = 45
-                    flatten_span = 20
-                    self._set_status_message("Flattening selected variables")
-                    progress_step = max(1, len(selected_variables) // 20)
-
-                    def _flatten_progress(done, total, label=None):
-                        if total <= 0:
-                            return
-                        fraction = min(1.0, max(0.0, float(done) / float(total)))
-                        progress_value = base_progress + int(flatten_span * fraction)
-                        progress_text = f"Flattening variables {done}/{total}"
-                        self._update_progress_dialog(progress_dialog, progress_value, progress_text)
-                        if done < total and (done % progress_step) != 0:
-                            return
-                        suffix = f": {label}" if label else ""
-                        self._set_status_message(f"Flattening variables {done}/{total}{suffix}")
-
-                    mesh2d_source_path = self._prepare_flattened_ugrid_sidecar(
-                        filepath,
-                        selected_variables,
-                        progress_callback=_flatten_progress,
-                    )
+                    self._update_progress_dialog(progress_dialog, 75, "Loading mesh2d layer")
+                    self._set_status_message("Loading mesh2d layer")
+                    if partition_source_paths:
+                        self._load_partitioned_mesh2d_layers(
+                            partition_source_paths,
+                            base_name,
+                            epsg,
+                            layer_names["mesh2d"],
+                            topology_names=mesh2d_topology_names,
+                            expect_data_variables=bool(variable_analysis["candidate_names"]),
+                        )
+                    else:
+                        self._load_mesh2d_layer(
+                            mesh2d_source_path,
+                            base_name,
+                            epsg,
+                            layer_names["mesh2d"],
+                            topology_names=mesh2d_topology_names,
+                            expect_data_variables=bool(variable_analysis["candidate_names"]),
+                        )
+                    loaded_layers.append("mesh2d")
                 except Exception as exc:
                     self.iface.messageBar().pushWarning(
                         "Delft3D File Manager",
-                        f"Could not flatten morphodynamic variables, loading original mesh: {exc}"
+                        f"Could not load mesh2d: {exc}"
                     )
-        else:
-            self._update_progress_dialog(progress_dialog, 65, "Loading mesh layers")
 
-        # Load mesh2d
-        if has_mesh2d:
-            try:
-                self._update_progress_dialog(progress_dialog, 75, "Loading mesh2d layer")
-                self._set_status_message("Loading mesh2d layer")
-                self._load_mesh2d_layer(
-                    mesh2d_source_path,
-                    base_name,
-                    epsg,
-                    layer_names["mesh2d"],
-                    topology_names=mesh2d_topology_names,
-                    expect_data_variables=bool(variable_analysis["candidate_names"]),
-                )
-                loaded_layers.append("mesh2d")
-            except Exception as exc:
-                self.iface.messageBar().pushWarning(
+            # Load mesh1d branches
+            if mesh1d_data:
+                try:
+                    self._update_progress_dialog(progress_dialog, 85, "Loading mesh1d branches")
+                    self._set_status_message("Loading mesh1d branches")
+                    self._load_mesh1d_branches_layer(
+                        mesh1d_data["node_x"], mesh1d_data["node_y"],
+                        mesh1d_data["edges"], mesh1d_data["edge_branch"],
+                        mesh1d_data["branch_names"],
+                        epsg, layer_names["mesh1d_branches"]
+                    )
+                    loaded_layers.append("mesh1d_branches")
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load mesh1d branches: {exc}"
+                    )
+
+            # Load geometry edges
+            if geom_data:
+                try:
+                    self._update_progress_dialog(progress_dialog, 92, "Loading geometry edges")
+                    self._set_status_message("Loading geometry edges")
+                    self._load_geometry_edges_layer(
+                        geom_data["geom_node_x"], geom_data["geom_node_y"],
+                        geom_data["geom_node_count"], geom_data["edge_names"],
+                        epsg, layer_names["geometry_edges"]
+                    )
+                    loaded_layers.append("geometry_edges")
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load geometry edges: {exc}"
+                    )
+
+                # Load geometry nodes
+                try:
+                    self._update_progress_dialog(progress_dialog, 97, "Loading geometry nodes")
+                    self._set_status_message("Loading geometry nodes")
+                    self._load_geometry_nodes_layer(
+                        geom_data["node_x"], geom_data["node_y"],
+                        geom_data["node_names"],
+                        epsg, layer_names["geometry_nodes"]
+                    )
+                    loaded_layers.append("geometry_nodes")
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load geometry nodes: {exc}"
+                    )
+
+            if loaded_layers:
+                self._update_progress_dialog(progress_dialog, 100, "Import complete")
+                self.iface.messageBar().pushSuccess(
                     "Delft3D File Manager",
-                    f"Could not load mesh2d: {exc}"
+                    f"Loaded {', '.join(loaded_layers)} from {os.path.basename(filepath)}"
                 )
+        finally:
+            self._close_progress_dialog(progress_dialog)
+            self._clear_status_message()
+            self._schedule_orphan_progress_cleanup([180])
 
-        # Load mesh1d branches
-        if mesh1d_data:
+    def _partition_id_from_filename(self, filepath):
+        """Extract a 4-digit partition id from a partitioned netCDF filename."""
+        name = os.path.basename(str(filepath))
+
+        explicit = re.search(r"_(\d{4})_(?:map|fou|his|rst)(?:_|\.nc)", name, re.IGNORECASE)
+        if explicit:
+            return int(explicit.group(1))
+
+        generic = re.search(r"_(\d{4})_", name)
+        if generic:
+            return int(generic.group(1))
+        return None
+
+    def _discover_partition_mesh_files(self, filepath):
+        """Discover sibling partition files for a selected partitioned map/fou/his/rst file."""
+        abs_path = os.path.abspath(str(filepath))
+        dirname = os.path.dirname(abs_path)
+        basename = os.path.basename(abs_path)
+
+        match = re.match(r"^(?P<prefix>.*_)(?P<part>\d{4})(?P<suffix>_.*\.nc)$", basename, re.IGNORECASE)
+        if not match:
+            return [abs_path]
+
+        pattern = os.path.join(dirname, f"{match.group('prefix')}????{match.group('suffix')}")
+        siblings = []
+        for candidate in sorted(glob.glob(pattern)):
+            candidate_base = os.path.basename(candidate)
+            if re.match(rf"^{re.escape(match.group('prefix'))}\d{{4}}{re.escape(match.group('suffix'))}$", candidate_base, re.IGNORECASE):
+                siblings.append(os.path.abspath(candidate))
+
+        if not siblings:
+            return [abs_path]
+        return siblings
+
+    def _partition_filtered_path(self, source_path):
+        """Return deterministic sidecar path for owner-domain filtered partition datasets."""
+        base, ext = os.path.splitext(source_path)
+        return f"{base}_qgis_owner{ext}"
+
+    def _prepare_partition_mesh_sources(self, partition_files, selected_variables=None):
+        """Prepare source paths per partition, including optional flattening and owner-domain filtering."""
+        selected_variables = list(selected_variables or [])
+        prepared_paths = []
+        warnings = []
+
+        for partition_file in partition_files:
+            source_path = partition_file
+            if selected_variables:
+                source_path = self._prepare_flattened_ugrid_sidecar(source_path, selected_variables)
+
+            filtered_path, status = self._prepare_partition_ghost_sidecar(source_path)
+            prepared_paths.append(filtered_path)
+            if status != "ok":
+                warnings.append(f"{os.path.basename(partition_file)} ({status})")
+
+        return prepared_paths, warnings
+
+    def _prepare_partition_ghost_sidecar(self, source_path):
+        """Create or reuse an owner-domain filtered sidecar for one partition source file."""
+        import numpy as np
+        import netCDF4 as nc
+
+        source_path = os.path.abspath(source_path)
+        partition_id = self._partition_id_from_filename(source_path)
+        if partition_id is None:
+            return source_path, "no partition id in filename"
+
+        sidecar_path = os.path.abspath(self._partition_filtered_path(source_path))
+        source_mtime = str(int(os.path.getmtime(source_path)))
+        signature = f"v1|partition={partition_id}|source={source_mtime}"
+
+        if os.path.exists(sidecar_path):
             try:
-                self._update_progress_dialog(progress_dialog, 85, "Loading mesh1d branches")
-                self._set_status_message("Loading mesh1d branches")
-                self._load_mesh1d_branches_layer(
-                    mesh1d_data["node_x"], mesh1d_data["node_y"],
-                    mesh1d_data["edges"], mesh1d_data["edge_branch"],
-                    mesh1d_data["branch_names"],
-                    epsg, layer_names["mesh1d_branches"]
-                )
-                loaded_layers.append("mesh1d_branches")
-            except Exception as exc:
-                self.iface.messageBar().pushWarning(
-                    "Delft3D File Manager",
-                    f"Could not load mesh1d branches: {exc}"
-                )
+                with nc.Dataset(sidecar_path, "r") as sidecar_ds:
+                    if str(getattr(sidecar_ds, "qgis_partition_filter_signature", "")) == signature:
+                        return sidecar_path, "ok"
+            except Exception:
+                pass
 
-        # Load geometry edges
-        if geom_data:
-            try:
-                self._update_progress_dialog(progress_dialog, 92, "Loading geometry edges")
-                self._set_status_message("Loading geometry edges")
-                self._load_geometry_edges_layer(
-                    geom_data["geom_node_x"], geom_data["geom_node_y"],
-                    geom_data["geom_node_count"], geom_data["edge_names"],
-                    epsg, layer_names["geometry_edges"]
-                )
-                loaded_layers.append("geometry_edges")
-            except Exception as exc:
-                self.iface.messageBar().pushWarning(
-                    "Delft3D File Manager",
-                    f"Could not load geometry edges: {exc}"
-                )
+        with nc.Dataset(source_path, "r") as source_ds:
+            domain_var_name = self._find_variable_name(source_ds, "mesh2d_flowelem_domain")
+            if not domain_var_name:
+                return source_path, "missing mesh2d_flowelem_domain"
 
-            # Load geometry nodes
-            try:
-                self._update_progress_dialog(progress_dialog, 97, "Loading geometry nodes")
-                self._set_status_message("Loading geometry nodes")
-                self._load_geometry_nodes_layer(
-                    geom_data["node_x"], geom_data["node_y"],
-                    geom_data["node_names"],
-                    epsg, layer_names["geometry_nodes"]
-                )
-                loaded_layers.append("geometry_nodes")
-            except Exception as exc:
-                self.iface.messageBar().pushWarning(
-                    "Delft3D File Manager",
-                    f"Could not load geometry nodes: {exc}"
-                )
+            domain_var = source_ds.variables[domain_var_name]
+            if len(domain_var.dimensions) < 1:
+                return source_path, "invalid mesh2d_flowelem_domain"
 
-        if loaded_layers:
-            self._update_progress_dialog(progress_dialog, 100, "Import complete")
-            self.iface.messageBar().pushSuccess(
-                "Delft3D File Manager",
-                f"Loaded {', '.join(loaded_layers)} from {os.path.basename(filepath)}"
+            face_dim = domain_var.dimensions[0]
+            domain_values = np.asarray(domain_var[:])
+            if isinstance(domain_values, np.ma.MaskedArray):
+                domain_values = domain_values.filled(-999999)
+
+            face_owner_mask = np.asarray(domain_values).astype(int) == int(partition_id)
+
+            if not face_owner_mask.any():
+                return source_path, "no owned faces for partition"
+
+            with nc.Dataset(sidecar_path, "w", format="NETCDF4") as sidecar_ds:
+                for attr_name in source_ds.ncattrs():
+                    sidecar_ds.setncattr(attr_name, getattr(source_ds, attr_name))
+
+                for dim_name, dim in source_ds.dimensions.items():
+                    if dim.isunlimited():
+                        sidecar_ds.createDimension(dim_name, None)
+                    else:
+                        sidecar_ds.createDimension(dim_name, len(dim))
+
+                for var_name, src_var in source_ds.variables.items():
+                    fill_value = getattr(src_var, "_FillValue", None)
+                    if fill_value is None:
+                        out_var = sidecar_ds.createVariable(var_name, src_var.datatype, src_var.dimensions)
+                    else:
+                        out_var = sidecar_ds.createVariable(
+                            var_name,
+                            src_var.datatype,
+                            src_var.dimensions,
+                            fill_value=fill_value,
+                        )
+
+                    for attr_name in src_var.ncattrs():
+                        if attr_name == "_FillValue":
+                            continue
+                        out_var.setncattr(attr_name, getattr(src_var, attr_name))
+
+                    data = src_var[:]
+                    is_numeric = np.dtype(src_var.dtype).kind in ("i", "u", "f")
+                    if face_dim in src_var.dimensions and is_numeric:
+                        if isinstance(data, np.ma.MaskedArray):
+                            data_arr = data.filled(fill_value if fill_value is not None else np.nan)
+                        else:
+                            data_arr = np.asarray(data)
+
+                        axis = src_var.dimensions.index(face_dim)
+                        reshaped_mask = face_owner_mask.reshape(
+                            tuple(face_owner_mask.size if idx == axis else 1 for idx in range(data_arr.ndim))
+                        )
+
+                        if fill_value is not None:
+                            masked_data = np.where(reshaped_mask, data_arr, fill_value)
+                        elif np.dtype(src_var.dtype).kind in ("f",):
+                            masked_data = np.where(reshaped_mask, data_arr, np.nan)
+                        else:
+                            fallback_fill = np.iinfo(src_var.dtype).min if np.dtype(src_var.dtype).kind in ("i", "u") else 0
+                            masked_data = np.where(reshaped_mask, data_arr, fallback_fill)
+
+                        out_var[:] = masked_data
+                    else:
+                        out_var[:] = data
+
+                sidecar_ds.setncattr("qgis_partition_filter_signature", signature)
+                sidecar_ds.setncattr("qgis_partition_filter_partition", int(partition_id))
+                sidecar_ds.setncattr("qgis_partition_filter_source", source_path)
+
+        return sidecar_path, "ok"
+
+    def _unique_group_name(self, group_name):
+        """Return a non-colliding layer-tree group name."""
+        from qgis.core import QgsProject
+
+        root = QgsProject.instance().layerTreeRoot()
+        if root.findGroup(group_name) is None:
+            return group_name
+
+        suffix = 2
+        while root.findGroup(f"{group_name}_{suffix}") is not None:
+            suffix += 1
+        return f"{group_name}_{suffix}"
+
+    def _load_partitioned_mesh2d_layers(
+        self,
+        source_paths,
+        base_name,
+        epsg,
+        layer_name,
+        topology_names=None,
+        expect_data_variables=False,
+    ):
+        """Load multiple partitioned mesh files and group them as one logical result."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        group = root.addGroup(self._unique_group_name(layer_name))
+
+        loaded_layers = []
+        for idx, source_path in enumerate(source_paths, start=1):
+            partition_id = self._partition_id_from_filename(source_path)
+            if partition_id is None:
+                child_name = f"{layer_name}_part_{idx:02d}"
+            else:
+                child_name = f"{layer_name}_p{partition_id:04d}"
+
+            mesh_layer = self._load_mesh2d_layer(
+                source_path,
+                base_name,
+                epsg,
+                child_name,
+                topology_names=topology_names,
+                expect_data_variables=expect_data_variables,
             )
-        self._close_progress_dialog(progress_dialog)
-        self._clear_status_message()
+            loaded_layers.append(mesh_layer)
+
+            try:
+                node = root.findLayer(mesh_layer.id())
+                if node is not None and node.parent() is not None:
+                    cloned = node.clone()
+                    group.addChildNode(cloned)
+                    node.parent().removeChildNode(node)
+            except Exception:
+                # Keep layer loaded even if moving to group fails.
+                pass
+
+        self._setup_partition_mesh_sync(loaded_layers)
+
+    def _setup_partition_mesh_sync(self, mesh_layers):
+        """Best-effort synchronization of dataset-group and renderer settings across partition layers."""
+        if len(mesh_layers) < 2:
+            return
+
+        session_key = ",".join(sorted([str(layer.id()) for layer in mesh_layers if layer is not None]))
+        session = {"updating": False, "layers": [layer for layer in mesh_layers if layer is not None]}
+        self._partition_mesh_sync_sessions[session_key] = session
+
+        def _broadcast(source_layer):
+            if session["updating"]:
+                return
+            session["updating"] = True
+            try:
+                scalar_group = None
+                vector_group = None
+                renderer_settings = None
+
+                try:
+                    if hasattr(source_layer, "activeScalarDatasetGroup"):
+                        scalar_group = source_layer.activeScalarDatasetGroup()
+                except Exception:
+                    scalar_group = None
+
+                try:
+                    if hasattr(source_layer, "activeVectorDatasetGroup"):
+                        vector_group = source_layer.activeVectorDatasetGroup()
+                except Exception:
+                    vector_group = None
+
+                try:
+                    if hasattr(source_layer, "rendererSettings"):
+                        renderer_settings = source_layer.rendererSettings()
+                except Exception:
+                    renderer_settings = None
+
+                for target_layer in session["layers"]:
+                    if target_layer is source_layer:
+                        continue
+
+                    try:
+                        if scalar_group is not None and hasattr(target_layer, "setActiveScalarDatasetGroup"):
+                            target_layer.setActiveScalarDatasetGroup(int(scalar_group))
+                    except Exception:
+                        pass
+
+                    try:
+                        if vector_group is not None and hasattr(target_layer, "setActiveVectorDatasetGroup"):
+                            target_layer.setActiveVectorDatasetGroup(int(vector_group))
+                    except Exception:
+                        pass
+
+                    try:
+                        if renderer_settings is not None and hasattr(target_layer, "setRendererSettings"):
+                            target_layer.setRendererSettings(renderer_settings)
+                            if hasattr(target_layer, "triggerRepaint"):
+                                target_layer.triggerRepaint()
+                    except Exception:
+                        pass
+            finally:
+                session["updating"] = False
+
+        for layer in session["layers"]:
+            for signal_name in (
+                "activeScalarDatasetGroupChanged",
+                "activeVectorDatasetGroupChanged",
+                "rendererChanged",
+            ):
+                signal = getattr(layer, signal_name, None)
+                if hasattr(signal, "connect"):
+                    signal.connect(lambda *args, _layer=layer: _broadcast(_layer))
+
+        _broadcast(session["layers"][0])
 
     def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data):
         """Prompt user for layer names."""
@@ -4312,6 +4792,67 @@ class Delft3DFileManager:
             layer_names["geometry_nodes"] = f"{base_name}_geometry_nodes"
 
         return layer_names
+
+    def _prompt_for_partition_render_mode(self, partition_files):
+        """Prompt user to choose partition rendering mode.
+
+        Returns:
+            "masked" for owner-filtered rendering,
+            "raw" for direct partition rendering,
+            None if canceled.
+        """
+        partition_count = len(partition_files or [])
+        title = "Partitioned Mesh Import"
+        message = (
+            f"Detected {partition_count} partition files.\n\n"
+            "Choose how to render partitioned results:"
+        )
+
+        dialog = QMessageBox(self.iface.mainWindow())
+        icon_question = _qmessagebox_icon_question()
+        if icon_question is not None:
+            dialog.setIcon(icon_question)
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+
+        accept_role = _qmessagebox_button_role("AcceptRole")
+        action_role = _qmessagebox_button_role("ActionRole")
+        reject_role = _qmessagebox_button_role("RejectRole")
+        cancel_standard = _qmessagebox_standard_button("Cancel")
+
+        masked_role = accept_role or _qmessagebox_button_role("YesRole") or _qmessagebox_button_role("ActionRole")
+        if masked_role is not None:
+            masked_button = dialog.addButton(
+                "Mask ghost cells (create/reuse *_qgis_owner.nc)",
+                masked_role,
+            )
+        else:
+            masked_button = dialog.addButton("Mask ghost cells (create/reuse *_qgis_owner.nc)")
+
+        raw_role = action_role or _qmessagebox_button_role("NoRole") or _qmessagebox_button_role("AcceptRole")
+        if raw_role is not None:
+            raw_button = dialog.addButton(
+                "Load original partition files (show ghost overlap)",
+                raw_role,
+            )
+        else:
+            raw_button = dialog.addButton("Load original partition files (show ghost overlap)")
+
+        if cancel_standard is not None:
+            cancel_button = dialog.addButton(cancel_standard)
+        elif reject_role is not None:
+            cancel_button = dialog.addButton("Cancel", reject_role)
+        else:
+            cancel_button = dialog.addButton("Cancel")
+        dialog.setDefaultButton(masked_button)
+        _dialog_exec(dialog)
+
+        clicked = dialog.clickedButton()
+        if clicked is cancel_button:
+            return None
+        if clicked is raw_button:
+            return "raw"
+        return "masked"
 
     def _detect_mesh2d_exists(self, nc_dataset):
         """Check if mesh2d topology exists in dataset."""
@@ -4521,7 +5062,7 @@ class Delft3DFileManager:
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec_() != QDialog.Accepted:
+        if _dialog_exec(dialog) != QDialog.Accepted:
             return None
 
         selected = []
@@ -5073,7 +5614,24 @@ class Delft3DFileManager:
             except Exception:
                 return False
 
-        # Prefer native-like MDAL file loading first; then try explicit topology URIs.
+        def _dispose_candidate_layer(layer):
+            """Release temporary mesh layers created during URI probing."""
+            if layer is None:
+                return
+
+            try:
+                delete_later = getattr(layer, "deleteLater", None)
+                if callable(delete_later):
+                    delete_later()
+            except Exception:
+                pass
+
+            try:
+                QApplication.processEvents()
+            except Exception:
+                pass
+
+        # Prefer explicit topology URIs first and keep retries minimal.
         quoted_file = f'"{filepath}"'
         ordered_topology_names = []
         for topology_name in (topology_names or []):
@@ -5083,32 +5641,36 @@ class Delft3DFileManager:
             if fallback_name not in ordered_topology_names:
                 ordered_topology_names.append(fallback_name)
 
-        uri_candidates = [filepath, f"mdal:{filepath}", quoted_file, f"mdal:{quoted_file}"]
-
+        attempt_candidates = []
         for topology_name in ordered_topology_names:
-            uri_candidates.extend(
-                [
-                    f'{quoted_file}:{topology_name}',
-                    f'mdal:{quoted_file}:{topology_name}',
-                    f"{filepath}|layername={topology_name}",
-                    f"{filepath}|layerName={topology_name}",
-                ]
-            )
+            attempt_candidates.append((f'mdal:{quoted_file}:{topology_name}', "mdal"))
 
-        unique_uris = []
-        for uri in uri_candidates:
-            if uri not in unique_uris:
-                unique_uris.append(uri)
+        attempt_candidates.extend(
+            [
+                (f"mdal:{filepath}", "mdal"),
+                (filepath, "mdal"),
+                # Last-resort fallback for environments where provider autodetection is required.
+                (filepath, ""),
+            ]
+        )
 
-        for uri in unique_uris:
-            for provider in ("mdal", ""):
-                mesh_layer = QgsMeshLayer(uri, layer_name, provider)
-                if not mesh_layer.isValid():
-                    continue
-                if _is_usable_2d_mesh(mesh_layer, require_datasets=expect_data_variables):
-                    _apply_crs_if_missing(mesh_layer)
-                    QgsProject.instance().addMapLayer(mesh_layer)
-                    return
+        unique_attempts = []
+        for candidate in attempt_candidates:
+            if candidate not in unique_attempts:
+                unique_attempts.append(candidate)
+
+        for uri, provider in unique_attempts:
+            mesh_layer = QgsMeshLayer(uri, layer_name, provider)
+            if not mesh_layer.isValid():
+                _dispose_candidate_layer(mesh_layer)
+                continue
+
+            if _is_usable_2d_mesh(mesh_layer, require_datasets=expect_data_variables):
+                _apply_crs_if_missing(mesh_layer)
+                QgsProject.instance().addMapLayer(mesh_layer)
+                return mesh_layer
+
+            _dispose_candidate_layer(mesh_layer)
 
         # Avoid false-negative warning if a valid mesh from this same source is already loaded.
         for existing_layer in QgsProject.instance().mapLayers().values():
@@ -5118,7 +5680,7 @@ class Delft3DFileManager:
                     require_datasets=expect_data_variables,
                 ):
                     _apply_crs_if_missing(existing_layer)
-                    return
+                    return existing_layer
 
         raise RuntimeError(
             f"Failed to load mesh from {filepath}. "
