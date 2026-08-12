@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
+DATA_TMP_DIR = pathlib.Path(__file__).parent.parent / "data_tmp"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
 PLI_01 = DATA_DIR / "pli_01.pli"
 XYZ_01 = DATA_DIR / "xyz_01.xyz"
+HIS_01 = DATA_DIR / "sample_his_small.nc"
 CSL_01 = DATA_DIR / "csl.ini"
 CSD_01 = DATA_DIR / "csd.ini"
 GRID_01 = DATA_DIR / "grd_net.nc"
@@ -121,6 +123,111 @@ def test_route_xyz(plugin):
     plugin.load_xyz_file = MagicMock()
     plugin.load_file_by_extension("/fake/file.xyz")
     plugin.load_xyz_file.assert_called_once_with("/fake/file.xyz")
+
+
+def test_route_nc_uses_netcdf_router(plugin):
+    plugin.load_netcdf_file = MagicMock()
+
+    plugin.load_file_by_extension("/fake/file.nc")
+
+    plugin.load_netcdf_file.assert_called_once_with("/fake/file.nc")
+
+
+def test_load_netcdf_file_routes_his(plugin):
+    plugin._is_his_netcdf_file = MagicMock(return_value=True)
+    plugin.load_fm_his_file = MagicMock()
+    plugin.load_ugrid_mesh_file = MagicMock()
+
+    plugin.load_netcdf_file("/fake/file.nc")
+
+    plugin.load_fm_his_file.assert_called_once_with("/fake/file.nc")
+    plugin.load_ugrid_mesh_file.assert_not_called()
+
+
+def test_load_netcdf_file_routes_mesh_when_not_his(plugin):
+    plugin._is_his_netcdf_file = MagicMock(return_value=False)
+    plugin.load_fm_his_file = MagicMock()
+    plugin.load_ugrid_mesh_file = MagicMock()
+
+    plugin.load_netcdf_file("/fake/file.nc")
+
+    plugin.load_fm_his_file.assert_not_called()
+    plugin.load_ugrid_mesh_file.assert_called_once_with("/fake/file.nc")
+
+
+def test_is_his_netcdf_file_detects_small_fixture(plugin):
+    pytest.importorskip("netCDF4")
+
+    assert plugin._is_his_netcdf_file(str(HIS_01))
+
+
+def test_resolve_his_schema_from_fixture(plugin):
+    nc = pytest.importorskip("netCDF4")
+
+    with nc.Dataset(str(HIS_01), "r") as ds:
+        schema = plugin._resolve_his_schema(ds)
+
+    assert schema is not None
+    assert schema["time_var"] == "time"
+    assert schema["station_dim"] == "station"
+    assert schema["cross_section_dim"] == "cross_section"
+    assert schema["station_count"] > 0
+    assert schema["cross_section_count"] > 0
+    assert any(v["name"] == "waterlevel" for v in schema["station_variables"])
+    assert any(v["name"] == "cross_section_discharge" for v in schema["cross_section_variables"])
+    assert any(v["name"] == "water_balance_total_volume" for v in schema["global_variables"])
+    assert any(v["name"] == "timestep" for v in schema["global_variables"])
+
+
+def test_his_cross_section_rows_include_line_points(plugin):
+    nc = pytest.importorskip("netCDF4")
+
+    with nc.Dataset(str(HIS_01), "r") as ds:
+        schema = plugin._resolve_his_schema(ds)
+        rows = plugin._his_cross_section_rows(ds, schema)
+
+    assert rows
+    assert all("line_points" in row for row in rows)
+    assert all(len(row["line_points"]) >= 2 for row in rows)
+
+
+def test_load_fm_his_file_registers_source_and_layers(plugin):
+    pytest.importorskip("netCDF4")
+
+    plugin._create_his_observation_layer = MagicMock()
+    plugin._refresh_his_dialog_state = MagicMock()
+    plugin.iface.messageBar.return_value.pushSuccess = MagicMock()
+
+    plugin.load_fm_his_file(str(HIS_01))
+
+    assert plugin._create_his_observation_layer.call_count == 2
+    assert str(HIS_01.resolve()) in plugin._his_sources
+    source_info = plugin._his_sources[str(HIS_01.resolve())]
+    assert source_info["station_variables"]
+    assert source_info["cross_section_variables"]
+    assert source_info["global_variables"]
+
+
+def test_load_fm_his_file_creates_cross_sections_as_line_layer(plugin):
+    pytest.importorskip("netCDF4")
+
+    plugin._create_his_observation_layer = MagicMock()
+    plugin._refresh_his_dialog_state = MagicMock()
+    plugin.iface.messageBar.return_value.pushSuccess = MagicMock()
+
+    plugin.load_fm_his_file(str(HIS_01))
+
+    calls = plugin._create_his_observation_layer.call_args_list
+    assert len(calls) == 2
+
+    station_call = calls[0]
+    cross_call = calls[1]
+
+    assert station_call.kwargs.get("obs_type") == "station"
+    assert station_call.kwargs.get("geometry_kind", "point") == "point"
+
+    assert cross_call.kwargs.get("obs_type") == "cross_section"
+    assert cross_call.kwargs.get("geometry_kind") == "line"
 
 
 def test_close_progress_dialog_survives_partial_cleanup_failures(plugin):

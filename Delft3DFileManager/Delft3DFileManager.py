@@ -163,14 +163,18 @@ class Delft3DFileManager:
         self.export_trachytopes_action = None
         self.install_deps_action = None
         self.profile_chart_action = None
+        self.his_timeseries_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
+        self._his_dialog = None
         self._profile_layer = None
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
         self._canvas_double_click_filter = None
         self._active_progress_dialog = None
         self._partition_mesh_sync_sessions = {}
+        self._his_sources = {}
+        self._his_series_cache = {}
         self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
         self._warned_missing_defusedxml = False
 
@@ -290,6 +294,15 @@ class Delft3DFileManager:
         self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.profile_chart_action)
 
+        self.his_timeseries_action = QAction(
+            QIcon(icon_path), "HIS Timeseries", self.iface.mainWindow()
+        )
+        self.his_timeseries_action.setStatusTip(
+            "Open the Delft3D FM HIS timeseries explorer for selected stations/cross-sections"
+        )
+        self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.his_timeseries_action)
+
         self._connect_canvas_double_click()
 
     def unload(self):
@@ -320,6 +333,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
         if self.profile_chart_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.profile_chart_action)
+        if self.his_timeseries_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
@@ -367,7 +382,7 @@ class Delft3DFileManager:
         elif ext_lower == ".xyz":
             self.load_xyz_file(filepath)
         elif ext_lower == ".nc":
-            self.load_ugrid_mesh_file(filepath)
+            self.load_netcdf_file(filepath)
         elif ext_lower == ".mat":
             self.load_shorelines_mat_file(filepath)
         elif ext_lower == ".xml" and os.path.basename(filepath).lower() == "dimr_config.xml":
@@ -947,6 +962,348 @@ class Delft3DFileManager:
             self._show_profile_in_dialog(selected_feature)
         else:
             self._show_timeseries_in_dialog(selected_feature)
+
+    def _create_his_timeseries_dialog(self):
+        """Construct the HIS timeseries dialog lazily."""
+        from .his_timeseries_dialog import HisTimeseriesDialog
+
+        dialog = HisTimeseriesDialog(self.iface.mainWindow())
+        dialog.set_handlers(
+            on_controls_changed=self._on_his_dialog_controls_changed,
+            on_plot_requested=self._on_his_dialog_plot_requested,
+            on_refresh_requested=self._on_his_dialog_refresh_requested,
+        )
+        return dialog
+
+    def _ensure_his_timeseries_dialog(self):
+        """Ensure HIS dialog exists and return it."""
+        if self._his_dialog is None:
+            self._his_dialog = self._create_his_timeseries_dialog()
+        return self._his_dialog
+
+    def _his_source_options(self):
+        """Return source combo options for all loaded HIS sources."""
+        options = []
+        for source_path, source_info in sorted(self._his_sources.items()):
+            label = f"{source_info['base_name']} ({source_info['path']})"
+            options.append((source_path, label))
+        return options
+
+    def _his_variable_options(self, source_info, scope):
+        """Return variable combo options for selected source and scope."""
+        catalog_map = {
+            "station": source_info.get("station_variables", []),
+            "cross_section": source_info.get("cross_section_variables", []),
+            "global": source_info.get("global_variables", []),
+        }
+        options = []
+        for entry in catalog_map.get(scope, []):
+            options.append((entry["name"], entry["label"]))
+        return options
+
+    def _his_active_selection_features(self, source_path, scope):
+        """Return selected features from active layer for the requested HIS scope."""
+        layer = self.iface.activeLayer()
+        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+            return [], "Activate a HIS observation layer and select feature(s)."
+
+        field_lookup = self._field_name_map(layer)
+        required = ("his_source", "obs_type", "obs_index", "obs_name")
+        if not all(name in field_lookup for name in required):
+            return [], "Active layer is not a HIS observation layer."
+
+        expected_obs_type = "station" if scope == "station" else "cross_section"
+
+        expected_geometry = (
+            QgsWkbTypes.PointGeometry if expected_obs_type == "station" else QgsWkbTypes.LineGeometry
+        )
+        if layer.geometryType() != expected_geometry:
+            geometry_name = "point" if expected_obs_type == "station" else "line"
+            return [], f"Active layer must be a HIS {geometry_name} layer for scope '{expected_obs_type}'."
+
+        layer_source_value = ""
+        try:
+            first_feature = next(layer.getFeatures(), None)
+            if first_feature is not None:
+                layer_source_value = str(first_feature[field_lookup["his_source"]] or "")
+        except Exception:
+            layer_source_value = ""
+
+        if layer_source_value and os.path.normcase(layer_source_value) != os.path.normcase(source_path):
+            return [], "Active selection belongs to a different HIS source than selected in the dialog."
+
+        selected_features = []
+        try:
+            selected_features = list(layer.getSelectedFeatures())
+        except Exception:
+            selected_features = []
+
+        if not selected_features:
+            return [], f"Select one or more {expected_obs_type.replace('_', ' ')} feature(s) in the active layer."
+
+        filtered = []
+        for feature in selected_features:
+            obs_type_value = str(feature[field_lookup["obs_type"]] or "").strip().lower()
+            if obs_type_value != expected_obs_type:
+                continue
+            filtered.append(feature)
+
+        if not filtered:
+            return [], f"Selected features do not match scope '{expected_obs_type}'."
+
+        return filtered, ""
+
+    def _refresh_his_dialog_state(self, keep_current=True):
+        """Refresh dialog combo options and selection status."""
+        dialog = self._ensure_his_timeseries_dialog()
+
+        source_options = self._his_source_options()
+        selected_source = dialog.selected_source() if keep_current else None
+        if not source_options:
+            dialog.set_source_options([])
+            dialog.set_scope_options([])
+            dialog.set_variable_options([])
+            dialog.set_selection_text("Selection: no HIS source loaded")
+            dialog.set_message("Import a Delft3D FM HIS .nc file first.")
+            return
+
+        if selected_source is None or selected_source not in dict(source_options):
+            selected_source = source_options[0][0]
+
+        dialog.set_source_options(source_options, selected_value=selected_source)
+
+        scope_options = [
+            ("station", "Selected stations"),
+            ("cross_section", "Selected cross-sections"),
+            ("global", "Global variables"),
+        ]
+        selected_scope = dialog.selected_scope() if keep_current else None
+        if selected_scope not in {"station", "cross_section", "global"}:
+            selected_scope = "station"
+        dialog.set_scope_options(scope_options, selected_value=selected_scope)
+
+        source_info = self._his_sources.get(selected_source)
+        variable_options = []
+        if source_info is not None:
+            variable_options = self._his_variable_options(source_info, selected_scope)
+
+        selected_variable = dialog.selected_variable() if keep_current else None
+        if selected_variable not in dict(variable_options):
+            selected_variable = variable_options[0][0] if variable_options else None
+        dialog.set_variable_options(variable_options, selected_value=selected_variable)
+
+        if selected_scope == "global":
+            dialog.set_selection_text("Selection: global scope does not require map selection")
+            dialog.set_message("")
+            return
+
+        features, message = self._his_active_selection_features(selected_source, selected_scope)
+        if features:
+            label = selected_scope.replace("_", " ")
+            dialog.set_selection_text(f"Selection: {len(features)} selected {label}(s) from active layer")
+            dialog.set_message("")
+        else:
+            dialog.set_selection_text("Selection: none")
+            dialog.set_message(message)
+
+    def _on_his_dialog_controls_changed(self):
+        """Handle combo changes in HIS dialog."""
+        self._refresh_his_dialog_state(keep_current=True)
+
+    def _on_his_dialog_refresh_requested(self):
+        """Refresh selection-dependent status in HIS dialog."""
+        self._refresh_his_dialog_state(keep_current=True)
+
+    def _his_variable_info(self, source_info, scope, variable_name):
+        """Return variable metadata entry by name for a scope."""
+        catalog = {
+            "station": source_info.get("station_variables", []),
+            "cross_section": source_info.get("cross_section_variables", []),
+            "global": source_info.get("global_variables", []),
+        }.get(scope, [])
+        for entry in catalog:
+            if entry.get("name") == variable_name:
+                return entry
+        return None
+
+    def _his_time_axis_label(self, source_info):
+        """Return time-axis label for a HIS source."""
+        units = str(source_info.get("time_units") or "").strip()
+        return self._format_axis_label(source_info.get("time_name", "time"), units, "time")
+
+    def _his_read_series(self, source_path, variable_name, scope, obs_index=None):
+        """Read one HIS series lazily from disk, with small cache reuse."""
+        cache_key = (source_path, variable_name, scope, obs_index)
+        cached = self._his_series_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        source_info = self._his_sources.get(source_path)
+        if source_info is None:
+            raise RuntimeError("Selected HIS source is no longer available.")
+
+        import netCDF4 as nc
+        import numpy as np
+
+        with nc.Dataset(source_path, "r") as ds:
+            time_var_name = source_info["time_var"]
+            if time_var_name not in ds.variables:
+                raise RuntimeError("HIS time variable could not be found in source file.")
+            time_values = ds.variables[time_var_name][:]
+            if isinstance(time_values, np.ma.MaskedArray):
+                time_values = time_values.filled(np.nan)
+            time_values = np.asarray(time_values, dtype=float)
+
+            if variable_name not in ds.variables:
+                raise RuntimeError(f"Variable '{variable_name}' could not be found in source file.")
+            variable = ds.variables[variable_name]
+            values = variable[:]
+            if isinstance(values, np.ma.MaskedArray):
+                values = values.filled(np.nan)
+            values = np.asarray(values, dtype=float)
+
+            if scope == "global":
+                series_values = values
+            else:
+                obs_dim = source_info["station_dim"] if scope == "station" else source_info["cross_section_dim"]
+                if obs_dim not in variable.dimensions:
+                    raise RuntimeError(
+                        f"Variable '{variable_name}' is not available for scope '{scope}'."
+                    )
+                if obs_index is None:
+                    raise RuntimeError("Observation index is required for station/cross-section series.")
+
+                obs_axis = variable.dimensions.index(obs_dim)
+                series_values = np.take(values, indices=int(obs_index), axis=obs_axis)
+
+            series_values = np.asarray(series_values, dtype=float).reshape(-1)
+            if time_values.shape[0] != series_values.shape[0]:
+                raise RuntimeError(
+                    f"Variable '{variable_name}' length does not match time axis."
+                )
+
+            valid_mask = np.isfinite(time_values) & np.isfinite(series_values)
+            x_values = time_values[valid_mask].tolist()
+            y_values = series_values[valid_mask].tolist()
+
+        variable_info = self._his_variable_info(source_info, scope, variable_name) or {}
+        payload = {
+            "x": x_values,
+            "y": y_values,
+            "x_label": self._his_time_axis_label(source_info),
+            "y_label": self._format_axis_label(
+                variable_info.get("long_name", variable_name),
+                variable_info.get("units", ""),
+                variable_name,
+            ),
+            "variable_label": variable_info.get("label", variable_name),
+        }
+
+        self._his_series_cache[cache_key] = payload
+        if len(self._his_series_cache) > 96:
+            oldest_key = next(iter(self._his_series_cache.keys()))
+            self._his_series_cache.pop(oldest_key, None)
+        return payload
+
+    def _on_his_dialog_plot_requested(self, mode):
+        """Plot button handler for HIS dialog (new plot vs append)."""
+        dialog = self._ensure_his_timeseries_dialog()
+        source_path = dialog.selected_source()
+        scope = dialog.selected_scope()
+        variable_name = dialog.selected_variable()
+
+        if not source_path or source_path not in self._his_sources:
+            dialog.set_message("Select a valid HIS source.")
+            return
+        if not variable_name:
+            dialog.set_message("Select a variable to plot.")
+            return
+
+        source_info = self._his_sources[source_path]
+        series_entries = []
+        x_axis_label = self._his_time_axis_label(source_info)
+        y_axis_label = "value"
+
+        if scope == "global":
+            try:
+                series_payload = self._his_read_series(source_path, variable_name, scope)
+            except Exception as exc:
+                dialog.set_message(str(exc))
+                return
+
+            y_axis_label = series_payload["y_label"]
+            series_entries.append(
+                {
+                    "x": series_payload["x"],
+                    "y": series_payload["y"],
+                    "label": f"global | {series_payload['variable_label']}",
+                }
+            )
+        else:
+            selected_features, message = self._his_active_selection_features(source_path, scope)
+            if not selected_features:
+                dialog.set_message(message)
+                return
+
+            if len(selected_features) > 20:
+                dialog.set_message(
+                    f"Plotting {len(selected_features)} selected features. Reduce selection if the plot becomes cluttered."
+                )
+
+            for feature in selected_features:
+                try:
+                    obs_index = int(feature["obs_index"])
+                except Exception:
+                    continue
+
+                obs_name = ""
+                try:
+                    obs_name = str(feature["obs_name"] or "").strip()
+                except Exception:
+                    obs_name = ""
+                if not obs_name:
+                    obs_name = f"{scope}_{obs_index + 1}"
+
+                try:
+                    series_payload = self._his_read_series(
+                        source_path,
+                        variable_name,
+                        scope,
+                        obs_index=obs_index,
+                    )
+                except Exception as exc:
+                    dialog.set_message(str(exc))
+                    return
+
+                y_axis_label = series_payload["y_label"]
+                series_entries.append(
+                    {
+                        "x": series_payload["x"],
+                        "y": series_payload["y"],
+                        "label": f"{obs_name} | {series_payload['variable_label']}",
+                    }
+                )
+
+        if not series_entries:
+            dialog.set_message("No valid series found for the current selection.")
+            return
+
+        append = str(mode).strip().lower() == "add"
+        dialog.apply_series(
+            series_entries,
+            x_axis_label=x_axis_label,
+            y_axis_label=y_axis_label,
+            title=f"HIS Timeseries - {source_info['base_name']}",
+            append=append,
+        )
+
+    def open_his_timeseries_window(self):
+        """Open/focus the HIS timeseries explorer."""
+        dialog = self._ensure_his_timeseries_dialog()
+        self._refresh_his_dialog_state(keep_current=True)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _find_nearest_feature(self, layer, map_point):
         """Return nearest feature around a map click, with a map-unit tolerance."""
@@ -4257,6 +4614,529 @@ class Delft3DFileManager:
             QApplication.processEvents()
         except Exception:
             pass
+
+    def load_netcdf_file(self, filepath):
+        """Route NetCDF files to HIS importer or existing UGRID mesh importer."""
+        try:
+            if self._is_his_netcdf_file(filepath):
+                self.load_fm_his_file(filepath)
+                return
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS.",
+            )
+            return
+        except Exception as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"HIS detection failed, trying UGRID mesh import: {exc}",
+            )
+
+        self.load_ugrid_mesh_file(filepath)
+
+    def _is_his_netcdf_file(self, filepath):
+        """Return True when file appears to be a Delft3D FM HIS NetCDF output."""
+        import netCDF4 as nc
+
+        with nc.Dataset(filepath, "r") as ds:
+            schema = self._resolve_his_schema(ds)
+            if schema is None:
+                return False
+
+            has_obs = schema["station_count"] > 0 or schema["cross_section_count"] > 0
+            has_global = bool(schema.get("global_variables"))
+            return has_obs or has_global
+
+    def _resolve_his_schema(self, nc_dataset):
+        """Resolve Delft3D FM HIS variable/dimension names into one schema map."""
+        time_var = self._find_variable_name(nc_dataset, "time")
+        if time_var is None:
+            return None
+
+        time_dimensions = tuple(getattr(nc_dataset.variables[time_var], "dimensions", ()))
+        if not time_dimensions:
+            return None
+        time_dim = time_dimensions[0]
+
+        if "station" in nc_dataset.dimensions:
+            station_dim = "station"
+        else:
+            station_dim = None
+
+        if "cross_section" in nc_dataset.dimensions:
+            cross_section_dim = "cross_section"
+        else:
+            cross_section_dim = None
+
+        station_name_var = self._find_variable_name(nc_dataset, "station_name")
+        station_id_var = self._find_variable_name(nc_dataset, "station_id")
+        station_x_var = self._find_variable_name(nc_dataset, "station_x_coordinate")
+        station_y_var = self._find_variable_name(nc_dataset, "station_y_coordinate")
+        station_geom_count_var = self._find_variable_name(nc_dataset, "station_geom_node_count")
+        station_geom_x_var = self._find_variable_name(nc_dataset, "station_geom_node_coordx")
+        station_geom_y_var = self._find_variable_name(nc_dataset, "station_geom_node_coordy")
+
+        cross_name_var = self._find_variable_name(nc_dataset, "cross_section_name")
+        cross_geom_count_var = self._find_variable_name(nc_dataset, "cross_section_geom_node_count")
+        cross_geom_x_var = self._find_variable_name(nc_dataset, "cross_section_geom_node_coordx")
+        cross_geom_y_var = self._find_variable_name(nc_dataset, "cross_section_geom_node_coordy")
+
+        station_count = int(len(nc_dataset.dimensions[station_dim])) if station_dim in nc_dataset.dimensions else 0
+        cross_section_count = int(len(nc_dataset.dimensions[cross_section_dim])) if cross_section_dim in nc_dataset.dimensions else 0
+
+        station_variables = self._build_his_variable_catalog(nc_dataset, time_dim, station_dim)
+        cross_section_variables = self._build_his_variable_catalog(nc_dataset, time_dim, cross_section_dim)
+        global_variables = self._build_his_variable_catalog(nc_dataset, time_dim, None)
+
+        return {
+            "time_var": time_var,
+            "time_dim": time_dim,
+            "time_name": time_var,
+            "time_units": getattr(nc_dataset.variables[time_var], "units", ""),
+            "station_dim": station_dim,
+            "station_count": station_count,
+            "station_name_var": station_name_var,
+            "station_id_var": station_id_var,
+            "station_x_var": station_x_var,
+            "station_y_var": station_y_var,
+            "station_geom_count_var": station_geom_count_var,
+            "station_geom_x_var": station_geom_x_var,
+            "station_geom_y_var": station_geom_y_var,
+            "cross_section_dim": cross_section_dim,
+            "cross_section_count": cross_section_count,
+            "cross_name_var": cross_name_var,
+            "cross_geom_count_var": cross_geom_count_var,
+            "cross_geom_x_var": cross_geom_x_var,
+            "cross_geom_y_var": cross_geom_y_var,
+            "station_variables": station_variables,
+            "cross_section_variables": cross_section_variables,
+            "global_variables": global_variables,
+        }
+
+    def _build_his_variable_catalog(self, nc_dataset, time_dim, obs_dim):
+        """Build variable metadata list for one HIS scope."""
+        catalog = []
+        excluded_names = {
+            "time",
+            "time_bds",
+            "projected_coordinate_system",
+            "station_name",
+            "station_id",
+            "station_x_coordinate",
+            "station_y_coordinate",
+            "station_geom",
+            "station_geom_node_count",
+            "station_geom_node_coordx",
+            "station_geom_node_coordy",
+            "cross_section_name",
+            "cross_section_geom",
+            "cross_section_geom_node_count",
+            "cross_section_geom_node_coordx",
+            "cross_section_geom_node_coordy",
+        }
+
+        for name, variable in nc_dataset.variables.items():
+            if name.lower() in excluded_names:
+                continue
+            if not self._is_numeric_netcdf_variable(variable):
+                continue
+
+            dims = tuple(getattr(variable, "dimensions", ()))
+            if time_dim not in dims:
+                continue
+
+            if obs_dim is None:
+                if dims != (time_dim,):
+                    continue
+            else:
+                if obs_dim not in dims or len(dims) != 2:
+                    continue
+
+            unit_text = str(getattr(variable, "units", "") or "").strip()
+            long_name = str(getattr(variable, "long_name", "") or "").strip()
+            label = long_name or name
+            if unit_text:
+                label = f"{label} [{unit_text}]"
+            if label != name:
+                label = f"{name} | {label}"
+
+            catalog.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "long_name": long_name,
+                    "units": unit_text,
+                    "dimensions": dims,
+                }
+            )
+
+        return sorted(catalog, key=lambda entry: entry["name"].lower())
+
+    def _to_numpy_float_array(self, value):
+        """Return value as a finite-compatible float numpy array."""
+        import numpy as np
+
+        if value is None:
+            return None
+
+        if isinstance(value, np.ma.MaskedArray):
+            value = value.filled(np.nan)
+        return np.asarray(value, dtype=float)
+
+    def _his_geometry_centroids(self, counts_array, x_array, y_array, item_count):
+        """Return centroid coordinates for geometry-node encoded HIS entities."""
+        import numpy as np
+
+        centroids = [(math.nan, math.nan)] * item_count
+        if counts_array is None or x_array is None or y_array is None:
+            return centroids
+
+        counts = np.asarray(counts_array, dtype=int)
+        xs = np.asarray(x_array, dtype=float)
+        ys = np.asarray(y_array, dtype=float)
+
+        offset = 0
+        for idx in range(min(item_count, len(counts))):
+            node_count = int(counts[idx])
+            if node_count <= 0:
+                continue
+            end_idx = offset + node_count
+            if end_idx > len(xs) or end_idx > len(ys):
+                break
+
+            segment_x = xs[offset:end_idx]
+            segment_y = ys[offset:end_idx]
+            offset = end_idx
+
+            finite = np.isfinite(segment_x) & np.isfinite(segment_y)
+            if not finite.any():
+                continue
+
+            centroids[idx] = (
+                float(np.mean(segment_x[finite])),
+                float(np.mean(segment_y[finite])),
+            )
+
+        return centroids
+
+    def _his_geometry_lines(self, counts_array, x_array, y_array, item_count):
+        """Return per-item line coordinate sequences from HIS geometry-node arrays."""
+        import numpy as np
+
+        lines = [[] for _ in range(item_count)]
+        if counts_array is None or x_array is None or y_array is None:
+            return lines
+
+        counts = np.asarray(counts_array, dtype=int)
+        xs = np.asarray(x_array, dtype=float)
+        ys = np.asarray(y_array, dtype=float)
+
+        offset = 0
+        for idx in range(min(item_count, len(counts))):
+            node_count = int(counts[idx])
+            if node_count <= 0:
+                continue
+            end_idx = offset + node_count
+            if end_idx > len(xs) or end_idx > len(ys):
+                break
+
+            segment_x = xs[offset:end_idx]
+            segment_y = ys[offset:end_idx]
+            offset = end_idx
+
+            points = []
+            for x_coord, y_coord in zip(segment_x, segment_y):
+                if not (math.isfinite(float(x_coord)) and math.isfinite(float(y_coord))):
+                    continue
+                points.append((float(x_coord), float(y_coord)))
+
+            lines[idx] = points
+
+        return lines
+
+    def _his_station_rows(self, nc_dataset, schema):
+        """Build station row dictionaries with index/name/coordinates."""
+        station_count = int(schema.get("station_count") or 0)
+        if station_count <= 0:
+            return []
+
+        names = self._read_string_array(nc_dataset, schema.get("station_name_var"))
+        ids = self._read_string_array(nc_dataset, schema.get("station_id_var"))
+        if not names:
+            names = ids
+
+        x_values = None
+        y_values = None
+        x_var = schema.get("station_x_var")
+        y_var = schema.get("station_y_var")
+        if x_var and y_var and x_var in nc_dataset.variables and y_var in nc_dataset.variables:
+            x_values = self._to_numpy_float_array(nc_dataset.variables[x_var][:])
+            y_values = self._to_numpy_float_array(nc_dataset.variables[y_var][:])
+
+        if x_values is None or y_values is None:
+            count_var = schema.get("station_geom_count_var")
+            geom_x_var = schema.get("station_geom_x_var")
+            geom_y_var = schema.get("station_geom_y_var")
+            geom_counts = (
+                self._to_numpy_float_array(nc_dataset.variables[count_var][:])
+                if count_var and count_var in nc_dataset.variables
+                else None
+            )
+            geom_x = (
+                self._to_numpy_float_array(nc_dataset.variables[geom_x_var][:])
+                if geom_x_var and geom_x_var in nc_dataset.variables
+                else None
+            )
+            geom_y = (
+                self._to_numpy_float_array(nc_dataset.variables[geom_y_var][:])
+                if geom_y_var and geom_y_var in nc_dataset.variables
+                else None
+            )
+            centroids = self._his_geometry_centroids(geom_counts, geom_x, geom_y, station_count)
+            x_values = [value[0] for value in centroids]
+            y_values = [value[1] for value in centroids]
+
+        rows = []
+        for idx in range(station_count):
+            x_coord = float(x_values[idx]) if idx < len(x_values) else math.nan
+            y_coord = float(y_values[idx]) if idx < len(y_values) else math.nan
+            if not (math.isfinite(x_coord) and math.isfinite(y_coord)):
+                continue
+
+            obs_name = ""
+            if names and idx < len(names):
+                obs_name = str(names[idx] or "").strip()
+            if not obs_name:
+                obs_name = f"station_{idx + 1}"
+
+            obs_id = ""
+            if ids and idx < len(ids):
+                obs_id = str(ids[idx] or "").strip()
+
+            rows.append(
+                {
+                    "obs_index": idx,
+                    "obs_name": obs_name,
+                    "obs_id": obs_id,
+                    "x": x_coord,
+                    "y": y_coord,
+                }
+            )
+
+        return rows
+
+    def _his_cross_section_rows(self, nc_dataset, schema):
+        """Build cross-section row dictionaries with index/name/line coordinates."""
+        cross_count = int(schema.get("cross_section_count") or 0)
+        if cross_count <= 0:
+            return []
+
+        names = self._read_string_array(nc_dataset, schema.get("cross_name_var"))
+        count_var = schema.get("cross_geom_count_var")
+        geom_x_var = schema.get("cross_geom_x_var")
+        geom_y_var = schema.get("cross_geom_y_var")
+
+        geom_counts = (
+            self._to_numpy_float_array(nc_dataset.variables[count_var][:])
+            if count_var and count_var in nc_dataset.variables
+            else None
+        )
+        geom_x = (
+            self._to_numpy_float_array(nc_dataset.variables[geom_x_var][:])
+            if geom_x_var and geom_x_var in nc_dataset.variables
+            else None
+        )
+        geom_y = (
+            self._to_numpy_float_array(nc_dataset.variables[geom_y_var][:])
+            if geom_y_var and geom_y_var in nc_dataset.variables
+            else None
+        )
+
+        line_points_by_index = self._his_geometry_lines(geom_counts, geom_x, geom_y, cross_count)
+
+        rows = []
+        for idx in range(cross_count):
+            line_points = line_points_by_index[idx] if idx < len(line_points_by_index) else []
+            if len(line_points) < 2:
+                continue
+
+            obs_name = ""
+            if names and idx < len(names):
+                obs_name = str(names[idx] or "").strip()
+            if not obs_name:
+                obs_name = f"cross_section_{idx + 1}"
+
+            rows.append(
+                {
+                    "obs_index": idx,
+                    "obs_name": obs_name,
+                    "obs_id": "",
+                    "line_points": line_points,
+                }
+            )
+
+        return rows
+
+    def _create_his_observation_layer(self, layer_name, rows, epsg, source_path, obs_type, geometry_kind="point"):
+        """Create one HIS observation layer from prepared rows."""
+        geometry_kind = str(geometry_kind or "point").strip().lower()
+        if geometry_kind == "line":
+            uri = f"LineString?crs=EPSG:{epsg}"
+        else:
+            uri = f"Point?crs=EPSG:{epsg}"
+
+        layer = QgsVectorLayer(uri, layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("his_source", QVariant.String),
+                QgsField("obs_type", QVariant.String),
+                QgsField("obs_index", QVariant.Int),
+                QgsField("obs_name", QVariant.String),
+                QgsField("obs_id", QVariant.String),
+            ]
+        )
+        layer.updateFields()
+
+        features = []
+        for row in rows:
+            feat = QgsFeature(layer.fields())
+            if geometry_kind == "line":
+                line_points = row.get("line_points") or []
+                if len(line_points) < 2:
+                    continue
+                geometry_points = [QgsPointXY(float(x_coord), float(y_coord)) for x_coord, y_coord in line_points]
+                feat.setGeometry(QgsGeometry.fromPolylineXY(geometry_points))
+            else:
+                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(row["x"]), float(row["y"]))))
+            feat.setAttributes(
+                [
+                    str(source_path),
+                    str(obs_type),
+                    int(row["obs_index"]),
+                    str(row["obs_name"]),
+                    str(row.get("obs_id", "") or ""),
+                ]
+            )
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        return layer
+
+    def load_fm_his_file(self, filepath):
+        """Load Delft3D FM HIS NetCDF by creating lightweight observation layers only."""
+        try:
+            import netCDF4 as nc
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS.",
+            )
+            return
+
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        source_path = os.path.abspath(filepath)
+
+        progress_dialog = self._create_progress_dialog(f"Loading HIS {base_name}")
+        try:
+            self._update_progress_dialog(progress_dialog, 10, "Opening HIS netCDF")
+            self._set_status_message(f"Loading HIS file {os.path.basename(source_path)}")
+
+            with nc.Dataset(source_path, "r") as ds:
+                schema = self._resolve_his_schema(ds)
+                if schema is None:
+                    QMessageBox.warning(
+                        self.iface.mainWindow(),
+                        "Delft3D File Manager",
+                        f"Could not detect HIS schema in {os.path.basename(source_path)}",
+                    )
+                    return
+
+                epsg = self._read_epsg_from_nc(ds)
+                if epsg is None:
+                    epsg = 28992
+
+                self._update_progress_dialog(progress_dialog, 35, "Reading station metadata")
+                station_rows = self._his_station_rows(ds, schema)
+
+                self._update_progress_dialog(progress_dialog, 60, "Reading cross-section metadata")
+                cross_rows = self._his_cross_section_rows(ds, schema)
+
+            self._update_progress_dialog(progress_dialog, 75, "Creating HIS layers")
+
+            loaded_layers = []
+            if station_rows:
+                stations_layer_name = f"{base_name}_his_stations"
+                self._create_his_observation_layer(
+                    stations_layer_name,
+                    station_rows,
+                    epsg,
+                    source_path,
+                    obs_type="station",
+                )
+                loaded_layers.append(f"stations({len(station_rows)})")
+
+            if cross_rows:
+                cross_layer_name = f"{base_name}_his_cross_sections"
+                self._create_his_observation_layer(
+                    cross_layer_name,
+                    cross_rows,
+                    epsg,
+                    source_path,
+                    obs_type="cross_section",
+                    geometry_kind="line",
+                )
+                loaded_layers.append(f"cross_sections({len(cross_rows)})")
+
+            self._his_sources[source_path] = {
+                "path": source_path,
+                "base_name": base_name,
+                "epsg": epsg,
+                "time_var": schema["time_var"],
+                "time_dim": schema["time_dim"],
+                "time_name": schema["time_name"],
+                "time_units": schema["time_units"],
+                "station_dim": schema["station_dim"],
+                "cross_section_dim": schema["cross_section_dim"],
+                "station_variables": schema["station_variables"],
+                "cross_section_variables": schema["cross_section_variables"],
+                "global_variables": schema["global_variables"],
+            }
+
+            stale_cache_keys = [
+                key for key in self._his_series_cache.keys() if key and key[0] == source_path
+            ]
+            for cache_key in stale_cache_keys:
+                self._his_series_cache.pop(cache_key, None)
+
+            self._refresh_his_dialog_state(keep_current=True)
+
+            if loaded_layers:
+                self._update_progress_dialog(progress_dialog, 100, "HIS import complete")
+                self.iface.messageBar().pushSuccess(
+                    "Delft3D File Manager",
+                    f"Loaded HIS observations from {os.path.basename(source_path)}: {', '.join(loaded_layers)}",
+                )
+            else:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    f"No station or cross-section locations found in {os.path.basename(source_path)}",
+                )
+        except Exception as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import HIS file: {exc}",
+            )
+        finally:
+            self._close_progress_dialog(progress_dialog)
+            self._clear_status_message()
+            self._schedule_orphan_progress_cleanup([180])
 
     def load_ugrid_mesh_file(self, filepath):
         """Load UGRID netCDF mesh file with 1D/2D components."""

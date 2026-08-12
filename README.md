@@ -13,8 +13,10 @@ A QGIS plugin to manage Delft3D files.
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
+- Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
 - Detects morphodynamic NetCDF variables with extra dimensions and flattens selected variables to QGIS-compatible time/space datasets.
 - Visualizes imported boundary-condition timeseries in the existing profile popup window.
+- Visualizes HIS timeseries in a dedicated explorer window with variable dropdown selection and Add/New plot modes.
 - Exports line features and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
@@ -37,7 +39,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.mdu`** — FM model definition file (creates a summary table and loads linked files)
 - **`.ext`** — FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
 - **`.bc`** — FM boundary-condition forcing file (creates forcing/timeseries records)
-- **`.nc`** — UGRID mesh NetCDF files (creates a native mesh2d layer + 1D polyline/point layers)
+- **`.nc`** — UGRID mesh NetCDF or Delft3D FM HIS NetCDF (auto-detected)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 - **`.csl`, `.csd`** — FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
@@ -263,6 +265,31 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 #### CRS Handling
 - The plugin attempts to read EPSG code from NetCDF metadata
 - If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
+
+### Import: Delft3D FM HIS (`.nc`)
+
+When a selected `.nc` file is detected as a Delft3D FM HIS output, the plugin imports only observation locations and keeps timeseries data lazy-loaded.
+
+#### Output Layers
+- `<file_name>_his_stations` (Point layer)
+- `<file_name>_his_cross_sections` (LineString layer)
+
+Each feature stores only lightweight references (`his_source`, `obs_type`, `obs_index`, `obs_name`, `obs_id`) and does not store full timeseries payloads.
+
+#### HIS Timeseries Explorer
+
+Use `Delft3D File Manager -> HIS Timeseries`.
+
+Workflow:
+1. Select source and scope in the HIS window.
+2. Select variable from dropdown.
+3. For station/cross-section scope, select one or more features in the active HIS layer.
+4. Choose `New Plot` or `Add To Plot`.
+
+Notes:
+- No right-click is required; plotting is selection-driven.
+- Global variables can be plotted without map selection.
+- Multiple selected features are plotted together for quick comparison.
 
 ### Import: ShorelineS Results (`.mat`)
 
