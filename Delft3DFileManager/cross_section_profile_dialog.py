@@ -210,7 +210,7 @@ def _create_chart_widget(parent=None):
     if _HAS_MATPLOTLIB:
         try:
             return _MatplotlibProfileChartWidget(parent)
-        except Exception:
+        except (ImportError, RuntimeError):
             pass
     return _ProfileChartWidget(parent)
 

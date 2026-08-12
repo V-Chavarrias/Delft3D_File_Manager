@@ -116,7 +116,7 @@ def _create_chart_widget(parent=None):
     if _HAS_MATPLOTLIB:
         try:
             return _MatplotlibSeriesChartWidget(parent)
-        except Exception:
+        except (ImportError, RuntimeError):
             pass
     return _FallbackChartWidget(parent)
 

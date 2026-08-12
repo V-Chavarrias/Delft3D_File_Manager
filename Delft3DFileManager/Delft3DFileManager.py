@@ -887,7 +887,7 @@ class Delft3DFileManager:
 
         try:
             self._profile_layer.selectionChanged.disconnect(self._on_profile_layer_selection_changed)
-        except Exception:
+        except RuntimeError:
             pass
 
         self._profile_layer = None
@@ -1253,7 +1253,7 @@ class Delft3DFileManager:
             for feature in selected_features:
                 try:
                     obs_index = int(feature["obs_index"])
-                except Exception:
+                except (TypeError, ValueError):
                     continue
 
                 obs_name = ""
@@ -1326,7 +1326,7 @@ class Delft3DFileManager:
 
             try:
                 distance = float(geometry.distance(click_geom))
-            except Exception:
+            except (TypeError, AttributeError):
                 continue
 
             if best_distance is None or distance < best_distance:
@@ -2197,7 +2197,7 @@ class Delft3DFileManager:
             symbol = QgsSymbol.defaultSymbol(layer.geometryType())
             try:
                 symbol.setColor(QColor(color_for_type(type_value)))
-            except Exception:
+            except (AttributeError, TypeError):
                 pass
             categories.append(QgsRendererCategory(type_value, symbol, type_value))
 
@@ -2205,7 +2205,7 @@ class Delft3DFileManager:
         layer.setRenderer(renderer)
         try:
             layer.triggerRepaint()
-        except Exception:
+        except RuntimeError:
             pass
 
     def _apply_boundary_type_categorized_style(self, layer):
@@ -2258,7 +2258,7 @@ class Delft3DFileManager:
             symbol = QgsSymbol.defaultSymbol(layer.geometryType())
             try:
                 symbol.setColor(QColor(color_for_type(type_value)))
-            except Exception:
+            except (AttributeError, TypeError):
                 pass
             categories.append(QgsRendererCategory(type_value, symbol, type_value))
 
@@ -2266,7 +2266,7 @@ class Delft3DFileManager:
         layer.setRenderer(renderer)
         try:
             layer.triggerRepaint()
-        except Exception:
+        except RuntimeError:
             pass
 
     def load_structures_spatial_file(self, filepath, grid_path=None):
@@ -2929,7 +2929,7 @@ class Delft3DFileManager:
             viewport = canvas.viewport()
             if self._canvas_double_click_filter is not None:
                 viewport.removeEventFilter(self._canvas_double_click_filter)
-        except Exception:
+        except (RuntimeError, AttributeError):
             pass
 
         self._canvas_double_click_filter = None
@@ -4045,7 +4045,7 @@ class Delft3DFileManager:
                     continue
                 if layer.geometryType() != QgsWkbTypes.PointGeometry:
                     continue
-            except Exception:
+            except (AttributeError, RuntimeError):
                 continue
             if layer.name() == layer_name:
                 return layer
@@ -4386,7 +4386,7 @@ class Delft3DFileManager:
                 authid = layer_crs.authid()
                 if authid:
                     crs_authid = authid
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
         point_layer = QgsVectorLayer(f"Point?crs={crs_authid}", output_name, "memory")
@@ -4423,7 +4423,7 @@ class Delft3DFileManager:
         try:
             self.iface.statusBarIface().showMessage(str(message))
             QApplication.processEvents()
-        except Exception:
+        except (AttributeError, RuntimeError):
             # Keep import flow resilient in test/mocked environments.
             pass
 
@@ -4432,7 +4432,7 @@ class Delft3DFileManager:
         try:
             self.iface.statusBarIface().clearMessage()
             QApplication.processEvents()
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
     def _create_progress_dialog(self, title):
@@ -4469,7 +4469,7 @@ class Delft3DFileManager:
         for delay_ms in delays:
             try:
                 QTimer.singleShot(delay_ms, self._close_orphan_loading_progress_dialogs)
-            except Exception:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _update_progress_dialog(self, dialog, value, text=None):
@@ -4481,7 +4481,7 @@ class Delft3DFileManager:
             if text:
                 dialog.setLabelText(str(text))
             QApplication.processEvents()
-        except Exception:
+        except (RuntimeError, AttributeError):
             pass
 
     def _close_progress_dialog(self, dialog):
@@ -4499,7 +4499,7 @@ class Delft3DFileManager:
         ):
             try:
                 action()
-            except Exception:
+            except (RuntimeError, AttributeError):
                 pass
 
         if dialog is self._active_progress_dialog:
@@ -4509,7 +4509,7 @@ class Delft3DFileManager:
 
         try:
             QApplication.processEvents()
-        except Exception:
+        except RuntimeError:
             pass
 
     def _close_orphan_loading_progress_dialogs(self):
@@ -4521,11 +4521,11 @@ class Delft3DFileManager:
         widgets = []
         try:
             widgets.extend(list(QApplication.topLevelWidgets() or []))
-        except Exception:
+        except (RuntimeError, AttributeError):
             pass
         try:
             widgets.extend(list(QApplication.allWidgets() or []))
-        except Exception:
+        except (RuntimeError, AttributeError):
             pass
         if not widgets:
             return
@@ -4594,7 +4594,7 @@ class Delft3DFileManager:
 
                 try:
                     widget.reset()
-                except Exception:
+                except (RuntimeError, AttributeError):
                     pass
 
                 for action in (
@@ -4605,14 +4605,14 @@ class Delft3DFileManager:
                 ):
                     try:
                         action()
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
-            except Exception:
+            except (RuntimeError, AttributeError):
                 continue
 
         try:
             QApplication.processEvents()
-        except Exception:
+        except RuntimeError:
             pass
 
     def load_netcdf_file(self, filepath):
@@ -5171,6 +5171,7 @@ class Delft3DFileManager:
         base_name = os.path.splitext(os.path.basename(filepath))[0]
         loaded_layers = []
         mesh2d_source_path = filepath
+        flattened_sidecar_path = None  # Track sidecar separately for both-file loading
         partition_input_files = [filepath]
         partition_mode = False
         partition_render_mode = "masked"
@@ -5221,61 +5222,36 @@ class Delft3DFileManager:
                 )
                 return
 
+            # ── Prompt phase: collect all choices before any file I/O ────────────
             selected_variables = []
             if has_mesh2d and variable_analysis["has_morphodynamic"]:
                 self._update_progress_dialog(progress_dialog, 40, "Select variables to flatten")
                 self._set_status_message("Select morphodynamic variables")
+                # Only show variables that can be flattened (those with extra dimensions)
+                flattenable_vars = variable_analysis.get("flattenable_names", [])
                 selected_variables = self._prompt_for_morphodynamic_variables(
-                    variable_analysis["candidate_names"],
-                    default_selected=variable_analysis.get("default_selected"),
+                    flattenable_vars,
+                    default_selected=flattenable_vars,
                 )
                 if selected_variables is None:
                     return
 
-                if selected_variables:
-                    try:
-                        base_progress = 45
-                        flatten_span = 20
-                        self._set_status_message("Flattening selected variables")
-                        progress_step = max(1, len(selected_variables) // 20)
-
-                        def _flatten_progress(done, total, label=None):
-                            if total <= 0:
-                                return
-                            fraction = min(1.0, max(0.0, float(done) / float(total)))
-                            progress_value = base_progress + int(flatten_span * fraction)
-                            progress_text = f"Flattening variables {done}/{total}"
-                            self._update_progress_dialog(progress_dialog, progress_value, progress_text)
-                            if done < total and (done % progress_step) != 0:
-                                return
-                            suffix = f": {label}" if label else ""
-                            self._set_status_message(f"Flattening variables {done}/{total}{suffix}")
-
-                        mesh2d_source_path = self._prepare_flattened_ugrid_sidecar(
-                            filepath,
-                            selected_variables,
-                            progress_callback=_flatten_progress,
-                        )
-                    except Exception as exc:
-                        self.iface.messageBar().pushWarning(
-                            "Delft3D File Manager",
-                            f"Could not flatten morphodynamic variables, loading original mesh: {exc}"
-                        )
-            else:
-                self._update_progress_dialog(progress_dialog, 65, "Loading mesh layers")
-
-            partition_source_paths = None
+            partition_render_mode = None
             if has_mesh2d and partition_mode:
                 partition_render_mode = self._prompt_for_partition_render_mode(partition_input_files)
                 if partition_render_mode is None:
                     return
 
-                self._update_progress_dialog(progress_dialog, 68, "Preparing partition mesh sources")
+            # ── Source-preparation phase: flatten and/or ghost-mask ───────────
+            partition_source_paths = None
+            if partition_mode:
+                self._update_progress_dialog(progress_dialog, 45, "Preparing partition mesh sources")
                 self._set_status_message("Preparing partition mesh sources")
                 if partition_render_mode == "raw":
                     partition_source_paths = list(partition_input_files)
                     self._set_status_message("Loading original partition files (ghost overlap enabled)")
                 else:
+                    # masked: flatten each partition then ghost-mask it.
                     partition_warnings = []
                     try:
                         partition_source_paths, partition_warnings = self._prepare_partition_mesh_sources(
@@ -5292,13 +5268,91 @@ class Delft3DFileManager:
                             "Delft3D File Manager",
                             f"Partition ownership filtering fallback: {warning_text}",
                         )
+            elif selected_variables:
+                # Single file with morphodynamic variables: flatten now.
+                self._update_progress_dialog(progress_dialog, 45, "Flattening selected variables")
+                self._set_status_message("Flattening selected variables")
+                progress_step = max(1, len(selected_variables) // 20)
+
+                def _flatten_progress(done, total, label=None):
+                    if total <= 0:
+                        return
+                    fraction = min(1.0, max(0.0, float(done) / float(total)))
+                    self._update_progress_dialog(
+                        progress_dialog,
+                        45 + int(20 * fraction),
+                        f"Flattening variables {done}/{total}",
+                    )
+                    if done < total and (done % progress_step) != 0:
+                        return
+                    suffix = f": {label}" if label else ""
+                    self._set_status_message(f"Flattening variables {done}/{total}{suffix}")
+
+                try:
+                    flattened_sidecar_path = self._prepare_flattened_ugrid_sidecar(
+                        filepath,
+                        selected_variables,
+                        progress_callback=_flatten_progress,
+                    )
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not flatten morphodynamic variables, loading original mesh: {exc}",
+                    )
+            else:
+                self._update_progress_dialog(progress_dialog, 65, "Loading mesh layers")
 
             # Load mesh2d
             if has_mesh2d:
                 try:
                     self._update_progress_dialog(progress_dialog, 75, "Loading mesh2d layer")
                     self._set_status_message("Loading mesh2d layer")
-                    if partition_source_paths:
+                    if flattened_sidecar_path:
+                        # Load both original and flattened files as separate layer groups
+                        if partition_source_paths:
+                            if partition_render_mode == "raw":
+                                flattened_partition_paths = []
+                                n = len(partition_source_paths)
+                                for idx, pf in enumerate(partition_source_paths):
+                                    self._update_progress_dialog(
+                                        progress_dialog,
+                                        75 + int(10 * idx / max(n, 1)),
+                                        f"Flattening partition {idx + 1}/{n}",
+                                    )
+                                    try:
+                                        flattened_partition_paths.append(
+                                            self._prepare_flattened_ugrid_sidecar(pf, selected_variables)
+                                        )
+                                    except Exception as exc:
+                                        self.iface.messageBar().pushWarning(
+                                            "Delft3D File Manager",
+                                            f"Could not flatten {os.path.basename(pf)}, using original: {exc}",
+                                        )
+                                        flattened_partition_paths.append(pf)
+                            else:
+                                flattened_partition_paths = partition_source_paths
+
+                            self._load_partitioned_mesh2d_with_flattened_sidecars(
+                                partition_input_files,
+                                flattened_partition_paths,
+                                base_name,
+                                epsg,
+                                layer_names["mesh2d"],
+                                topology_names=mesh2d_topology_names,
+                                expect_data_variables=bool(variable_analysis["candidate_names"]),
+                            )
+                        else:
+                            # Single file with flattening: load both original and sidecar
+                            self._load_mesh2d_with_flattened_sidecar(
+                                mesh2d_source_path,
+                                flattened_sidecar_path,
+                                base_name,
+                                epsg,
+                                layer_names["mesh2d"],
+                                topology_names=mesh2d_topology_names,
+                                expect_data_variables=bool(variable_analysis["candidate_names"]),
+                            )
+                    elif partition_source_paths:
                         self._load_partitioned_mesh2d_layers(
                             partition_source_paths,
                             base_name,
@@ -5461,7 +5515,7 @@ class Delft3DFileManager:
                 with nc.Dataset(sidecar_path, "r") as sidecar_ds:
                     if str(getattr(sidecar_ds, "qgis_partition_filter_signature", "")) == signature:
                         return sidecar_path, "ok"
-            except Exception:
+            except (OSError, RuntimeError):
                 pass
 
         with nc.Dataset(source_path, "r") as source_ds:
@@ -5554,6 +5608,67 @@ class Delft3DFileManager:
             suffix += 1
         return f"{group_name}_{suffix}"
 
+    def _set_morpho_tag(self, obj, tag):
+        """Attach a lightweight morpho tag to a layer or layer-tree node."""
+        if obj is None or tag is None:
+            return
+
+        try:
+            if hasattr(obj, "setCustomProperty"):
+                obj.setCustomProperty("delft3d_tag", tag)
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _load_partitioned_mesh2d_layers_into_group(
+        self,
+        source_paths,
+        target_group,
+        base_name,
+        epsg,
+        layer_name,
+        topology_names=None,
+        expect_data_variables=False,
+        layer_tag=None,
+    ):
+        """Load partitioned mesh files into an existing layer-tree group."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+
+        loaded_layers = []
+        for idx, source_path in enumerate(source_paths, start=1):
+            partition_id = self._partition_id_from_filename(source_path)
+            if partition_id is None:
+                child_name = f"{layer_name}_{layer_tag}_part_{idx:02d}" if layer_tag else f"{layer_name}_part_{idx:02d}"
+            else:
+                child_name = f"{layer_name}_{layer_tag}_p{partition_id:04d}" if layer_tag else f"{layer_name}_p{partition_id:04d}"
+
+            mesh_layer = self._load_mesh2d_layer(
+                source_path,
+                base_name,
+                epsg,
+                child_name,
+                topology_names=topology_names,
+                expect_data_variables=expect_data_variables,
+            )
+            self._set_morpho_tag(mesh_layer, layer_tag)
+            loaded_layers.append(mesh_layer)
+
+            try:
+                node = root.findLayer(mesh_layer.id())
+                if node is not None and node.parent() is not None:
+                    cloned = node.clone()
+                    self._set_morpho_tag(cloned, layer_tag)
+                    target_group.addChildNode(cloned)
+                    node.parent().removeChildNode(node)
+            except (RuntimeError, AttributeError):
+                # Keep layer loaded even if moving to group fails.
+                pass
+
+        self._setup_partition_mesh_sync(loaded_layers)
+        return loaded_layers
+
     def _load_partitioned_mesh2d_layers(
         self,
         source_paths,
@@ -5569,36 +5684,123 @@ class Delft3DFileManager:
         project = QgsProject.instance()
         root = project.layerTreeRoot()
         group = root.addGroup(self._unique_group_name(layer_name))
+        self._load_partitioned_mesh2d_layers_into_group(
+            source_paths,
+            group,
+            base_name,
+            epsg,
+            layer_name,
+            topology_names=topology_names,
+            expect_data_variables=expect_data_variables,
+            layer_tag=None,
+        )
 
-        loaded_layers = []
-        for idx, source_path in enumerate(source_paths, start=1):
-            partition_id = self._partition_id_from_filename(source_path)
-            if partition_id is None:
-                child_name = f"{layer_name}_part_{idx:02d}"
-            else:
-                child_name = f"{layer_name}_p{partition_id:04d}"
+    def _load_partitioned_mesh2d_with_flattened_sidecars(
+        self,
+        original_paths,
+        flattened_paths,
+        base_name,
+        epsg,
+        layer_name,
+        topology_names=None,
+        expect_data_variables=False,
+    ):
+        """Load partitioned regular and flattened files into separate top-level groups."""
+        from qgis.core import QgsProject
 
-            mesh_layer = self._load_mesh2d_layer(
-                source_path,
-                base_name,
-                epsg,
-                child_name,
-                topology_names=topology_names,
-                expect_data_variables=expect_data_variables,
-            )
-            loaded_layers.append(mesh_layer)
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
 
-            try:
-                node = root.findLayer(mesh_layer.id())
-                if node is not None and node.parent() is not None:
-                    cloned = node.clone()
-                    group.addChildNode(cloned)
-                    node.parent().removeChildNode(node)
-            except Exception:
-                # Keep layer loaded even if moving to group fails.
-                pass
+        regular_group = root.addGroup(self._unique_group_name(f"{layer_name}_regular"))
+        morpho_group = root.addGroup(self._unique_group_name(f"{layer_name}_morpho"))
+        self._set_morpho_tag(morpho_group, "morpho")
 
-        self._setup_partition_mesh_sync(loaded_layers)
+        self._load_partitioned_mesh2d_layers_into_group(
+            original_paths,
+            regular_group,
+            base_name,
+            epsg,
+            layer_name,
+            topology_names=topology_names,
+            expect_data_variables=expect_data_variables,
+            layer_tag="regular",
+        )
+        self._load_partitioned_mesh2d_layers_into_group(
+            flattened_paths,
+            morpho_group,
+            base_name,
+            epsg,
+            layer_name,
+            topology_names=topology_names,
+            expect_data_variables=expect_data_variables,
+            layer_tag="morpho",
+        )
+
+    def _load_mesh2d_with_flattened_sidecar(
+        self,
+        original_path,
+        sidecar_path,
+        base_name,
+        epsg,
+        layer_name,
+        topology_names=None,
+        expect_data_variables=False,
+    ):
+        """Load original mesh and flattened sidecar as separate layer groups."""
+        from qgis.core import QgsProject
+
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        
+        # Create main group
+        main_group = root.addGroup(self._unique_group_name(layer_name))
+        self._set_morpho_tag(main_group, "morpho")
+        
+        # Load original file in "regular" subgroup
+        regular_group = main_group.addGroup("regular")
+        self._set_morpho_tag(regular_group, "regular")
+        original_layer = self._load_mesh2d_layer(
+            original_path,
+            base_name,
+            epsg,
+            f"{layer_name}_regular",
+            topology_names=topology_names,
+            expect_data_variables=expect_data_variables,
+        )
+        self._set_morpho_tag(original_layer, "regular")
+        
+        try:
+            node = root.findLayer(original_layer.id())
+            if node is not None and node.parent() is not None:
+                cloned = node.clone()
+                self._set_morpho_tag(cloned, "regular")
+                regular_group.addChildNode(cloned)
+                node.parent().removeChildNode(node)
+        except (RuntimeError, AttributeError):
+            pass
+        
+        # Load sidecar file in "morpho" subgroup
+        morpho_group = main_group.addGroup("morpho")
+        self._set_morpho_tag(morpho_group, "morpho")
+        morpho_layer = self._load_mesh2d_layer(
+            sidecar_path,
+            base_name,
+            epsg,
+            f"{layer_name}_morpho",
+            topology_names=topology_names,
+            expect_data_variables=expect_data_variables,
+        )
+        self._set_morpho_tag(morpho_layer, "morpho")
+        
+        try:
+            node = root.findLayer(morpho_layer.id())
+            if node is not None and node.parent() is not None:
+                cloned = node.clone()
+                self._set_morpho_tag(cloned, "morpho")
+                morpho_group.addChildNode(cloned)
+                node.parent().removeChildNode(node)
+        except (RuntimeError, AttributeError):
+            pass
 
     def _setup_partition_mesh_sync(self, mesh_layers):
         """Best-effort synchronization of dataset-group and renderer settings across partition layers."""
@@ -5643,13 +5845,13 @@ class Delft3DFileManager:
                     try:
                         if scalar_group is not None and hasattr(target_layer, "setActiveScalarDatasetGroup"):
                             target_layer.setActiveScalarDatasetGroup(int(scalar_group))
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
 
                     try:
                         if vector_group is not None and hasattr(target_layer, "setActiveVectorDatasetGroup"):
                             target_layer.setActiveVectorDatasetGroup(int(vector_group))
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
 
                     try:
@@ -5657,7 +5859,7 @@ class Delft3DFileManager:
                             target_layer.setRendererSettings(renderer_settings)
                             if hasattr(target_layer, "triggerRepaint"):
                                 target_layer.triggerRepaint()
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
             finally:
                 session["updating"] = False
@@ -5766,7 +5968,7 @@ class Delft3DFileManager:
                 topology_dimension = int(getattr(variable, "topology_dimension", -1))
                 if cf_role == "mesh_topology" and topology_dimension == 2:
                     names.append(variable_name)
-            except Exception:
+            except (AttributeError, ValueError):
                 continue
 
         for fallback_name in ("Mesh2d", "mesh2d"):
@@ -5802,7 +6004,7 @@ class Delft3DFileManager:
     def _analyze_ugrid_data_variables(self, nc_dataset):
         """Return selectable data variables and whether any require flattening."""
         candidate_names = []
-        default_selected = []
+        flattenable_names = []
         has_morphodynamic = False
 
         for name, variable in nc_dataset.variables.items():
@@ -5814,11 +6016,12 @@ class Delft3DFileManager:
             candidate_names.append(name)
             if self._variable_has_extra_dimensions(variable.dimensions):
                 has_morphodynamic = True
-                default_selected.append(name)
+                flattenable_names.append(name)
 
         return {
             "candidate_names": sorted(candidate_names),
-            "default_selected": sorted(default_selected),
+            "flattenable_names": sorted(flattenable_names),
+            "default_selected": sorted(flattenable_names),
             "has_morphodynamic": has_morphodynamic,
         }
 
@@ -5866,7 +6069,7 @@ class Delft3DFileManager:
             cf_role = str(getattr(variable, "cf_role", "")).strip().lower()
             if cf_role == "mesh_topology":
                 return True
-        except Exception:
+        except AttributeError:
             pass
 
         return False
@@ -5935,38 +6138,47 @@ class Delft3DFileManager:
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel("Select data variables to include in the flattened file:"))
 
+        # Qt6 moved flag/state enums into sub-namespaces; fall back gracefully.
+        _item_checkable = getattr(Qt, "ItemIsUserCheckable", None) or getattr(getattr(Qt, "ItemFlag", None), "ItemIsUserCheckable", None)
+        _checked = getattr(Qt, "Checked", None) or getattr(getattr(Qt, "CheckState", None), "Checked", None)
+        _unchecked = getattr(Qt, "Unchecked", None) or getattr(getattr(Qt, "CheckState", None), "Unchecked", None)
+        _ok = getattr(QDialogButtonBox, "Ok", None) or getattr(getattr(QDialogButtonBox, "StandardButton", None), "Ok", None)
+        _cancel = getattr(QDialogButtonBox, "Cancel", None) or getattr(getattr(QDialogButtonBox, "StandardButton", None), "Cancel", None)
+        _action_role = getattr(QDialogButtonBox, "ActionRole", None) or getattr(getattr(QDialogButtonBox, "ButtonRole", None), "ActionRole", None)
+        _dlg_accepted = getattr(QDialog, "Accepted", None) or getattr(getattr(QDialog, "DialogCode", None), "Accepted", None)
+
         list_widget = QListWidget(dialog)
         for name in candidate_names:
             item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setFlags(item.flags() | _item_checkable)
             if name in default_set:
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(_checked)
             else:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(_unchecked)
             list_widget.addItem(item)
         layout.addWidget(list_widget)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
-        select_all_button = buttons.addButton("Select all", QDialogButtonBox.ActionRole)
-        unselect_all_button = buttons.addButton("Unselect all", QDialogButtonBox.ActionRole)
+        buttons = QDialogButtonBox(_ok | _cancel, parent=dialog)
+        select_all_button = buttons.addButton("Select all", _action_role)
+        unselect_all_button = buttons.addButton("Unselect all", _action_role)
 
         def _set_all_checks(state):
             for row in range(list_widget.count()):
                 list_widget.item(row).setCheckState(state)
 
-        select_all_button.clicked.connect(lambda: _set_all_checks(Qt.Checked))
-        unselect_all_button.clicked.connect(lambda: _set_all_checks(Qt.Unchecked))
+        select_all_button.clicked.connect(lambda: _set_all_checks(_checked))
+        unselect_all_button.clicked.connect(lambda: _set_all_checks(_unchecked))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if _dialog_exec(dialog) != QDialog.Accepted:
+        if _dialog_exec(dialog) != _dlg_accepted:
             return None
 
         selected = []
         for row in range(list_widget.count()):
             item = list_widget.item(row)
-            if item.checkState() == Qt.Checked:
+            if item.checkState() == _checked:
                 selected.append(item.text())
 
         return selected
@@ -5995,7 +6207,7 @@ class Delft3DFileManager:
                         if progress_callback is not None:
                             progress_callback(len(selected_variables), len(selected_variables), "reuse")
                         return sidecar_path
-            except Exception:
+            except (OSError, RuntimeError):
                 pass
 
         with nc.Dataset(source_path, "r") as source_ds, nc.Dataset(sidecar_path, "w", format="NETCDF4") as sidecar_ds:
@@ -6084,7 +6296,7 @@ class Delft3DFileManager:
                         "edge_face_connectivity",
                     ):
                         required_variable_names.add(var_name)
-                except Exception:
+                except AttributeError:
                     pass
 
             for selected_name in selected_variables:
@@ -6455,13 +6667,13 @@ class Delft3DFileManager:
                 provider = layer.dataProvider()
                 if provider is not None and hasattr(provider, "datasetGroupCount"):
                     return int(provider.datasetGroupCount())
-            except Exception:
+            except (AttributeError, RuntimeError):
                 pass
 
             try:
                 if hasattr(layer, "datasetGroupCount"):
                     return int(layer.datasetGroupCount())
-            except Exception:
+            except (AttributeError, RuntimeError):
                 pass
 
             return None
@@ -6479,7 +6691,7 @@ class Delft3DFileManager:
             try:
                 if layer.meshFaceCount() > 0:
                     has_geometry = True
-            except Exception:
+            except (AttributeError, RuntimeError):
                 pass
 
             if not has_geometry:
@@ -6521,12 +6733,12 @@ class Delft3DFileManager:
                 delete_later = getattr(layer, "deleteLater", None)
                 if callable(delete_later):
                     delete_later()
-            except Exception:
+            except (RuntimeError, AttributeError):
                 pass
 
             try:
                 QApplication.processEvents()
-            except Exception:
+            except (RuntimeError, AttributeError):
                 pass
 
         # Prefer explicit topology URIs first and keep retries minimal.
@@ -6852,7 +7064,7 @@ class Delft3DFileManager:
                 # Try attribute access (for regular objects)
                 if hasattr(data_source, attr):
                     available_keys.add(attr)
-            except Exception:
+            except (AttributeError, TypeError):
                 pass
         
         if not required_fields.issubset(available_keys):
@@ -7803,7 +8015,7 @@ class Delft3DFileManager:
                 match = re.search(r"(\d+)$", authid)
                 if match:
                     epsg = int(match.group(1))
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
         for feature in branch_layer.getFeatures():
@@ -8011,7 +8223,7 @@ class Delft3DFileManager:
             crs = source_layer.crs()
             if crs is not None and crs.isValid() and crs.authid():
                 crs_authid = crs.authid()
-        except Exception:
+        except (AttributeError, RuntimeError):
             pass
 
         layer_name = f"{source_layer.name()}_special_points_diagnostics"
@@ -9145,6 +9357,10 @@ class Delft3DFileManager:
 
     def _run_pip_install(self, packages):
         """Run pip install in QGIS Python; bootstrap pip if missing."""
+        allowed = set(self._required_packages)
+        unexpected = [p for p in packages if p not in allowed]
+        if unexpected:
+            raise ValueError(f"Refusing to install unlisted package(s): {unexpected!r}")
         python_exe = self._get_python_executable_for_pip()
         cmd = [python_exe, "-m", "pip", "install"] + list(packages)
         result = subprocess.run(cmd, capture_output=True, text=True)
