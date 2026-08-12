@@ -15,6 +15,30 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+
+def _qt_color(name):
+    """Return Qt color enum value across Qt5/Qt6."""
+    value = getattr(Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(Qt, "GlobalColor", None), name, None)
+
+
+def _qt_alignment_flag(name):
+    """Return Qt alignment enum value across Qt5/Qt6."""
+    value = getattr(Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(Qt, "AlignmentFlag", None), name, None)
+
+
+def _qpainter_render_hint(name):
+    """Return QPainter render hint enum value across Qt5/Qt6."""
+    value = getattr(QPainter, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QPainter, "RenderHint", None), name, None)
+
 try:
     try:
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -66,10 +90,10 @@ class _ProfileChartWidget(QWidget):
         del event
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(_qpainter_render_hint("Antialiasing"), True)
 
         rect = self.rect()
-        painter.fillRect(rect, Qt.white)
+        painter.fillRect(rect, _qt_color("white"))
 
         margin_left = 52
         margin_right = 20
@@ -84,18 +108,18 @@ class _ProfileChartWidget(QWidget):
         if plot_right <= plot_left or plot_bottom <= plot_top:
             return
 
-        painter.setPen(QPen(Qt.gray, 1))
+        painter.setPen(QPen(_qt_color("gray"), 1))
         painter.drawRect(plot_left, plot_top, plot_right - plot_left, plot_bottom - plot_top)
 
         if not self._points:
-            painter.setPen(QPen(Qt.darkGray, 1))
+            painter.setPen(QPen(_qt_color("darkGray"), 1))
             text = self._message or "No profile available."
             painter.drawText(
                 plot_left,
                 plot_top,
                 plot_right - plot_left,
                 plot_bottom - plot_top,
-                Qt.AlignCenter,
+                _qt_alignment_flag("AlignCenter"),
                 text,
             )
             return
@@ -121,11 +145,11 @@ class _ProfileChartWidget(QWidget):
         def _map_y(y_val):
             return plot_bottom - (y_val - y_min) * (plot_bottom - plot_top) / (y_max - y_min)
 
-        painter.setPen(QPen(Qt.black, 1))
+        painter.setPen(QPen(_qt_color("black"), 1))
         painter.drawLine(plot_left, plot_bottom, plot_right, plot_bottom)
         painter.drawLine(plot_left, plot_top, plot_left, plot_bottom)
 
-        painter.setPen(QPen(Qt.darkGreen, 2))
+        painter.setPen(QPen(_qt_color("darkGreen"), 2))
         for idx in range(1, len(self._points)):
             x0 = _map_x(self._points[idx - 1][0])
             y0 = _map_y(self._points[idx - 1][1] * self._vertical_exaggeration)
@@ -133,7 +157,7 @@ class _ProfileChartWidget(QWidget):
             y1 = _map_y(self._points[idx][1] * self._vertical_exaggeration)
             painter.drawLine(int(x0), int(y0), int(x1), int(y1))
 
-        painter.setPen(QPen(Qt.darkGray, 1))
+        painter.setPen(QPen(_qt_color("darkGray"), 1))
         painter.drawText(plot_left, plot_bottom + 20, self._x_axis_label)
         painter.save()
         painter.translate(plot_left - 28, plot_top + (plot_bottom - plot_top) / 2)

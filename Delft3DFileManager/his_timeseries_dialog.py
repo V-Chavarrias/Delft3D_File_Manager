@@ -14,6 +14,14 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+
+def _qt_alignment_flag(name):
+    """Return Qt alignment enum value across Qt5/Qt6."""
+    value = getattr(Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(Qt, "AlignmentFlag", None), name, None)
+
 try:
     try:
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -98,7 +106,9 @@ class _FallbackChartWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._label = QLabel("Matplotlib is not available in this environment.")
-        self._label.setAlignment(Qt.AlignCenter)
+        align_center = _qt_alignment_flag("AlignCenter")
+        if align_center is not None:
+            self._label.setAlignment(align_center)
         layout = QVBoxLayout(self)
         layout.addWidget(self._label)
 
@@ -128,6 +138,14 @@ def _qsizepolicy_value(name):
     if value is not None:
         return value
     return getattr(getattr(QSizePolicy, "Policy", None), name, None)
+
+
+def _qt_alignment_flag(name):
+    """Return Qt alignment enum value across Qt5/Qt6."""
+    value = getattr(Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(Qt, "AlignmentFlag", None), name, None)
 
 
 class HisTimeseriesDialog(QDialog):

@@ -75,6 +75,54 @@ def _dialog_exec(dialog) -> int:
     raise AttributeError("Dialog object has neither exec nor exec_ method")
 
 
+def _qt_alignment_flag(name):
+    """Return Qt alignment enum value across Qt5/Qt6."""
+    value = getattr(Qt, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(Qt, "AlignmentFlag", None), name, None)
+
+
+def _qdialogbuttonbox_role(name):
+    """Return QDialogButtonBox button role enum across Qt5/Qt6."""
+    value = getattr(QDialogButtonBox, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QDialogButtonBox, "ButtonRole", None), name, None)
+
+
+def _qdialogbuttonbox_standard_button(name):
+    """Return QDialogButtonBox standard button enum across Qt5/Qt6."""
+    value = getattr(QDialogButtonBox, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QDialogButtonBox, "StandardButton", None), name, None)
+
+
+def _qfiledialog_file_mode(name):
+    """Return QFileDialog file mode enum across Qt5/Qt6."""
+    value = getattr(QFileDialog, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QFileDialog, "FileMode", None), name, None)
+
+
+def _qfiledialog_option(name):
+    """Return QFileDialog option enum across Qt5/Qt6."""
+    value = getattr(QFileDialog, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QFileDialog, "Option", None), name, None)
+
+
+def _qgs_geometry_type(name):
+    """Return QgsWkbTypes geometry enum across QGIS 3/4."""
+    value = getattr(QgsWkbTypes, name, None)
+    if value is not None:
+        return value
+    return getattr(getattr(QgsWkbTypes, "GeometryType", None), name, None)
+
+
 # ---------------------------------------------------------------------------
 # Worker thread
 # ---------------------------------------------------------------------------
@@ -290,14 +338,24 @@ class BedLevelDialog(QDialog):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
         self.status_label = QLabel("")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        align_center = _qt_alignment_flag("AlignCenter")
+        if align_center is not None:
+            self.status_label.setAlignment(align_center)
         main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(self.status_label)
 
         # ── Buttons ───────────────────────────────────────────────────
         btn_box = QDialogButtonBox()
-        self.run_btn = btn_box.addButton("Run", QDialogButtonBox.AcceptRole)
-        btn_box.addButton(QDialogButtonBox.Close)
+        accept_role = _qdialogbuttonbox_role("AcceptRole")
+        close_button = _qdialogbuttonbox_standard_button("Close")
+        if accept_role is not None:
+            self.run_btn = btn_box.addButton("Run", accept_role)
+        else:
+            self.run_btn = btn_box.addButton("Run")
+        if close_button is not None:
+            btn_box.addButton(close_button)
+        else:
+            btn_box.addButton("Close", _qdialogbuttonbox_role("RejectRole"))
         btn_box.rejected.connect(self.reject)
         self.run_btn.clicked.connect(self._on_run)
         main_layout.addWidget(btn_box)
@@ -515,8 +573,8 @@ class BedLevelDialog(QDialog):
                 raster_layers.append(layer)
             elif isinstance(layer, QgsVectorLayer):
                 if layer.geometryType() in (
-                    QgsWkbTypes.PointGeometry,
-                    QgsWkbTypes.UnknownGeometry,
+                    _qgs_geometry_type("PointGeometry"),
+                    _qgs_geometry_type("UnknownGeometry"),
                 ):
                     vector_layers.append(layer)
 
@@ -539,9 +597,13 @@ class BedLevelDialog(QDialog):
 
     def _browse_mesh_file(self):
         dlg = QFileDialog(self, "Select UGRID mesh file")
-        dlg.setFileMode(QFileDialog.ExistingFile)
+        existing_file = _qfiledialog_file_mode("ExistingFile")
+        if existing_file is not None:
+            dlg.setFileMode(existing_file)
         dlg.setNameFilter("NetCDF files (*.nc *.nc4);;All files (*)")
-        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        dont_use_native = _qfiledialog_option("DontUseNativeDialog")
+        if dont_use_native is not None:
+            dlg.setOption(dont_use_native, True)
         path = ""
         if _dialog_exec(dlg):
             selected = dlg.selectedFiles()
@@ -553,9 +615,13 @@ class BedLevelDialog(QDialog):
 
     def _browse_source_file(self):
         dlg = QFileDialog(self, "Select source elevation file")
-        dlg.setFileMode(QFileDialog.ExistingFile)
+        existing_file = _qfiledialog_file_mode("ExistingFile")
+        if existing_file is not None:
+            dlg.setFileMode(existing_file)
         dlg.setNameFilter("NetCDF files (*.nc *.nc4);;All files (*)")
-        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        dont_use_native = _qfiledialog_option("DontUseNativeDialog")
+        if dont_use_native is not None:
+            dlg.setOption(dont_use_native, True)
         path = ""
         if _dialog_exec(dlg):
             selected = dlg.selectedFiles()
