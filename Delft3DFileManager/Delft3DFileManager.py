@@ -654,7 +654,7 @@ class Delft3DFileManager:
         """Return True when layer appears to be an imported FM cross-section point layer."""
         if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
             return False
-        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+        if layer.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
             return False
 
         field_lookup = self._field_name_map(layer)
@@ -1017,7 +1017,9 @@ class Delft3DFileManager:
         expected_obs_type = "station" if scope == "station" else "cross_section"
 
         expected_geometry = (
-            QgsWkbTypes.PointGeometry if expected_obs_type == "station" else QgsWkbTypes.LineGeometry
+            QgsWkbTypes.GeometryType.PointGeometry
+            if expected_obs_type == "station"
+            else QgsWkbTypes.GeometryType.LineGeometry
         )
         if layer.geometryType() != expected_geometry:
             geometry_name = "point" if expected_obs_type == "station" else "line"
@@ -3718,7 +3720,7 @@ class Delft3DFileManager:
             )
             return
 
-        if layer.geometryType() != QgsWkbTypes.LineGeometry:
+        if layer.geometryType() != QgsWkbTypes.GeometryType.LineGeometry:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 "Active layer must contain line geometries"
@@ -3808,11 +3810,11 @@ class Delft3DFileManager:
             )
             return
 
-        if layer.geometryType() == QgsWkbTypes.LineGeometry:
+        if layer.geometryType() == QgsWkbTypes.GeometryType.LineGeometry:
             self.export_lines()
             return
 
-        if layer.geometryType() == QgsWkbTypes.PointGeometry:
+        if layer.geometryType() == QgsWkbTypes.GeometryType.PointGeometry:
             if self._is_fixed_weir_point_layer(layer):
                 self.export_fixed_weir_pliz(layer)
             elif self._is_bridge_point_layer(layer):
@@ -4035,7 +4037,7 @@ class Delft3DFileManager:
             for layer in selected_layers
             if layer is not None
             and layer.type() == QgsMapLayerType.VectorLayer
-            and layer.geometryType() == QgsWkbTypes.LineGeometry
+            and layer.geometryType() == QgsWkbTypes.GeometryType.LineGeometry
         ]
         return valid_selected
 
@@ -4045,7 +4047,7 @@ class Delft3DFileManager:
             try:
                 if layer.type() != QgsMapLayerType.VectorLayer:
                     continue
-                if layer.geometryType() != QgsWkbTypes.PointGeometry:
+                if layer.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
                     continue
             except (AttributeError, RuntimeError):
                 continue
@@ -4211,7 +4213,7 @@ class Delft3DFileManager:
             )
             return
 
-        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+        if layer.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 "Active layer must contain point geometries",
@@ -4458,7 +4460,7 @@ class Delft3DFileManager:
                 if non_modal is not None:
                     dialog.setWindowModality(non_modal)
             else:
-                dialog.setWindowModality(Qt.WindowModal)
+                dialog.setWindowModality(Qt.WindowModality.WindowModal)
             dialog.setValue(0)
             dialog.show()
             self._active_progress_dialog = dialog
@@ -7454,7 +7456,7 @@ class Delft3DFileManager:
             )
             return
 
-        if line_layer.geometryType() != QgsWkbTypes.LineGeometry:
+        if line_layer.geometryType() != QgsWkbTypes.GeometryType.LineGeometry:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -7508,7 +7510,7 @@ class Delft3DFileManager:
             )
             return
 
-        if line_layer.geometryType() != QgsWkbTypes.LineGeometry:
+        if line_layer.geometryType() != QgsWkbTypes.GeometryType.LineGeometry:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -7563,7 +7565,7 @@ class Delft3DFileManager:
         branch_layer = self._select_vector_layer_by_geometry(
             title="Create 1D Network",
             prompt="Select branch polyline layer:",
-            geometry_type=QgsWkbTypes.LineGeometry,
+            geometry_type=QgsWkbTypes.GeometryType.LineGeometry,
             allow_none=False,
         )
         if branch_layer is None:
@@ -7603,7 +7605,7 @@ class Delft3DFileManager:
         geometry_nodes_layer = self._select_vector_layer_by_geometry(
             title="Create 1D Network",
             prompt="Select geometry nodes point layer:",
-            geometry_type=QgsWkbTypes.PointGeometry,
+            geometry_type=QgsWkbTypes.GeometryType.PointGeometry,
             allow_none=False,
         )
         if geometry_nodes_layer is None:
@@ -7646,7 +7648,7 @@ class Delft3DFileManager:
         special_layer = self._select_vector_layer_by_geometry(
             title="Create 1D Network",
             prompt="Optional structures points layer:",
-            geometry_type=QgsWkbTypes.PointGeometry,
+            geometry_type=QgsWkbTypes.GeometryType.PointGeometry,
             allow_none=True,
         )
         if special_layer is False:
@@ -7764,12 +7766,12 @@ class Delft3DFileManager:
         """Create a 1D network from file paths and write NetCDF and log outputs."""
         branch_layer = self._load_vector_layer_from_path(
             branch_layer_path,
-            QgsWkbTypes.LineGeometry,
+            QgsWkbTypes.GeometryType.LineGeometry,
             "branch",
         )
         geometry_nodes_layer = self._load_vector_layer_from_path(
             geometry_nodes_layer_path,
-            QgsWkbTypes.PointGeometry,
+            QgsWkbTypes.GeometryType.PointGeometry,
             "geometry nodes",
         )
 
@@ -7777,7 +7779,7 @@ class Delft3DFileManager:
         if structures_layer_path:
             structures_layer = self._load_vector_layer_from_path(
                 structures_layer_path,
-                QgsWkbTypes.PointGeometry,
+                QgsWkbTypes.GeometryType.PointGeometry,
                 "structures",
             )
 
@@ -9036,7 +9038,7 @@ class Delft3DFileManager:
                 "Select a trachytopes point layer as active layer first.",
             )
             return
-        if point_layer.geometryType() != QgsWkbTypes.PointGeometry:
+        if point_layer.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -9060,7 +9062,7 @@ class Delft3DFileManager:
             layer
             for layer in QgsProject.instance().mapLayers().values()
             if isinstance(layer, QgsVectorLayer)
-            and layer.geometryType() == QgsWkbTypes.PolygonGeometry
+            and layer.geometryType() == QgsWkbTypes.GeometryType.PolygonGeometry
         ]
         if not polygon_layers:
             QMessageBox.warning(
@@ -9205,7 +9207,7 @@ class Delft3DFileManager:
                 "Select a trachytopes point layer first.",
             )
             return
-        if layer.geometryType() != QgsWkbTypes.PointGeometry:
+        if layer.geometryType() != QgsWkbTypes.GeometryType.PointGeometry:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -9313,13 +9315,13 @@ class Delft3DFileManager:
             "This will run pip in the QGIS Python environment to install:\n"
             "- netCDF4\n- pyproj\n- scipy\n- defusedxml\n\n"
             "Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             missing = []
             for package in self._required_packages:

@@ -140,14 +140,6 @@ def _qsizepolicy_value(name):
     return getattr(getattr(QSizePolicy, "Policy", None), name, None)
 
 
-def _qt_alignment_flag(name):
-    """Return Qt alignment enum value across Qt5/Qt6."""
-    value = getattr(Qt, name, None)
-    if value is not None:
-        return value
-    return getattr(getattr(Qt, "AlignmentFlag", None), name, None)
-
-
 class HisTimeseriesDialog(QDialog):
     """Timeseries explorer driven by active selection and variable dropdowns."""
 

@@ -21,7 +21,7 @@ def _make_layer(name="line_layer"):
     """Return a mock layer that passes the export_lines() type/geometry checks."""
     layer = MagicMock()
     layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     layer.name.return_value = name
     field = MagicMock()
     field.name.return_value = "weir_name"

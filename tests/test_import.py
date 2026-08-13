@@ -687,7 +687,7 @@ def test_route_unknown(plugin):
 def test_export_active_layer_uses_bridge_export_for_bridge_point_layer(plugin):
     point_layer = MagicMock()
     point_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    point_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    point_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.PointGeometry
     plugin.iface.activeLayer.return_value = point_layer
 
     with patch.object(plugin, "_is_fixed_weir_point_layer", return_value=False), \
@@ -703,7 +703,7 @@ def test_export_active_layer_uses_bridge_export_for_bridge_point_layer(plugin):
 def test_export_active_layer_line_layer_uses_polyline_export(plugin):
     line_layer = MagicMock()
     line_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     plugin.iface.activeLayer.return_value = line_layer
 
     with patch.object(plugin, "export_bridge_pliz") as bridge_export_mock, \
@@ -717,7 +717,7 @@ def test_export_active_layer_line_layer_uses_polyline_export(plugin):
 def test_export_active_layer_falls_back_to_line_export_without_bridge_companion(plugin):
     line_layer = MagicMock()
     line_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     plugin.iface.activeLayer.return_value = line_layer
 
     with patch.object(plugin, "export_bridge_pliz") as bridge_export_mock, \
@@ -731,7 +731,7 @@ def test_export_active_layer_falls_back_to_line_export_without_bridge_companion(
 def test_create_bridge_points_from_polyline_requires_line_layer(plugin):
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.PointGeometry
     plugin.iface.activeLayer.return_value = active_layer
 
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
@@ -743,7 +743,7 @@ def test_create_bridge_points_from_polyline_requires_line_layer(plugin):
 def test_create_bridge_points_from_polyline_cancelled_dialog(plugin):
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     plugin.iface.activeLayer.return_value = active_layer
 
     add_map_layer = _add_map_layer_mock()
@@ -764,7 +764,7 @@ def test_create_bridge_points_from_polyline_creates_points(plugin):
 
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     active_layer.getFeatures.return_value = [feature]
     active_layer.name.return_value = "bridges"
     active_layer.crs.return_value.isValid.return_value = False
@@ -804,7 +804,7 @@ def test_create_bridge_points_from_polyline_creates_points(plugin):
 def test_create_fixed_weir_points_from_polyline_requires_line_layer(plugin):
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.PointGeometry
     plugin.iface.activeLayer.return_value = active_layer
 
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
@@ -816,7 +816,7 @@ def test_create_fixed_weir_points_from_polyline_requires_line_layer(plugin):
 def test_create_fixed_weir_points_from_polyline_cancelled_dialog(plugin):
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     plugin.iface.activeLayer.return_value = active_layer
 
     add_map_layer = _add_map_layer_mock()
@@ -837,7 +837,7 @@ def test_create_fixed_weir_points_from_polyline_creates_points(plugin):
 
     active_layer = MagicMock()
     active_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    active_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     active_layer.getFeatures.return_value = [feature]
     active_layer.name.return_value = "weirs"
     active_layer.crs.return_value.isValid.return_value = False
@@ -898,7 +898,7 @@ def test_export_bridge_pliz_from_selected_layers(plugin, tmp_path):
 
     line_layer = MagicMock()
     line_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.LineGeometry
+    line_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.LineGeometry
     line_layer.name.return_value = "bridges"
 
     line_feature = MagicMock()
@@ -917,7 +917,7 @@ def test_export_bridge_pliz_from_selected_layers(plugin, tmp_path):
     point_layer = MagicMock()
     point_layer.name.return_value = "bridges_points"
     point_layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
-    point_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.PointGeometry
+    point_layer.geometryType.return_value = _qgis_core.QgsWkbTypes.GeometryType.PointGeometry
     point_layer.fields.return_value = [
         SimpleNamespace(name=lambda: "bridge_name"),
         SimpleNamespace(name=lambda: "width"),
@@ -2672,7 +2672,7 @@ class _FakeLayer:
         return _qgis_core.QgsMapLayerType.VectorLayer
 
     def geometryType(self):
-        return _qgis_core.QgsWkbTypes.PointGeometry
+        return _qgis_core.QgsWkbTypes.GeometryType.PointGeometry
 
     def fields(self):
         return self._fields
