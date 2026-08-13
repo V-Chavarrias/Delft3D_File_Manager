@@ -544,8 +544,15 @@ UGRID mesh nodes (for example writing to `mesh2d_node_z`).
 - Mean of points in dual cell
 
 For each mesh node, the plugin builds the node dual cell and computes the mean
-of source points inside that polygon. If no point is inside the dual cell,
-that mesh node is left unchanged.
+of source points inside that polygon.
+
+### Outside Coverage
+When no point is inside a node's dual cell, choose one of these options:
+- Preserve existing value (default): leave the mesh node unchanged.
+- Closest source value: write the value of the nearest finite source point.
+- Linear extrapolation: fit a local plane through nearby source points and
+	evaluate it at the mesh node. If a plane cannot be determined, the closest
+	source value is used.
 
 ### Output Behavior
 - If `Output mesh` is empty: the selected mesh file is updated in place.

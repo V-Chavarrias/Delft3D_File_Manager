@@ -47,6 +47,7 @@ from qgis.core import (
 
 from .bed_level_interpolator import (
     INTERP_METHODS,
+    OUTSIDE_POLICIES,
     auto_detect_mesh_info,
     list_source_variables,
     load_source_netcdf,
@@ -144,6 +145,7 @@ class _InterpolationWorker(QThread):
         source_z: np.ndarray,
         mesh_epsg: Optional[int],
         source_epsg: int,
+        outside_policy: str,
         parent=None,
     ):
         super().__init__(parent)
@@ -155,6 +157,7 @@ class _InterpolationWorker(QThread):
         self._source_z = source_z
         self._mesh_epsg = mesh_epsg
         self._source_epsg = source_epsg
+        self._outside_policy = outside_policy
 
     def run(self):
         try:
@@ -168,6 +171,7 @@ class _InterpolationWorker(QThread):
                 mesh_epsg=self._mesh_epsg,
                 source_epsg=self._source_epsg,
                 progress_callback=lambda cur, tot: self.progress.emit(cur, tot),
+                outside_policy=self._outside_policy,
             )
             self.finished.emit(count)
         except Exception:  # noqa: BLE001
@@ -314,6 +318,10 @@ class BedLevelDialog(QDialog):
         for key, label in INTERP_METHODS.items():
             self.combo_method.addItem(label, key)
         method_form.addRow("Method:", self.combo_method)
+        self.combo_outside_policy = QComboBox()
+        for key, label in OUTSIDE_POLICIES.items():
+            self.combo_outside_policy.addItem(label, key)
+        method_form.addRow("Outside coverage:", self.combo_outside_policy)
         main_layout.addWidget(method_group)
 
         # ── Dependency status ────────────────────────────────────────
@@ -875,6 +883,7 @@ class BedLevelDialog(QDialog):
             return
 
         method_key = self.combo_method.currentData()
+    outside_policy = self.combo_outside_policy.currentData()
         input_mesh_path = self.mesh_path_edit.text().strip()
         output_mesh_path = self.output_mesh_edit.text().strip()
         mesh_path = input_mesh_path
@@ -912,6 +921,7 @@ class BedLevelDialog(QDialog):
             source_z=sz,
             mesh_epsg=mesh_epsg,
             source_epsg=source_epsg,
+            outside_policy=outside_policy,
             parent=self,
         )
         self._worker.progress.connect(self._on_progress)

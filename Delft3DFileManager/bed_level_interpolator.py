@@ -33,6 +33,12 @@ INTERP_METHODS: Dict[str, str] = {
     "dual_mean": "Mean of points in dual cell",
 }
 
+OUTSIDE_POLICIES: Dict[str, str] = {
+    "preserve": "Preserve existing value",
+    "closest": "Closest source value",
+    "extrapolate": "Linear extrapolation",
+}
+
 
 # ---------------------------------------------------------------------------
 # UGRID auto-detection helpers
@@ -351,6 +357,59 @@ def _points_in_polygon(
 # Main interpolation entry point
 # ---------------------------------------------------------------------------
 
+def _nearest_source_indices(
+    source_x: np.ndarray,
+    source_y: np.ndarray,
+    target_x: float,
+    target_y: float,
+    count: int,
+    source_tree=None,
+) -> np.ndarray:
+    """Return indices of the nearest source points to a target coordinate."""
+    count = min(count, len(source_x))
+    if source_tree is not None:
+        _, indices = source_tree.query([target_x, target_y], k=count)
+        return np.atleast_1d(indices).astype(int)
+
+    distances_squared = (source_x - target_x) ** 2 + (source_y - target_y) ** 2
+    return np.argsort(distances_squared)[:count]
+
+
+def _outside_coverage_value(
+    policy: str,
+    source_x: np.ndarray,
+    source_y: np.ndarray,
+    source_z: np.ndarray,
+    target_x: float,
+    target_y: float,
+    source_tree=None,
+) -> float:
+    """Return a fallback source value for a node outside source coverage."""
+    nearest_index = _nearest_source_indices(
+        source_x, source_y, target_x, target_y, 1, source_tree
+    )[0]
+    closest_value = float(source_z[nearest_index])
+    if policy == "closest":
+        return closest_value
+
+    indices = _nearest_source_indices(
+        source_x, source_y, target_x, target_y, 8, source_tree
+    )
+    if len(indices) < 3:
+        return closest_value
+
+    samples_x = source_x[indices]
+    samples_y = source_y[indices]
+    samples_z = source_z[indices]
+    design_matrix = np.column_stack([samples_x, samples_y, np.ones(len(indices))])
+    coefficients, _, rank, _ = np.linalg.lstsq(design_matrix, samples_z, rcond=None)
+    if rank == 3:
+        value = float(coefficients[0] * target_x + coefficients[1] * target_y + coefficients[2])
+        if np.isfinite(value):
+            return value
+
+    return closest_value
+
 def interpolate_dual_mean(
     mesh_path: str,
     z_var_name: str,
@@ -360,12 +419,14 @@ def interpolate_dual_mean(
     mesh_epsg: Optional[int],
     source_epsg: int = 4326,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    outside_policy: str = "preserve",
 ) -> int:
     """Write bed level to a UGRID mesh using the *mean of points in dual cell*
     interpolation method.
 
-    Only nodes whose dual cell contains at least one source point are updated;
-    all other nodes retain their existing values in the mesh file.
+    Nodes whose dual cell contains at least one source point receive its mean.
+    For uncovered nodes, ``outside_policy`` determines whether to preserve the
+    existing value, use the closest source value, or linearly extrapolate.
 
     Parameters
     ----------
@@ -384,6 +445,11 @@ def interpolate_dual_mean(
     progress_callback:
         Optional ``callable(current_node: int, total_nodes: int)`` invoked
         after every node is processed.
+    outside_policy:
+        ``"preserve"`` leaves uncovered nodes unchanged, ``"closest"`` uses
+        the nearest source value, and ``"extrapolate"`` fits a local plane to
+        nearby source samples. Extrapolation falls back to the closest value
+        when the samples cannot define a plane.
 
     Returns
     -------
@@ -391,6 +457,9 @@ def interpolate_dual_mean(
         Number of mesh nodes whose elevation was updated.
     """
     import netCDF4 as nc
+
+    if outside_policy not in OUTSIDE_POLICIES:
+        raise ValueError(f"Unknown outside coverage policy: '{outside_policy}'")
 
     # ------------------------------------------------------------------
     # 1. Open mesh file
@@ -461,9 +530,10 @@ def interpolate_dual_mean(
             & (sy >= node_y.min() - buf)
             & (sy <= node_y.max() + buf)
         )
-        sx, sy, sz = sx[in_bbox], sy[in_bbox], sz[in_bbox]
-        if len(sz) == 0:
-            return 0
+        if outside_policy == "preserve":
+            sx, sy, sz = sx[in_bbox], sy[in_bbox], sz[in_bbox]
+            if len(sz) == 0:
+                return 0
 
         # ------------------------------------------------------------------
         # 4. Optional KD-tree spatial index on filtered source points
@@ -516,10 +586,6 @@ def interpolate_dual_mean(
                 candidates = source_tree.query_ball_point(
                     [node_x[ni], node_y[ni]], r
                 )
-                if not candidates:
-                    if progress_callback:
-                        progress_callback(ni + 1, nNodes)
-                    continue
                 cx_cand = sx[candidates]
                 cy_cand = sy[candidates]
                 cz_cand = sz[candidates]
@@ -533,10 +599,6 @@ def interpolate_dual_mean(
                     & (sy >= ybb_min)
                     & (sy <= ybb_max)
                 )
-                if not mask.any():
-                    if progress_callback:
-                        progress_callback(ni + 1, nNodes)
-                    continue
                 cx_cand = sx[mask]
                 cy_cand = sy[mask]
                 cz_cand = sz[mask]
@@ -545,6 +607,17 @@ def interpolate_dual_mean(
             inside = _points_in_polygon(poly_x, poly_y, cx_cand, cy_cand)
             if inside.any():
                 current_z[ni] = float(np.mean(cz_cand[inside]))
+                updated_count += 1
+            elif outside_policy != "preserve":
+                current_z[ni] = _outside_coverage_value(
+                    outside_policy,
+                    sx,
+                    sy,
+                    sz,
+                    node_x[ni],
+                    node_y[ni],
+                    source_tree if use_kdtree else None,
+                )
                 updated_count += 1
 
             if progress_callback:
@@ -576,6 +649,7 @@ def run_interpolation(
     mesh_epsg: Optional[int],
     source_epsg: int = 4326,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    outside_policy: str = "preserve",
 ) -> int:
     """Dispatch to the requested interpolation routine and return update count."""
     if method == "dual_mean":
@@ -588,5 +662,6 @@ def run_interpolation(
             mesh_epsg,
             source_epsg,
             progress_callback,
+            outside_policy,
         )
     raise ValueError(f"Unknown interpolation method: '{method}'")
