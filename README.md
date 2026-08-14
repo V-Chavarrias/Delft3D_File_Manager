@@ -98,11 +98,24 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 - `1dfield`: places branch value points from `chainage`/`values` arrays.
 - `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
 
-### Boundary Timeseries Viewer
+### FM Cross-Section / Boundary Timeseries Viewer
 
-The **Profile / Timeseries** action now supports both:
+The **FM Cross-Section / Boundary Timeseries** action supports:
 - FM cross-section profile previews
 - FM boundary-condition timeseries previews
+
+### Mesh Dataset Slicer
+
+The **Mesh Dataset Slicer** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
+
+- Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
+- Open **Mesh Dataset Slicer**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
+- Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
+- Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
+- Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
+- The displayed scalar dataset is captured as a snapshot, so changing QGIS time or variable does not rewrite existing curves.
+- Partition layers are sampled as one logical mesh. Owner-masked imports are the supported mode because they avoid duplicate ghost-cell values at partition boundaries.
+- Raw ghost-overlap imports may produce ambiguous values where partitions overlap and are not silently deduplicated.
 
 For boundary forcing linked through `.ext`, activate the imported `*_ext_spatial` layer and click/select a feature to display its series in the popup chart.
 
@@ -394,7 +407,7 @@ Output attributes include:
 ### Profile Chart Window
 
 - Open by double-clicking a cross-section point or a spatial forcing feature on the map.
-- Also available from plugin menu: `Profile / Timeseries`.
+- Also available from plugin menu: `FM Cross-Section / Boundary Timeseries`.
 - Supports:
 	- `yz` definitions from `def_yCoords` / `def_zCoords`
 	- `circle` definitions from `def_diam`

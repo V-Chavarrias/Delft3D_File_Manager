@@ -165,9 +165,14 @@ class Delft3DFileManager:
         self.export_trachytopes_action = None
         self.install_deps_action = None
         self.profile_chart_action = None
+        self.mesh_profile_action = None
         self.his_timeseries_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
+        self._mesh_profile_dialog = None
+        self._mesh_profile_map_tool = None
+        self._mesh_profile_previous_map_tool = None
+        self._mesh_profile_source_layers = []
         self._his_dialog = None
         self._profile_layer = None
         self._profile_selection_connected = False
@@ -288,13 +293,22 @@ class Delft3DFileManager:
         self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
 
         self.profile_chart_action = QAction(
-            QIcon(icon_path), "Profile / Timeseries", self.iface.mainWindow()
+            QIcon(icon_path), "FM Cross-Section / Boundary Timeseries", self.iface.mainWindow()
         )
         self.profile_chart_action.setStatusTip(
             "Open the profile/timeseries chart window for cross-sections and boundary conditions"
         )
         self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.profile_chart_action)
+
+        self.mesh_profile_action = QAction(
+            QIcon(icon_path), "Mesh Dataset Slicer", self.iface.mainWindow()
+        )
+        self.mesh_profile_action.setStatusTip(
+            "Draw or select a line to profile the displayed scalar dataset across mesh partitions"
+        )
+        self.mesh_profile_action.triggered.connect(self.open_mesh_profile_window)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_profile_action)
 
         self.his_timeseries_action = QAction(
             QIcon(icon_path), "HIS Timeseries", self.iface.mainWindow()
@@ -335,6 +349,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
         if self.profile_chart_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.profile_chart_action)
+        if self.mesh_profile_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_profile_action)
         if self.his_timeseries_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
 
@@ -832,13 +848,30 @@ class Delft3DFileManager:
         """Construct the profile dialog lazily to keep plugin import lightweight."""
         from .cross_section_profile_dialog import CrossSectionProfileDialog
 
-        return CrossSectionProfileDialog(self.iface.mainWindow())
+        return CrossSectionProfileDialog(self.iface.mainWindow(), mesh_mode=False)
+
+    def _create_mesh_profile_dialog(self):
+        """Construct the separate mesh dataset slicer window lazily."""
+        from .cross_section_profile_dialog import CrossSectionProfileDialog
+
+        dialog = CrossSectionProfileDialog(self.iface.mainWindow(), mesh_mode=True)
+        dialog.set_mesh_handlers(
+            on_draw_requested=self._start_mesh_profile_capture,
+            on_selected_lines_requested=self._add_selected_mesh_profiles,
+        )
+        return dialog
 
     def _ensure_profile_dialog(self):
         """Ensure profile dialog exists and return it."""
         if self._profile_dialog is None:
             self._profile_dialog = self._create_cross_section_profile_dialog()
         return self._profile_dialog
+
+    def _ensure_mesh_profile_dialog(self):
+        """Ensure the independent mesh slicer window exists and return it."""
+        if self._mesh_profile_dialog is None:
+            self._mesh_profile_dialog = self._create_mesh_profile_dialog()
+        return self._mesh_profile_dialog
 
     def _show_profile_in_dialog(self, feature):
         """Render one feature profile in the profile dialog."""
@@ -876,6 +909,14 @@ class Delft3DFileManager:
         """Show guidance or status text in the profile dialog."""
         dialog = self._ensure_profile_dialog()
         dialog.set_profile(points=[], title="Profile / Timeseries", metadata={}, message=message)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _show_mesh_profile_message(self, message):
+        """Show guidance or status text in the mesh slicer window."""
+        dialog = self._ensure_mesh_profile_dialog()
+        dialog.set_profile(points=[], title="Mesh Dataset Slicer", metadata={}, message=message)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -964,6 +1005,379 @@ class Delft3DFileManager:
             self._show_profile_in_dialog(selected_feature)
         else:
             self._show_timeseries_in_dialog(selected_feature)
+
+    def _mesh_profile_layers_for_active(self):
+        """Return the logical partition set containing the active mesh layer."""
+        active_layer = self.iface.activeLayer()
+        if active_layer is None:
+            return list(self._mesh_profile_source_layers)
+
+        def _source_key(layer):
+            try:
+                source = str(layer.customProperty("delft3d_mesh_source", ""))
+            except (RuntimeError, AttributeError):
+                source = ""
+            if not source:
+                source_method = getattr(layer, "source", None)
+                source = str(source_method() if callable(source_method) else "")
+            source = source.split("|", 1)[0].replace("\\", "/").lower()
+            return source
+
+        active_id = None
+        try:
+            active_id = str(active_layer.id())
+        except Exception:
+            pass
+        active_source = _source_key(active_layer)
+
+        for session in self._partition_mesh_sync_sessions.values():
+            layers = list(session.get("layers", []))
+            if (
+                active_layer in layers
+                or any(str(layer.id()) == active_id for layer in layers)
+                or (active_source and any(_source_key(layer) == active_source for layer in layers))
+            ):
+                return layers
+
+        if callable(getattr(active_layer, "datasetValue", None)):
+            return [active_layer]
+        if self._mesh_profile_source_layers:
+            return list(self._mesh_profile_source_layers)
+        return []
+
+    def _prepare_mesh_profile_layers(self, layers):
+        """Initialize QGIS mesh caches before asking for interpolated values."""
+        for layer in layers:
+            update_mesh = getattr(layer, "updateTriangularMesh", None)
+            if not callable(update_mesh):
+                continue
+            try:
+                update_mesh()
+            except (RuntimeError, TypeError, AttributeError):
+                # datasetValue will still provide values for already-rendered meshes.
+                pass
+
+    def _mesh_profile_edge_crossings(self, layers, points):
+        """Return exact line/mesh-edge intersections from UGRID topology."""
+        import netCDF4 as nc
+        import numpy as np
+
+        from qgis.core import (
+            QgsCoordinateReferenceSystem,
+            QgsCoordinateTransform,
+            QgsProject,
+        )
+
+        from .mesh_profile_sampler import mesh_edge_crossings
+
+        crossings = []
+        for layer in layers:
+            try:
+                source = str(layer.customProperty("delft3d_mesh_source", ""))
+            except (RuntimeError, AttributeError):
+                source = ""
+            if not source:
+                source_method = getattr(layer, "source", None)
+                source = str(source_method() if callable(source_method) else "").split("|", 1)[0]
+                if source.lower().startswith("mdal:"):
+                    source = source[5:]
+                    if source.startswith('"'):
+                        closing_quote = source.find('"', 1)
+                        if closing_quote > 1:
+                            source = source[1:closing_quote]
+                    else:
+                        source = re.sub(r":(?:Mesh2d|mesh2d)$", "", source)
+                if source.lower().startswith("file:///"):
+                    source = source[8:]
+            if not source:
+                continue
+
+            try:
+                with nc.Dataset(source, "r") as dataset:
+                    variables = {name.lower(): name for name in dataset.variables}
+                    node_x_name = next(
+                        (variables[name] for name in ("mesh2d_node_x", "mesh2d_node_x_coordinates") if name in variables),
+                        None,
+                    )
+                    node_y_name = next(
+                        (variables[name] for name in ("mesh2d_node_y", "mesh2d_node_y_coordinates") if name in variables),
+                        None,
+                    )
+                    face_name = next(
+                        (variables[name] for name in ("mesh2d_face_nodes", "mesh2d_face_node_connectivity") if name in variables),
+                        None,
+                    )
+                    if not node_x_name or not node_y_name or not face_name:
+                        continue
+                    node_x = np.asarray(dataset.variables[node_x_name][:], dtype=float)
+                    node_y = np.asarray(dataset.variables[node_y_name][:], dtype=float)
+
+                    source_crs = None
+                    for crs_name in ("projected_coordinate_system", "crs"):
+                        crs_variable = dataset.variables.get(crs_name)
+                        if crs_variable is None:
+                            continue
+                        for attribute_name in ("EPSG_code", "epsg", "spatial_ref"):
+                            attribute_value = getattr(crs_variable, attribute_name, None)
+                            if attribute_value in (None, ""):
+                                continue
+                            crs_text = str(attribute_value)
+                            if crs_text.isdigit():
+                                crs_text = f"EPSG:{crs_text}"
+                            source_crs = QgsCoordinateReferenceSystem(crs_text)
+                            if source_crs.isValid():
+                                break
+                        if source_crs is not None and source_crs.isValid():
+                            break
+
+                    if source_crs is None or not source_crs.isValid():
+                        try:
+                            source_crs = layer.crs()
+                        except (RuntimeError, AttributeError):
+                            source_crs = None
+
+                    target_crs = None
+                    try:
+                        target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+                    except (RuntimeError, AttributeError):
+                        pass
+                    if source_crs is not None and source_crs.isValid() and target_crs is not None and target_crs.isValid():
+                        if source_crs.authid() != target_crs.authid():
+                            transform = QgsCoordinateTransform(
+                                source_crs,
+                                target_crs,
+                                QgsProject.instance(),
+                            )
+                            transformed = [
+                                transform.transform(float(x), float(y))
+                                for x, y in zip(node_x, node_y)
+                            ]
+                            node_x = np.asarray([point.x() for point in transformed], dtype=float)
+                            node_y = np.asarray([point.y() for point in transformed], dtype=float)
+
+                    face_variable = dataset.variables[face_name]
+                    face_nodes = face_variable[:]
+                    if isinstance(face_nodes, np.ma.MaskedArray):
+                        face_nodes = face_nodes.filled(-1)
+                    start_index = int(getattr(face_variable, "start_index", 0))
+                    crossings.extend(
+                        (layer, chainage, point)
+                        for chainage, point in mesh_edge_crossings(
+                            node_x,
+                            node_y,
+                            np.asarray(face_nodes, dtype=int) - start_index,
+                            points,
+                        )
+                    )
+            except (OSError, RuntimeError, ValueError, KeyError):
+                continue
+
+        unique = {}
+        for layer, chainage, point in crossings:
+            layer_key = id(layer)
+            key = (layer_key, round(float(chainage), 8), round(float(point[0]), 8), round(float(point[1]), 8))
+            unique[key] = (layer, float(chainage), point)
+        return [unique[key] for key in sorted(unique, key=lambda item: item[1])]
+
+    def _mesh_profile_dataset_index(self, layer):
+        """Resolve the displayed scalar dataset as a QGIS dataset index."""
+        from qgis.core import QgsMeshDatasetIndex
+
+        group_index = None
+        try:
+            settings = layer.rendererSettings()
+            group_index = int(settings.activeScalarDatasetGroup())
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            pass
+        if group_index is None or group_index < 0:
+            return None
+
+        for method_name in ("staticScalarDatasetIndex", "activeScalarDatasetAtTime"):
+            method = getattr(layer, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                if method_name == "staticScalarDatasetIndex":
+                    index = method(group_index)
+                else:
+                    temporal = layer.temporalProperties()
+                    time_range = temporal.referenceTemporalRange()
+                    index = method(time_range, group_index)
+                if getattr(index, "isValid", lambda: True)():
+                    return index
+            except (RuntimeError, TypeError, ValueError, AttributeError):
+                continue
+        return None
+
+    def open_mesh_profile_window(self):
+        """Open the mesh profile window for the active partitioned mesh."""
+        layers = self._mesh_profile_layers_for_active()
+        if not layers:
+            self._show_mesh_profile_message(
+                "Activate an imported mesh layer, then draw a line or select line features."
+            )
+            return
+
+        dataset_index = self._mesh_profile_dataset_index(layers[0])
+        if dataset_index is None:
+            self._show_mesh_profile_message(
+                "No scalar dataset is selected for the active mesh. Select a scalar group such as water depth in the mesh layer renderer."
+            )
+            return
+
+        self._mesh_profile_source_layers = list(layers)
+        dialog = self._ensure_mesh_profile_dialog()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._start_mesh_profile_capture()
+
+    def _start_mesh_profile_capture(self):
+        """Capture a polyline from the map canvas and append its mesh profile."""
+        from qgis.gui import QgsMapTool, QgsRubberBand
+
+        canvas = self.iface.mapCanvas()
+        previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        manager = self
+        dialog = self._ensure_mesh_profile_dialog()
+
+        class _MeshProfileMapTool(QgsMapTool):
+            def __init__(self):
+                super().__init__(canvas)
+                self.points = []
+                self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+                self.rubber_band.setColor(QColor(220, 50, 47, 220))
+                self.rubber_band.setWidth(3)
+
+            def _map_point(self, event):
+                transform = canvas.getCoordinateTransform()
+                return transform.toMapCoordinates(event.pos().x(), event.pos().y())
+
+            def canvasPressEvent(self, event):
+                button = event.button()
+                if button == _left_mouse_button_value():
+                    point = self._map_point(event)
+                    self.points.append(point)
+                    self.rubber_band.addPoint(point, True)
+                    dialog.set_status_message(
+                        f"Drawing dataset slice: {len(self.points)} vertices. Double-click or right-click to finish."
+                    )
+                elif self.points and len(self.points) >= 2:
+                    self._finish()
+
+            def _finish(self):
+                if len(self.points) >= 2:
+                    manager._append_mesh_profile(self.points)
+                self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+                dialog.set_status_message("Dataset slice captured. Draw another slice or close this window.")
+                canvas.setMapTool(previous_tool)
+                manager._mesh_profile_map_tool = None
+
+            def canvasDoubleClickEvent(self, event):
+                if event.button() != _left_mouse_button_value():
+                    return
+                point = self._map_point(event)
+                if not self.points or point != self.points[-1]:
+                    self.points.append(point)
+                    self.rubber_band.addPoint(point, True)
+                self._finish()
+
+        self._mesh_profile_previous_map_tool = previous_tool
+        self._mesh_profile_map_tool = _MeshProfileMapTool()
+        canvas.setMapTool(self._mesh_profile_map_tool)
+        dialog.set_status_message(
+            "Drawing dataset slice: click to add vertices, then double-click or right-click to finish."
+        )
+        try:
+            self.iface.messageBar().pushInfo(
+                "Mesh Dataset Slicer",
+                "Click the map to add vertices; double-click or right-click to finish the slice.",
+            )
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _add_selected_mesh_profiles(self):
+        """Append profiles for selected line features in the active vector layer."""
+        layer = self.iface.activeLayer()
+        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+            self._show_mesh_profile_message("Activate a line layer with selected features.")
+            return
+        if layer.geometryType() != QgsWkbTypes.LineGeometry:
+            self._show_mesh_profile_message("The active layer must contain line features.")
+            return
+
+        features = list(layer.getSelectedFeatures())
+        if not features:
+            self._show_mesh_profile_message("Select one or more line features first.")
+            return
+
+        count = 0
+        for feature in features:
+            for points in self._extract_polylines(feature.geometry()):
+                if len(points) >= 2:
+                    self._append_mesh_profile(points, label=f"Feature {feature.id()}")
+                    count += 1
+        if not count:
+            self._show_mesh_profile_message("The selected features contain no usable line geometry.")
+
+    def _append_mesh_profile(self, qgis_points, label="Drawn profile"):
+        """Sample one line using the displayed dataset and append its curve."""
+        layers = list(self._mesh_profile_source_layers or self._mesh_profile_layers_for_active())
+        if not layers:
+            self._show_mesh_profile_message("Activate an imported mesh layer before capturing a profile.")
+            return
+
+        from qgis.core import QgsPointXY
+        from .mesh_profile_sampler import sample_partitioned_mesh
+
+        dataset_index = self._mesh_profile_dataset_index(layers[0])
+        if dataset_index is None:
+            self._show_mesh_profile_message(
+                "No scalar dataset is selected for the active mesh. Select a scalar group such as water depth in the mesh layer renderer."
+            )
+            return
+
+        self._prepare_mesh_profile_layers(layers)
+        points = [(point.x(), point.y()) for point in qgis_points]
+        crossings = self._mesh_profile_edge_crossings(layers, points)
+        if not crossings:
+            self._show_mesh_profile_message(
+                "The drawn line does not cross any mesh edge in the imported partition topology."
+            )
+            return
+        values_by_chainage = {}
+        for layer, chainage, point in crossings:
+            layer_dataset_index = self._mesh_profile_dataset_index(layer) or dataset_index
+            sampled = sample_partitioned_mesh(
+                [layer],
+                [point],
+                layer_dataset_index,
+                point_factory=lambda value: QgsPointXY(value[0], value[1]),
+            )
+            value = sampled[0][1] if sampled else None
+            key = round(float(chainage), 8)
+            if key not in values_by_chainage or values_by_chainage[key] is None:
+                values_by_chainage[key] = value
+        profile = sorted(values_by_chainage.items())
+        profile_message = ""
+        if not any(value is not None for _, value in profile):
+            profile_message = (
+                "No finite dataset values were found along this slice. "
+                "Check that the line crosses the mesh and that the selected dataset "
+                "is available in every partition."
+            )
+        dialog = self._ensure_mesh_profile_dialog()
+        dialog.add_profile(
+            profile,
+            label,
+            metadata={"x_axis_label": "chainage [m]", "y_axis_label": "dataset value"},
+            message=profile_message,
+        )
+        if profile_message:
+            dialog.set_status_message(f"Slice captured. {profile_message}")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _create_his_timeseries_dialog(self):
         """Construct the HIS timeseries dialog lazily."""
@@ -6791,6 +7205,10 @@ class Delft3DFileManager:
 
             if _is_usable_2d_mesh(mesh_layer, require_datasets=expect_data_variables):
                 _apply_crs_if_missing(mesh_layer)
+                try:
+                    mesh_layer.setCustomProperty("delft3d_mesh_source", filepath)
+                except (RuntimeError, AttributeError):
+                    pass
                 QgsProject.instance().addMapLayer(mesh_layer)
                 return mesh_layer
 
@@ -6804,6 +7222,10 @@ class Delft3DFileManager:
                     require_datasets=expect_data_variables,
                 ):
                     _apply_crs_if_missing(existing_layer)
+                    try:
+                        existing_layer.setCustomProperty("delft3d_mesh_source", filepath)
+                    except (RuntimeError, AttributeError):
+                        pass
                     return existing_layer
 
         raise RuntimeError(
