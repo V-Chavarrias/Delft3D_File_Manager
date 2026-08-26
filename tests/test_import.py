@@ -1755,6 +1755,66 @@ def test_read_crossdef_records_includes_circular_fields(plugin, tmp_path):
     assert definitions["circ001"]["frictionvalue"] == "0.030"
 
 
+def test_detect_ini_file_type_is_case_insensitive(plugin, tmp_path):
+    ini_file = tmp_path / "case_filetype.ini"
+    ini_file.write_text(
+        "[General]\n"
+        "FILETYPE = crossLoc\n",
+        encoding="utf-8",
+    )
+
+    assert plugin._detect_ini_file_type(str(ini_file)) == "crossloc"
+
+
+def test_read_crossloc_records_is_case_insensitive(plugin, tmp_path):
+    csl_file = tmp_path / "crossloc_case.ini"
+    csl_file.write_text(
+        "[General]\n"
+        "fileType = crossLoc\n\n"
+        "[CrossSection]\n"
+        "Id = XS_01\n"
+        "BranchID = B_MAIN\n"
+        "DefinitionID = DEF_01\n"
+        "Chainage = 125.5\n"
+        "Shift = -0.25\n",
+        encoding="utf-8",
+    )
+
+    rows = plugin._read_crossloc_records(str(csl_file))
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "XS_01"
+    assert rows[0]["branchId"] == "B_MAIN"
+    assert rows[0]["definitionId"] == "DEF_01"
+    assert rows[0]["chainage"] == 125.5
+    assert rows[0]["shift"] == -0.25
+
+
+def test_read_crossdef_records_is_case_insensitive(plugin, tmp_path):
+    csd_file = tmp_path / "crossdef_case.ini"
+    csd_file.write_text(
+        "[General]\n"
+        "fileType = crossDef\n\n"
+        "[Definition]\n"
+        "ID = DEF_02\n"
+        "TYPE = yz\n"
+        "YCoordinates = 0 10\n"
+        "ZCoordinates = 1 2\n"
+        "FrictionType = Manning\n"
+        "FrictionValue = 0.03\n",
+        encoding="utf-8",
+    )
+
+    definitions = plugin._read_crossdef_records(str(csd_file))
+
+    assert "def_02" in definitions
+    assert definitions["def_02"]["type"] == "yz"
+    assert definitions["def_02"]["ycoordinates"] == "0 10"
+    assert definitions["def_02"]["zcoordinates"] == "1 2"
+    assert definitions["def_02"]["frictiontype"] == "Manning"
+    assert definitions["def_02"]["frictionvalue"] == "0.03"
+
+
 def test_read_dimr_component_input_files(plugin, tmp_path):
     dimr = tmp_path / "dimr_config.xml"
     dimr.write_text(
@@ -1829,6 +1889,38 @@ def test_read_mdu_primary_files(plugin, tmp_path):
     assert primary["crossloc_file"] == "csl.ini"
     assert primary["crossdef_file"] == "csd.ini"
     assert primary["structure_file"] == "structures.ini"
+    assert primary["ext_force_file"] == "extn.ext"
+    assert primary["frict_files"] == ["roughness-main.ini", "roughness-floodplain.ini"]
+
+
+def test_read_mdu_primary_files_accepts_mixed_case_keys(plugin, tmp_path):
+    mdu = tmp_path / "FlowFM_case.mdu"
+    mdu.write_text(
+        "[geometry]\n"
+        "netfile = net.nc\n"
+        "crosslocfile = csl.ini\n"
+        "crossdeffile = csd.ini\n"
+        "structurefile = structures.ini\n"
+        "inifieldfile = initialFields.ini\n"
+        "frictfile = roughness-main.ini;roughness-floodplain.ini\n"
+        "thindamfile = thindam.pli\n"
+        "fixedweirfile = weirs.pliz\n"
+        "pillarfile = pillar.ini\n"
+        "[external forcing]\n"
+        "extforcefilenew = extn.ext\n",
+        encoding="utf-8",
+    )
+
+    primary = plugin._read_mdu_primary_files(str(mdu))
+
+    assert primary["net_file"] == "net.nc"
+    assert primary["crossloc_file"] == "csl.ini"
+    assert primary["crossdef_file"] == "csd.ini"
+    assert primary["structure_file"] == "structures.ini"
+    assert primary["ini_field_file"] == "initialFields.ini"
+    assert primary["thin_dam_file"] == "thindam.pli"
+    assert primary["fixed_weir_file"] == "weirs.pliz"
+    assert primary["pillar_file"] == "pillar.ini"
     assert primary["ext_force_file"] == "extn.ext"
     assert primary["frict_files"] == ["roughness-main.ini", "roughness-floodplain.ini"]
 
@@ -2027,6 +2119,34 @@ def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
 
     assert add_map_layer.call_count == 1
     style_mock.assert_called_once()
+
+
+def test_parse_ext_file_accepts_mixed_case_keys(plugin, tmp_path):
+    ext = tmp_path / "ext_case.ext"
+    ext.write_text(
+        "[Boundary]\n"
+        "NodeID = bnd_01\n"
+        "Quantity = dischargebnd\n"
+        "ForcingFile = bc.bc\n"
+        "[Lateral]\n"
+        "Name = lat_01\n"
+        "BranchID = B1\n"
+        "Chainage = 25\n"
+        "Discharge = lat.bc\n",
+        encoding="utf-8",
+    )
+
+    rows = plugin._parse_ext_file(str(ext))
+
+    assert len(rows) == 2
+    assert rows[0]["kind"] == "boundary"
+    assert rows[0]["nodeId"] == "bnd_01"
+    assert rows[0]["forcingfile"] == "bc.bc"
+    assert rows[1]["kind"] == "lateral"
+    assert rows[1]["id"] == "lat_01"
+    assert rows[1]["branchId"] == "B1"
+    assert rows[1]["chainage"] == "25"
+    assert rows[1]["forcingfile"] == "lat.bc"
 
 
 def test_load_structures_spatial_file_creates_points(plugin, tmp_path):
@@ -2240,6 +2360,55 @@ def test_load_1d_field_spatial_file_creates_points(plugin, tmp_path):
         "branchId = B1\n"
         "chainage = 100 200\n"
         "values = 1.0 2.0\n",
+        encoding="utf-8",
+    )
+
+    profile = {
+        "name": "B1",
+        "points": [(0.0, 0.0), (1000.0, 0.0)],
+        "cumlen": [0.0, 1000.0],
+        "length": 1000.0,
+    }
+    context = {"branch_lookup": {"b1": profile}, "node_lookup": {}, "epsg": 28992}
+
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    with patch.object(plugin, "_resolve_spatial_context", return_value=(context, str(tmp_path / "grid.nc"))):
+        plugin.load_1d_field_spatial_file(str(field))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_ini_field_spatial_file_accepts_mixed_case_datafile_key(plugin, tmp_path):
+    ini_field = tmp_path / "initialFields.ini"
+    data_file = tmp_path / "InitialWaterLevel.ini"
+    ini_field.write_text(
+        "[Initial]\n"
+        "DataFile = InitialWaterLevel.ini\n",
+        encoding="utf-8",
+    )
+    data_file.write_text("[General]\nfileType = 1dField\n", encoding="utf-8")
+
+    plugin.load_1d_field_spatial_file = MagicMock()
+
+    plugin.load_ini_field_spatial_file(str(ini_field), grid_path="/fake/grid.nc")
+
+    plugin.load_1d_field_spatial_file.assert_called_once_with(str(data_file.resolve()), grid_path="/fake/grid.nc")
+
+
+def test_load_1d_field_spatial_file_accepts_mixed_case_keys(plugin, tmp_path):
+    field = tmp_path / "InitialWaterLevel_case.ini"
+    field.write_text(
+        "[General]\n"
+        "fileType = 1dField\n"
+        "[Global]\n"
+        "Quantity = waterlevel\n"
+        "Unit = m\n"
+        "[Branch]\n"
+        "BranchID = B1\n"
+        "Chainage = 100 200\n"
+        "Values = 1.0 2.0\n",
         encoding="utf-8",
     )
 

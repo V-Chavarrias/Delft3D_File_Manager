@@ -2049,18 +2049,20 @@ class Delft3DFileManager:
             values = block["values"]
 
             if section == "geometry":
-                primary["net_file"] = values.get("NetFile", "").strip()
-                primary["crossloc_file"] = values.get("CrossLocFile", "").strip()
-                primary["crossdef_file"] = values.get("CrossDefFile", "").strip()
-                primary["structure_file"] = values.get("StructureFile", "").strip()
-                primary["ini_field_file"] = values.get("IniFieldFile", "").strip()
-                primary["thin_dam_file"] = values.get("ThinDamFile", "").strip()
-                primary["fixed_weir_file"] = values.get("FixedWeirFile", "").strip()
-                primary["pillar_file"] = values.get("PillarFile", "").strip()
-                primary["frict_files"] = self._split_semicolon_paths(values.get("FrictFile", ""))
+                primary["net_file"] = self._value_case_insensitive(values, "NetFile")
+                primary["crossloc_file"] = self._value_case_insensitive(values, "CrossLocFile")
+                primary["crossdef_file"] = self._value_case_insensitive(values, "CrossDefFile")
+                primary["structure_file"] = self._value_case_insensitive(values, "StructureFile")
+                primary["ini_field_file"] = self._value_case_insensitive(values, "IniFieldFile")
+                primary["thin_dam_file"] = self._value_case_insensitive(values, "ThinDamFile")
+                primary["fixed_weir_file"] = self._value_case_insensitive(values, "FixedWeirFile")
+                primary["pillar_file"] = self._value_case_insensitive(values, "PillarFile")
+                primary["frict_files"] = self._split_semicolon_paths(
+                    self._value_case_insensitive(values, "FrictFile")
+                )
             elif section == "external forcing":
-                ext_new = values.get("ExtForceFileNew", "").strip()
-                ext_old = values.get("ExtForceFile", "").strip()
+                ext_new = self._value_case_insensitive(values, "ExtForceFileNew")
+                ext_old = self._value_case_insensitive(values, "ExtForceFile")
                 primary["ext_force_file"] = ext_new or ext_old
 
         return primary
@@ -2290,22 +2292,22 @@ class Delft3DFileManager:
             if section == "boundary":
                 rows.append({
                     "kind": "boundary",
-                    "id": values.get("nodeId", "").strip(),
-                    "quantity": values.get("quantity", "").strip(),
-                    "nodeId": values.get("nodeId", "").strip(),
+                    "id": self._value_case_insensitive(values, "nodeId", "node", "node_id"),
+                    "quantity": self._value_case_insensitive(values, "quantity"),
+                    "nodeId": self._value_case_insensitive(values, "nodeId", "node", "node_id"),
                     "branchId": "",
                     "chainage": "",
-                    "forcingfile": values.get("forcingfile", "").strip(),
+                    "forcingfile": self._value_case_insensitive(values, "forcingfile", "forcingFile"),
                 })
             elif section == "lateral":
                 rows.append({
                     "kind": "lateral",
-                    "id": values.get("id", "").strip() or values.get("name", "").strip(),
+                    "id": self._value_case_insensitive(values, "id", "name"),
                     "quantity": "lateral_discharge",
                     "nodeId": "",
-                    "branchId": values.get("branchId", "").strip(),
-                    "chainage": values.get("chainage", "").strip(),
-                    "forcingfile": values.get("discharge", "").strip(),
+                    "branchId": self._value_case_insensitive(values, "branchId", "branch", "branch_id"),
+                    "chainage": self._value_case_insensitive(values, "chainage", "chainages"),
+                    "forcingfile": self._value_case_insensitive(values, "discharge", "forcingfile", "forcingFile"),
                 })
         return rows
 
@@ -2948,7 +2950,7 @@ class Delft3DFileManager:
         for block in sections:
             if block["section"].strip().lower() != "initial":
                 continue
-            data_file = block["values"].get("dataFile", "").strip()
+            data_file = self._value_case_insensitive(block["values"], "dataFile", "data_file")
             if data_file:
                 break
 
@@ -3002,8 +3004,8 @@ class Delft3DFileManager:
         unit = ""
         for block in sections:
             if block["section"].strip().lower() == "global":
-                quantity = block["values"].get("quantity", "").strip()
-                unit = block["values"].get("unit", "").strip()
+                quantity = self._value_case_insensitive(block["values"], "quantity")
+                unit = self._value_case_insensitive(block["values"], "unit")
                 break
 
         features = []
@@ -3015,12 +3017,16 @@ class Delft3DFileManager:
                 continue
 
             values = block["values"]
-            branch_id = values.get("branchId", "").strip()
+            branch_id = self._value_case_insensitive(values, "branchId", "branch", "branch_id")
             if not branch_id:
                 continue
 
-            chainage_vals = self._parse_numeric_list(values.get("chainage", ""))
-            value_vals = self._parse_numeric_list(values.get("values", ""))
+            chainage_vals = self._parse_numeric_list(
+                self._value_case_insensitive(values, "chainage", "chainages")
+            )
+            value_vals = self._parse_numeric_list(
+                self._value_case_insensitive(values, "values", "value")
+            )
             n = min(len(chainage_vals), len(value_vals))
             if n == 0:
                 continue
@@ -3406,7 +3412,7 @@ class Delft3DFileManager:
         for block in sections:
             if block["section"].strip().lower() != "general":
                 continue
-            file_type = block["values"].get("fileType", "").strip().lower()
+            file_type = self._value_case_insensitive(block["values"], "fileType").lower()
             if file_type:
                 return file_type
         return None
@@ -3420,17 +3426,17 @@ class Delft3DFileManager:
 
             values = block["values"]
             record = {
-                "id": values.get("id", "").strip(),
-                "branchId": values.get("branchId", "").strip(),
-                "definitionId": values.get("definitionId", "").strip(),
+                "id": self._value_case_insensitive(values, "id"),
+                "branchId": self._value_case_insensitive(values, "branchId", "branch", "branch_id"),
+                "definitionId": self._value_case_insensitive(values, "definitionId", "definition", "definition_id"),
             }
 
             if not record["id"] or not record["branchId"] or not record["definitionId"]:
                 continue
 
             try:
-                record["chainage"] = float(values.get("chainage", "0"))
-                record["shift"] = float(values.get("shift", "0"))
+                record["chainage"] = float(self._value_case_insensitive(values, "chainage") or "0")
+                record["shift"] = float(self._value_case_insensitive(values, "shift") or "0")
             except ValueError:
                 continue
 
@@ -3446,7 +3452,7 @@ class Delft3DFileManager:
                 continue
 
             values = block["values"]
-            definition_id = values.get("id", "").strip()
+            definition_id = self._value_case_insensitive(values, "id")
             if not definition_id:
                 continue
 
