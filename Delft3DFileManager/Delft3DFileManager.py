@@ -5635,9 +5635,14 @@ class Delft3DFileManager:
                         )
                         return
 
+                    # 1D-2D links require both a 1D and (single-file) 2D mesh; not supported for partitioned domains yet.
+                    mesh1d2d_data = None
+                    if mesh1d_data and has_mesh2d and not partition_mode:
+                        mesh1d2d_data = self._read_mesh1d2d_links_data(ds, mesh1d_data)
+
                     # Prompt for layer names
                     self._update_progress_dialog(progress_dialog, 35, "Preparing layer names")
-                    layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data)
+                    layer_names = self._prompt_for_layer_names(base_name, has_mesh2d, mesh1d_data, geom_data, mesh1d2d_data)
                     if layer_names is None:
                         return
 
@@ -5837,6 +5842,24 @@ class Delft3DFileManager:
                     self.iface.messageBar().pushWarning(
                         "Delft3D File Manager",
                         f"Could not load mesh1d nodes: {exc}"
+                    )
+
+            # Load 1D-2D links
+            if mesh1d2d_data:
+                try:
+                    self._update_progress_dialog(progress_dialog, 90, "Loading 1D-2D links")
+                    self._set_status_message("Loading 1D-2D links")
+                    self._load_mesh1d2d_links_layer(
+                        mesh1d2d_data["node1d_x"], mesh1d2d_data["node1d_y"],
+                        mesh1d2d_data["face2d_x"], mesh1d2d_data["face2d_y"],
+                        mesh1d2d_data["link_type"],
+                        epsg, layer_names["mesh1d2d_links"]
+                    )
+                    loaded_layers.append("mesh1d2d_links")
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load 1D-2D links: {exc}"
                     )
 
             # Load geometry edges
@@ -6326,7 +6349,7 @@ class Delft3DFileManager:
 
         _broadcast(session["layers"][0])
 
-    def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data):
+    def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data, mesh1d2d_data=None):
         """Prompt user for layer names."""
         layer_names = {}
 
@@ -6337,6 +6360,9 @@ class Delft3DFileManager:
         if mesh1d_data:
             layer_names["mesh1d_branches"] = f"{base_name}_mesh1d_branches"
             layer_names["mesh1d_nodes"] = f"{base_name}_mesh1d_nodes"
+
+        if mesh1d2d_data:
+            layer_names["mesh1d2d_links"] = f"{base_name}_mesh1d2d_links"
 
         if geom_data:
             layer_names["geometry_edges"] = f"{base_name}_geometry_edges"
@@ -6436,6 +6462,157 @@ class Delft3DFileManager:
     def _detect_mesh1d_exists(self, nc_dataset):
         """Check if mesh1d topology exists in dataset."""
         return self._find_variable_name(nc_dataset, "mesh1d_node_x") is not None and self._find_variable_name(nc_dataset, "mesh1d_node_y") is not None
+
+    def _find_mesh1d2d_contact_topology_name(self, nc_dataset):
+        """Return the 1D-2D contacts (link) topology variable name, or None."""
+        for variable_name, variable in nc_dataset.variables.items():
+            try:
+                cf_role = str(getattr(variable, "cf_role", "")).strip().lower()
+            except AttributeError:
+                continue
+            if cf_role == "mesh_topology_contact":
+                return variable_name
+
+        for fallback_name in ("links", "mesh1d2d", "link1d2d", "links1d2d"):
+            found_name = self._find_variable_name(nc_dataset, fallback_name)
+            if found_name is not None:
+                return found_name
+        return None
+
+    def _detect_mesh1d2d_links_exist(self, nc_dataset):
+        """Check if 1D-2D contact (link) topology exists in dataset."""
+        return self._find_mesh1d2d_contact_topology_name(nc_dataset) is not None
+
+    def _compute_mesh2d_face_centers(self, nc_dataset):
+        """Return (face_x, face_y) arrays of 2D mesh face centers, or (None, None)."""
+        import numpy as np
+
+        face_x_name = self._find_variable_name(nc_dataset, "mesh2d_face_x")
+        face_y_name = self._find_variable_name(nc_dataset, "mesh2d_face_y")
+        if face_x_name and face_y_name:
+            face_x = np.asarray(nc_dataset.variables[face_x_name][:], dtype=float)
+            face_y = np.asarray(nc_dataset.variables[face_y_name][:], dtype=float)
+            return face_x, face_y
+
+        # Fallback: compute face centroid from face_nodes + node coordinates.
+        node_x_name = self._find_variable_name(nc_dataset, "mesh2d_node_x")
+        node_y_name = self._find_variable_name(nc_dataset, "mesh2d_node_y")
+        face_nodes_name = self._find_variable_name(nc_dataset, "mesh2d_face_nodes")
+        if not (node_x_name and node_y_name and face_nodes_name):
+            return None, None
+
+        node_x = np.asarray(nc_dataset.variables[node_x_name][:], dtype=float)
+        node_y = np.asarray(nc_dataset.variables[node_y_name][:], dtype=float)
+        face_nodes_var = nc_dataset.variables[face_nodes_name]
+        face_nodes = face_nodes_var[:]
+        fill_value = int(getattr(face_nodes_var, "_FillValue", -999))
+        start_index = int(getattr(face_nodes_var, "start_index", 0))
+
+        if isinstance(face_nodes, np.ma.MaskedArray):
+            face_nodes = face_nodes.filled(fill_value)
+        face_nodes = np.asarray(face_nodes)
+
+        face_x = np.full(face_nodes.shape[0], np.nan, dtype=float)
+        face_y = np.full(face_nodes.shape[0], np.nan, dtype=float)
+        for i, row in enumerate(face_nodes):
+            valid = row[row != fill_value] - start_index
+            valid = valid[(valid >= 0) & (valid < len(node_x))]
+            if len(valid) == 0:
+                continue
+            face_x[i] = float(np.mean(node_x[valid]))
+            face_y[i] = float(np.mean(node_y[valid]))
+
+        return face_x, face_y
+
+    def _read_mesh1d2d_links_data(self, nc_dataset, mesh1d_data):
+        """Read 1D-2D contact (link) data connecting mesh1d nodes to mesh2d faces."""
+        import numpy as np
+
+        topology_name = self._find_mesh1d2d_contact_topology_name(nc_dataset)
+        if topology_name is None:
+            return None
+
+        topology_var = nc_dataset.variables[topology_name]
+        if topology_var.ndim != 2 or 2 not in topology_var.shape:
+            return None
+
+        contact_array = topology_var[:]
+        fill_value = int(getattr(topology_var, "_FillValue", -999))
+        if isinstance(contact_array, np.ma.MaskedArray):
+            contact_array = contact_array.filled(fill_value)
+        contact_array = np.asarray(contact_array)
+        if contact_array.shape[1] != 2:
+            contact_array = contact_array.T
+        if contact_array.shape[0] == 0:
+            return None
+
+        face_x, face_y = self._compute_mesh2d_face_centers(nc_dataset)
+        if face_x is None or face_y is None:
+            return None
+
+        node1d_x = mesh1d_data["node_x"]
+        node1d_y = mesh1d_data["node_y"]
+        node1d_count = len(node1d_x)
+        face2d_count = len(face_x)
+
+        col_a = contact_array[:, 0]
+        col_b = contact_array[:, 1]
+
+        def _fits(values, count):
+            valid = values[values != fill_value]
+            if len(valid) == 0:
+                return False
+            return bool(np.all(valid >= 0) and np.all(valid < count))
+
+        # Determine which column indexes mesh1d nodes vs mesh2d faces by value range,
+        # since the "contact" attribute is a free-text description, not a variable ref.
+        if _fits(col_a, node1d_count) and _fits(col_b, face2d_count):
+            node1d_idx, face2d_idx = col_a, col_b
+        elif _fits(col_b, node1d_count) and _fits(col_a, face2d_count):
+            node1d_idx, face2d_idx = col_b, col_a
+        else:
+            node1d_idx, face2d_idx = col_a, col_b
+
+        link_type_values = None
+        contact_type_ref = getattr(topology_var, "contact_type", None)
+        if contact_type_ref:
+            resolved_name = self._find_variable_name(nc_dataset, str(contact_type_ref))
+            if resolved_name is not None:
+                raw_type = nc_dataset.variables[resolved_name][:]
+                if isinstance(raw_type, np.ma.MaskedArray):
+                    raw_type = raw_type.filled(-1)
+                link_type_values = np.asarray(raw_type)
+
+        out_node1d_x, out_node1d_y, out_face2d_x, out_face2d_y, out_link_type = [], [], [], [], []
+        for i in range(contact_array.shape[0]):
+            n_idx = int(node1d_idx[i])
+            f_idx = int(face2d_idx[i])
+            if n_idx == fill_value or f_idx == fill_value:
+                continue
+            if not (0 <= n_idx < node1d_count) or not (0 <= f_idx < face2d_count):
+                continue
+
+            nx, ny = float(node1d_x[n_idx]), float(node1d_y[n_idx])
+            fx, fy = float(face_x[f_idx]), float(face_y[f_idx])
+            if not all(math.isfinite(value) for value in (nx, ny, fx, fy)):
+                continue
+
+            out_node1d_x.append(nx)
+            out_node1d_y.append(ny)
+            out_face2d_x.append(fx)
+            out_face2d_y.append(fy)
+            out_link_type.append(int(link_type_values[i]) if link_type_values is not None and i < len(link_type_values) else None)
+
+        if not out_node1d_x:
+            return None
+
+        return {
+            "node1d_x": out_node1d_x,
+            "node1d_y": out_node1d_y,
+            "face2d_x": out_face2d_x,
+            "face2d_y": out_face2d_y,
+            "link_type": out_link_type,
+        }
 
     def _detect_geometry_exists(self, nc_dataset):
         """Check if network geometry exists in dataset."""
@@ -7407,6 +7584,25 @@ class Delft3DFileManager:
             feat = QgsFeature(layer.fields())
             feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(x), float(y))))
             feat.setAttributes([node_name, branch_name, offset_value])
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+    def _load_mesh1d2d_links_layer(self, node1d_x, node1d_y, face2d_x, face2d_y, link_type, epsg, layer_name):
+        """Load 1D-2D links as polyline layer connecting mesh1d nodes to mesh2d face centers."""
+        layer = QgsVectorLayer(f"LineString?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([QgsField("link_type", QVariant.Int)])
+        layer.updateFields()
+
+        features = []
+        for nx, ny, fx, fy, ltype in zip(node1d_x, node1d_y, face2d_x, face2d_y, link_type):
+            points = [QgsPointXY(float(nx), float(ny)), QgsPointXY(float(fx), float(fy))]
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPolylineXY(points))
+            feat.setAttributes([ltype])
             features.append(feat)
 
         provider.addFeatures(features)

@@ -1188,6 +1188,85 @@ def test_analyze_ugrid_data_variables_1d2d_network_file_has_no_morphodynamic_var
     assert analysis["flattenable_names"] == []
 
 
+def test_find_mesh1d2d_contact_topology_name_uses_cf_role(plugin):
+    class DummyVar:
+        def __init__(self, cf_role=None):
+            if cf_role is not None:
+                self.cf_role = cf_role
+
+    class DummyDataset:
+        def __init__(self):
+            self.variables = {
+                "mesh1d": DummyVar(cf_role="mesh_topology"),
+                "links": DummyVar(cf_role="mesh_topology_contact"),
+            }
+
+    assert plugin._find_mesh1d2d_contact_topology_name(DummyDataset()) == "links"
+
+
+def test_find_mesh1d2d_contact_topology_name_returns_none_when_absent(plugin):
+    class DummyVar:
+        def __init__(self, cf_role=None):
+            if cf_role is not None:
+                self.cf_role = cf_role
+
+    class DummyDataset:
+        def __init__(self):
+            self.variables = {"mesh1d": DummyVar(cf_role="mesh_topology")}
+
+    assert plugin._find_mesh1d2d_contact_topology_name(DummyDataset()) is None
+
+
+def test_read_mesh1d2d_links_data_from_real_network_file(plugin):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    network_path = DATA_TMP_DIR / "1d2d_net.nc"
+    with netcdf4.Dataset(str(network_path), "r") as ds:
+        mesh1d_data = plugin._read_mesh1d_data(ds)
+        links_data = plugin._read_mesh1d2d_links_data(ds, mesh1d_data)
+
+    assert links_data is not None
+    assert len(links_data["node1d_x"]) == 316
+    assert len(links_data["face2d_x"]) == 316
+    assert set(links_data["link_type"]) == {3}
+
+
+def test_load_ugrid_mesh_file_loads_1d2d_links_layer(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "1d2d_net.nc"
+    shutil.copyfile(DATA_TMP_DIR / "1d2d_net.nc", src_path)
+
+    with patch.object(plugin, "_prompt_for_morphodynamic_variables") as prompt_mock, \
+         patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock, \
+         patch.object(plugin, "_load_mesh1d_branches_layer") as load_mesh1d_mock, \
+         patch.object(plugin, "_load_mesh1d2d_links_layer") as load_links_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    prompt_mock.assert_not_called()
+    load_mesh2d_mock.assert_called_once()
+    load_mesh1d_mock.assert_called_once()
+    load_links_mock.assert_called_once()
+
+    node1d_x = load_links_mock.call_args[0][0]
+    face2d_x = load_links_mock.call_args[0][2]
+    assert len(node1d_x) == 316
+    assert len(face2d_x) == 316
+
+
+def test_load_ugrid_mesh_file_skips_1d2d_links_without_mesh2d(plugin, tmp_path):
+    pytest.importorskip("netCDF4")
+
+    src_path = tmp_path / "grd_net.nc"
+    shutil.copyfile(GRID_01, src_path)
+
+    with patch.object(plugin, "_load_mesh1d_branches_layer"), \
+         patch.object(plugin, "_load_mesh1d2d_links_layer") as load_links_mock:
+        plugin.load_ugrid_mesh_file(str(src_path))
+
+    load_links_mock.assert_not_called()
+
+
 def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
     pytest.importorskip("netCDF4")
 
