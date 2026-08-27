@@ -1026,8 +1026,8 @@ class Delft3DFileManager:
         active_id = None
         try:
             active_id = str(active_layer.id())
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError):
+            active_id = None
         active_source = _source_key(active_layer)
 
         for session in self._partition_mesh_sync_sessions.values():
