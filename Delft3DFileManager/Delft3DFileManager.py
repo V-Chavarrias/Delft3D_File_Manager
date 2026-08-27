@@ -5823,6 +5823,22 @@ class Delft3DFileManager:
                         f"Could not load mesh1d branches: {exc}"
                     )
 
+                try:
+                    self._update_progress_dialog(progress_dialog, 88, "Loading mesh1d nodes")
+                    self._set_status_message("Loading mesh1d nodes")
+                    self._load_mesh1d_nodes_layer(
+                        mesh1d_data["node_x"], mesh1d_data["node_y"],
+                        mesh1d_data.get("node_branch"), mesh1d_data.get("node_offset"),
+                        mesh1d_data.get("node_ids"), mesh1d_data["branch_names"],
+                        epsg, layer_names["mesh1d_nodes"]
+                    )
+                    loaded_layers.append("mesh1d_nodes")
+                except Exception as exc:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load mesh1d nodes: {exc}"
+                    )
+
             # Load geometry edges
             if geom_data:
                 try:
@@ -6320,6 +6336,7 @@ class Delft3DFileManager:
 
         if mesh1d_data:
             layer_names["mesh1d_branches"] = f"{base_name}_mesh1d_branches"
+            layer_names["mesh1d_nodes"] = f"{base_name}_mesh1d_nodes"
 
         if geom_data:
             layer_names["geometry_edges"] = f"{base_name}_geometry_edges"
@@ -6984,12 +7001,25 @@ class Delft3DFileManager:
         if edges is None or edge_branch is None:
             return None
 
+        node_branch = nc_dataset.variables["mesh1d_node_branch"][:] if "mesh1d_node_branch" in nc_dataset.variables else None
+        if node_branch is not None and isinstance(node_branch, np.ma.MaskedArray):
+            node_branch = node_branch.filled(-1)
+
+        node_offset = nc_dataset.variables["mesh1d_node_offset"][:] if "mesh1d_node_offset" in nc_dataset.variables else None
+        if node_offset is not None and isinstance(node_offset, np.ma.MaskedArray):
+            node_offset = node_offset.filled(np.nan)
+
+        node_ids = self._read_string_array(nc_dataset, "mesh1d_node_id")
+
         return {
             "node_x": node_x,
             "node_y": node_y,
             "edges": edges,
             "edge_branch": edge_branch,
             "branch_names": branch_names,
+            "node_branch": node_branch,
+            "node_offset": node_offset,
+            "node_ids": node_ids,
         }
 
     def _read_geometry_data(self, nc_dataset):
@@ -7326,6 +7356,50 @@ class Delft3DFileManager:
                     branch_name = branch_names[branch_index]
 
             feat.setAttributes([branch_name])
+            features.append(feat)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+
+    def _load_mesh1d_nodes_layer(self, node_x, node_y, node_branch, node_offset, node_ids, branch_names, epsg, layer_name):
+        """Load mesh1d nodes as point layer."""
+        layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", layer_name, "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("name", QVariant.String),
+            QgsField("branch", QVariant.String),
+            QgsField("offset", QVariant.Double),
+        ])
+        layer.updateFields()
+
+        features = []
+        for idx, (x, y) in enumerate(zip(node_x, node_y)):
+            if not (float('-inf') < float(x) < float('inf') and float('-inf') < float(y) < float('inf')):
+                continue
+
+            node_name = f"node_{idx}"
+            if node_ids and idx < len(node_ids) and node_ids[idx]:
+                node_name = node_ids[idx]
+
+            branch_name = None
+            if node_branch is not None and idx < len(node_branch):
+                branch_index = int(node_branch[idx])
+                if branch_index >= 0 and branch_names and branch_index < len(branch_names) and branch_names[branch_index]:
+                    branch_name = branch_names[branch_index]
+                elif branch_index >= 0:
+                    branch_name = f"Branch_{branch_index}"
+
+            offset_value = None
+            if node_offset is not None and idx < len(node_offset):
+                try:
+                    offset_value = float(node_offset[idx])
+                except (TypeError, ValueError):
+                    offset_value = None
+
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(x), float(y))))
+            feat.setAttributes([node_name, branch_name, offset_value])
             features.append(feat)
 
         provider.addFeatures(features)

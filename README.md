@@ -256,6 +256,11 @@ For large datasets, the plugin now shows a live progress bar (plus status text) 
 - One polyline feature per branch
 - Field: `name` (e.g., "Branch_0", "Branch_1", ...)
 
+**1D Mesh Nodes (mesh1d)**
+- Creates a point layer from `mesh1d_node_x`/`mesh1d_node_y` coordinates
+- One point feature per mesh1d node
+- Fields: `name` (from `mesh1d_node_id` if available), `branch` (owning branch name, if resolvable), `offset` (chainage along branch, from `mesh1d_node_offset` if available)
+
 **Network Geometry Edges**
 - Creates a polyline layer from network topology geometry
 - Built from `network_edge_nodes` and network node coordinates
@@ -272,6 +277,7 @@ For large datasets, the plugin now shows a live progress bar (plus status text) 
 When loading a mesh file, the following layers are created (if components exist):
 - `<file_name>_mesh2d` (Mesh layer)
 - `<file_name>_mesh1d_branches` (LineString layer, with `name` field)
+- `<file_name>_mesh1d_nodes` (Point layer, with `name`, `branch`, `offset` fields)
 - `<file_name>_geometry_edges` (LineString layer, with `name` field)
 - `<file_name>_geometry_nodes` (Point layer, with `name` field)
 
