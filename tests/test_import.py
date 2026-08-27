@@ -1153,6 +1153,41 @@ def test_load_ugrid_mesh_file_morphodynamic_prompt_only_shows_flattenable_variab
     assert "waterlevel" not in analysis["flattenable_names"]
 
 
+def test_analyze_ugrid_data_variables_ignores_non_sediment_extra_dimensions(plugin):
+    class DummyVar:
+        def __init__(self, dimensions, dtype="f4"):
+            self.dimensions = dimensions
+            self.dtype = dtype
+
+    class DummyDataset:
+        def __init__(self):
+            self.variables = {
+                # 1D-2D link data: extra dimension unrelated to sediment/bed layers.
+                "link1d2d_contact_type": DummyVar(("links_nContacts",), dtype="i4"),
+                "bedlevel": DummyVar(("mesh2d_nFaces",)),
+                "msed": DummyVar(("time", "mesh2d_nFaces", "nBedLayers")),
+                "mesh2d": DummyVar(())
+            }
+
+    analysis = plugin._analyze_ugrid_data_variables(DummyDataset())
+
+    assert analysis["has_morphodynamic"] is True
+    assert analysis["flattenable_names"] == ["msed"]
+    assert "link1d2d_contact_type" in analysis["candidate_names"]
+    assert "link1d2d_contact_type" not in analysis["flattenable_names"]
+
+
+def test_analyze_ugrid_data_variables_1d2d_network_file_has_no_morphodynamic_variables(plugin):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    network_path = DATA_TMP_DIR / "1d2d_net.nc"
+    with netcdf4.Dataset(str(network_path), "r") as ds:
+        analysis = plugin._analyze_ugrid_data_variables(ds)
+
+    assert analysis["has_morphodynamic"] is False
+    assert analysis["flattenable_names"] == []
+
+
 def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
     pytest.importorskip("netCDF4")
 

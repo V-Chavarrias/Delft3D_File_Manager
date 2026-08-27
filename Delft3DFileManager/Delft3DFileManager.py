@@ -6465,7 +6465,7 @@ class Delft3DFileManager:
                 continue
 
             candidate_names.append(name)
-            if self._variable_has_extra_dimensions(variable.dimensions):
+            if self._variable_has_sediment_dimensions(variable.dimensions):
                 has_morphodynamic = True
                 flattenable_names.append(name)
 
@@ -6562,18 +6562,15 @@ class Delft3DFileManager:
         )
         return any(token in value for token in tokens)
 
-    def _variable_extra_dimensions(self, dimensions):
-        """Return dimensions that are not recognized as time or space dimensions."""
-        extras = []
-        for dim_name in dimensions:
-            if self._is_time_dimension(dim_name) or self._is_space_dimension(dim_name):
-                continue
-            extras.append(dim_name)
-        return extras
+    def _is_sediment_dimension(self, dim_name):
+        """Return True if the dimension counts sediment fractions or bed layers."""
+        value = str(dim_name).strip().lower()
+        tokens = ("sedtot", "sedfrac", "bedlayer")
+        return any(token in value for token in tokens)
 
-    def _variable_has_extra_dimensions(self, dimensions):
-        """Return True when a variable has dimensions beyond time/space."""
-        return bool(self._variable_extra_dimensions(dimensions))
+    def _variable_has_sediment_dimensions(self, dimensions):
+        """Return True when a variable has a sediment-fraction or bed-layer dimension."""
+        return any(self._is_sediment_dimension(dim_name) for dim_name in dimensions)
 
     def _prompt_for_morphodynamic_variables(self, candidate_names, default_selected=None):
         """Prompt user to choose which data variables to include in the flattened file."""
@@ -7152,13 +7149,17 @@ class Delft3DFileManager:
                 return False
 
             has_geometry = False
+            face_count = None
             try:
-                if layer.meshFaceCount() > 0:
-                    has_geometry = True
+                face_count = layer.meshFaceCount()
             except (AttributeError, RuntimeError):
-                pass
+                face_count = None
 
-            if not has_geometry:
+            if face_count is not None:
+                # A mesh with a known face count of 0 is a 1D-only mesh (edges/network),
+                # not a usable 2D mesh - do not fall back to extent-based detection.
+                has_geometry = face_count > 0
+            else:
                 try:
                     ext = layer.extent()
                     has_geometry = ext is not None and not ext.isEmpty()
@@ -7206,6 +7207,9 @@ class Delft3DFileManager:
                 pass
 
         # Prefer explicit topology URIs first and keep retries minimal.
+        # NOTE: the URI driver prefix must be MDAL's internal driver name (e.g. "Ugrid"),
+        # not the QGIS provider key ("mdal"). Using "mdal:" here is not a registered MDAL
+        # driver, so MDAL_LoadMesh silently fails and the layer is never valid.
         quoted_file = f'"{filepath}"'
         ordered_topology_names = []
         for topology_name in (topology_names or []):
@@ -7217,11 +7221,14 @@ class Delft3DFileManager:
 
         attempt_candidates = []
         for topology_name in ordered_topology_names:
-            attempt_candidates.append((f'mdal:{quoted_file}:{topology_name}', "mdal"))
+            attempt_candidates.append((f'Ugrid:{quoted_file}:{topology_name}', "mdal"))
+        for topology_name in ordered_topology_names:
+            # Driver-less form still lets MDAL auto-detect the format while pinning the mesh name.
+            attempt_candidates.append((f'{quoted_file}:{topology_name}', "mdal"))
 
         attempt_candidates.extend(
             [
-                (f"mdal:{filepath}", "mdal"),
+                (f"Ugrid:{filepath}", "mdal"),
                 (filepath, "mdal"),
                 # Last-resort fallback for environments where provider autodetection is required.
                 (filepath, ""),
