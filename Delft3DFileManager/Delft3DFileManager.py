@@ -199,7 +199,7 @@ class Delft3DFileManager:
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
         self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
         self.import_action.setStatusTip(
-            "Import Delft3D file (.fxw/.pli/.ldb/.pol/.pliz/.xyn/.xyz/.nc/.mat/.csl/.csd/.ini/.mdu/.ext/.bc/dimr_config.xml)"
+            "Import Delft3D file (.fxw/.pli/.ldb/.spl/.pol/.pliz/.xyn/.xyz/.nc/.mat/.csl/.csd/.ini/.mdu/.ext/.bc/dimr_config.xml)"
         )
         self.import_action.triggered.connect(self.run)
         self.iface.addToolBarIcon(self.import_action)
@@ -363,7 +363,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini *.mdu *.ext *.bc *.xml);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.spl *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini *.mdu *.ext *.bc *.xml);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -393,7 +393,7 @@ class Delft3DFileManager:
                     "Delft3D File Manager",
                     "Unsupported .pliz header column count. Expected 2 (polyline), 4 (bridge), or 9 (fixed-weir).",
                 )
-        elif ext_lower in [".pli", ".ldb", ".pol"]:
+        elif ext_lower in [".pli", ".ldb", ".spl", ".pol"]:
             self.load_polyline_file(filepath)
         elif ext_lower == ".xyn":
             self.load_xyn_file(filepath)
@@ -440,6 +440,7 @@ class Delft3DFileManager:
                 "  .fxw - Fixed weir file\n"
                 "  .pli - Polyline file\n"
                 "  .ldb - Light database file\n"
+                "  .spl - Spline file\n"
                 "  .pol - Polygon file\n"
                 "  .pliz - Polyline or fixed weir file (auto-detected by column count)\n"
                 "  .xyn - Point file\n"
@@ -3877,7 +3878,7 @@ class Delft3DFileManager:
         )
 
     def load_polyline_file(self, filepath):
-        """Parse polyline file (.pli, .ldb, .pol, .pliz) and create line layer."""
+        """Parse polyline file (.pli, .ldb, .spl, .pol, .pliz) and create line layer."""
         base_name = os.path.splitext(os.path.basename(filepath))[0]
         
         # Create line layer
@@ -3889,11 +3890,11 @@ class Delft3DFileManager:
         # Read file
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                lines = [line.strip() for line in f if line.strip()]
+                lines = [line.strip() for line in f if line.strip() and not line.lstrip().startswith(("*", "#", ";"))]
         except UnicodeDecodeError:
             # Fallback to system encoding if UTF-8 fails
             with open(filepath, 'r') as f:
-                lines = [line.strip() for line in f if line.strip()]
+                lines = [line.strip() for line in f if line.strip() and not line.lstrip().startswith(("*", "#", ";"))]
         
         if not lines:
             QMessageBox.warning(

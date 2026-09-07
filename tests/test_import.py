@@ -11,6 +11,7 @@ DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 DATA_TMP_DIR = pathlib.Path(__file__).parent.parent / "data_tmp"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
 PLI_01 = DATA_DIR / "pli_01.pli"
+SPL_01 = DATA_DIR / "spl.spl"
 XYZ_01 = DATA_DIR / "xyz_01.xyz"
 HIS_01 = DATA_DIR / "sample_his_small.nc"
 CSL_01 = DATA_DIR / "csl.ini"
@@ -75,6 +76,12 @@ def test_route_pol(plugin):
     plugin.load_polyline_file = MagicMock()
     plugin.load_file_by_extension("/fake/file.pol")
     plugin.load_polyline_file.assert_called_once_with("/fake/file.pol")
+
+
+def test_route_spl(plugin):
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_file_by_extension("/fake/file.spl")
+    plugin.load_polyline_file.assert_called_once_with("/fake/file.spl")
 
 
 def test_route_pliz_fixed_weir(plugin):
@@ -1709,6 +1716,15 @@ def test_load_polyline_file_adds_layer(plugin):
     add_map_layer.reset_mock()
 
     plugin.load_polyline_file(str(PLI_01))
+
+    assert add_map_layer.call_count == 1
+
+
+def test_load_spline_file_with_comments_adds_layer(plugin):
+    add_map_layer = _add_map_layer_mock()
+    add_map_layer.reset_mock()
+
+    plugin.load_file_by_extension(str(SPL_01))
 
     assert add_map_layer.call_count == 1
 

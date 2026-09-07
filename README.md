@@ -33,7 +33,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 
 ### Supported File Extensions
 - **`.fxw`** — Fixed weir file (creates line + point layers)
-- **`.pli`, `.ldb`, `.pol`** — Polyline files (creates line layer)
+- **`.pli`, `.ldb`, `.spl`, `.pol`** — Polyline files (creates line layer; `.spl` supports comment lines)
 - **`.pliz`** — Auto-detected as polyline, bridge, or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
@@ -145,7 +145,7 @@ Each weir block is read in this structure:
 - `<file_name>_points` (Point, EPSG:28992)
 	- fields: `weir_name`, `crest_lvl`, `sill_hL`, `sill_hR`, `crest_w`, `slope_L`, `slope_R`, `rough_cd`
 
-### Import: Polyline (`.pli`, `.ldb`, `.pol`, `.pliz` with 2 columns)
+### Import: Polyline (`.pli`, `.ldb`, `.spl`, `.pol`, `.pliz` with 2 columns)
 
 Parse a polyline file into a memory line layer with named polylines.
 
