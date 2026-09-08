@@ -34,6 +34,7 @@ import re
 import shutil
 import sys
 import glob
+from urllib.parse import unquote, urlsplit
 try:
     from defusedxml import ElementTree as ET
     _HAS_DEFUSEDXML = True
@@ -121,6 +122,40 @@ def _dialog_exec(dialog):
     raise AttributeError("Dialog object has neither exec nor exec_ method")
 
 
+def _mesh_source_path(source):
+    """Resolve a QGIS/MDAL mesh source URI to an existing local path."""
+    value = str(source or "").strip().strip('"')
+    value = value.split("|", 1)[0].strip().strip('"')
+
+    if value.lower().startswith("file://"):
+        parsed = urlsplit(value)
+        value = unquote(parsed.path or "")
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            value = f"//{parsed.netloc}{value}"
+        if re.match(r"^/[A-Za-z]:/", value):
+            value = value[1:]
+    elif re.match(r"^(?:mdal|ugrid):", value, re.IGNORECASE):
+        quoted_path = re.search(r'"([^"]+)"', value)
+        if quoted_path:
+            value = quoted_path.group(1)
+        else:
+            value = re.sub(r"^[^:]+:", "", value, count=1)
+            value = re.sub(r":(?:Mesh2d|mesh2d)$", "", value)
+
+    value = unquote(value.strip().strip('"'))
+    candidates = [value]
+    if not os.path.isabs(value):
+        candidates.append(os.path.abspath(value))
+    workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    relative_value = value.lstrip("\\/")
+    candidates.append(os.path.join(workspace_root, relative_value))
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return os.path.abspath(candidates[1] if len(candidates) > 1 else candidates[0])
+
+
 class _CanvasDoubleClickFilter(QObject):
     """Event filter that forwards canvas double-clicks as map coordinates."""
 
@@ -169,6 +204,7 @@ class Delft3DFileManager:
         self.mesh_profile_action = None
         self.his_timeseries_action = None
         self.mesh_properties_action = None
+        self.stream_function_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -330,6 +366,15 @@ class Delft3DFileManager:
         self.mesh_properties_action.triggered.connect(self.check_mesh_properties)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_properties_action)
 
+        self.stream_function_action = QAction(
+            QIcon(icon_path), "Compute Streamfunction", self.iface.mainWindow()
+        )
+        self.stream_function_action.setStatusTip(
+            "Compute a time-dependent node streamfunction from q1 discharge"
+        )
+        self.stream_function_action.triggered.connect(self.compute_stream_function)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.stream_function_action)
+
         self._connect_canvas_double_click()
 
     def unload(self):
@@ -366,9 +411,76 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
         if self.mesh_properties_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_properties_action)
+        if self.stream_function_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.stream_function_action)
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
+
+    def compute_stream_function(self):
+        """Create a time-dependent node streamfunction mesh from q1 output."""
+        layer = self.iface.activeLayer()
+        if not self._is_mesh_layer(layer) or not layer.isValid():
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Activate a valid 2D mesh layer before computing a streamfunction.",
+            )
+            return None
+
+        source = ""
+        try:
+            source = str(layer.customProperty("delft3d_mesh_source", ""))
+        except (RuntimeError, AttributeError):
+            pass
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = _mesh_source_path(source)
+        if not source or not os.path.exists(source):
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "The active mesh does not have a readable netCDF source file.",
+            )
+            return None
+
+        try:
+            from .stream_function import (
+                StreamFunctionError,
+                create_stream_function_sidecar,
+            )
+
+            source_paths = self._discover_partition_mesh_files(source)
+            output_path = create_stream_function_sidecar(source_paths)
+            base_name = os.path.splitext(os.path.basename(output_path))[0]
+            try:
+                import netCDF4 as nc
+                with nc.Dataset(source, "r") as source_dataset:
+                    epsg = self._read_epsg_from_nc(source_dataset) or 28992
+            except (ImportError, OSError, RuntimeError, ValueError):
+                epsg = 28992
+            derived_layer = self._load_mesh2d_layer(
+                output_path,
+                base_name,
+                epsg,
+                f"{base_name}_mesh",
+                topology_names=["mesh2d"],
+                expect_data_variables=True,
+            )
+            try:
+                derived_layer.setCustomProperty("delft3d_stream_function_source", source)
+            except (RuntimeError, AttributeError):
+                pass
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Streamfunction layer created: {base_name}",
+            )
+            return derived_layer
+        except (OSError, RuntimeError, StreamFunctionError, ValueError) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not compute streamfunction: {exc}",
+            )
+            return None
 
     def check_mesh_properties(self):
         """Create quality, connectivity, center, and dual layers for the active mesh."""

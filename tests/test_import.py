@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from Delft3DFileManager.Delft3DFileManager import _mesh_source_path
+
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 DATA_TMP_DIR = pathlib.Path(__file__).parent.parent / "data_tmp"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
@@ -38,6 +40,21 @@ _qgis_core = sys.modules["qgis.core"]
 def _add_map_layer_mock():
     """Return the consistent addMapLayer mock from the qgis.core stub."""
     return _qgis_core.QgsProject.instance.return_value.addMapLayer
+
+
+def test_mesh_source_path_resolves_windows_relative_path():
+    resolved = _mesh_source_path(r"\data_tmp\RIJN_0000_map.nc")
+
+    assert resolved.endswith("data_tmp\\RIJN_0000_map.nc")
+    assert pathlib.Path(resolved).is_file()
+
+
+def test_mesh_source_path_resolves_ugrid_uri():
+    source = (DATA_TMP_DIR / "RIJN_0000_map.nc").resolve()
+
+    resolved = _mesh_source_path(f'Ugrid:"{source}":mesh2d')
+
+    assert pathlib.Path(resolved) == source
 
 
 # ---------------------------------------------------------------------------

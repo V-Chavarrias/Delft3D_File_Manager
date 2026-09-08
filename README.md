@@ -13,6 +13,7 @@ A QGIS plugin to manage Delft3D files.
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
+- Computes a time-dependent node streamfunction from `q1` discharge through the **Compute Streamfunction** action.
 - Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
 - Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
 - Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
@@ -117,6 +118,12 @@ The **Mesh Dataset Slicer** action is a separate window that provides a Crayfish
 - The displayed scalar dataset is captured as a snapshot, so changing QGIS time or variable does not rewrite existing curves.
 - Partition layers are sampled as one logical mesh. Owner-masked imports are the supported mode because they avoid duplicate ghost-cell values at partition boundaries.
 - Raw ghost-overlap imports may produce ambiguous values where partitions overlap and are not silently deduplicated.
+
+### Streamfunction
+
+Activate an imported 2D mesh and choose **Delft3D File Manager -> Compute Streamfunction**. The action reads the time-dependent `q1` edge discharge, integrates it over the oriented UGRID edge connectivity, and adds a derived mesh layer with a node-centered `stream_function` dataset for every output time.
+
+Partitioned map outputs are merged globally before calculation. Partition face ownership is used to remove ghost-edge duplicates; outputs with conflicting or incomplete topology are rejected rather than producing discontinuities at partition boundaries. The generated UGRID sidecar is stored beside the source map output with the `_qgis_stream_function.nc` suffix.
 
 For boundary forcing linked through `.ext`, activate the imported `*_ext_spatial` layer and click/select a feature to display its series in the popup chart.
 
