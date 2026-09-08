@@ -10,7 +10,6 @@ import pytest
 from Delft3DFileManager.Delft3DFileManager import _mesh_source_path
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
-DATA_TMP_DIR = pathlib.Path(__file__).parent.parent / "data_tmp"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
 PLI_01 = DATA_DIR / "pli_01.pli"
 SPL_01 = DATA_DIR / "spl.spl"
@@ -19,6 +18,7 @@ HIS_01 = DATA_DIR / "sample_his_small.nc"
 CSL_01 = DATA_DIR / "csl.ini"
 CSD_01 = DATA_DIR / "csd.ini"
 GRID_01 = DATA_DIR / "grd_net.nc"
+DATA_1D2D = DATA_DIR / "1d2d.nc"
 MORPHO_01 = DATA_DIR / "morpho_small.nc"
 MIXED_1D2D_01 = DATA_DIR / "mixed_1d2d_small.nc"
 BRIDGES_01 = DATA_DIR / "bridges.pliz"
@@ -43,14 +43,13 @@ def _add_map_layer_mock():
 
 
 def test_mesh_source_path_resolves_windows_relative_path():
-    resolved = _mesh_source_path(r"\data_tmp\RIJN_0000_map.nc")
+    resolved = _mesh_source_path(r"\data\grd_net.nc")
 
-    assert resolved.endswith("data_tmp\\RIJN_0000_map.nc")
-    assert pathlib.Path(resolved).is_file()
+    assert pathlib.Path(resolved) == (DATA_DIR / "grd_net.nc").resolve()
 
 
 def test_mesh_source_path_resolves_ugrid_uri():
-    source = (DATA_TMP_DIR / "RIJN_0000_map.nc").resolve()
+    source = (DATA_DIR / "grd_net.nc").resolve()
 
     resolved = _mesh_source_path(f'Ugrid:"{source}":mesh2d')
 
@@ -1204,7 +1203,7 @@ def test_analyze_ugrid_data_variables_ignores_non_sediment_extra_dimensions(plug
 def test_analyze_ugrid_data_variables_1d2d_network_file_has_no_morphodynamic_variables(plugin):
     netcdf4 = pytest.importorskip("netCDF4")
 
-    network_path = DATA_TMP_DIR / "1d2d_net.nc"
+    network_path = DATA_1D2D
     with netcdf4.Dataset(str(network_path), "r") as ds:
         analysis = plugin._analyze_ugrid_data_variables(ds)
 
@@ -1244,7 +1243,7 @@ def test_find_mesh1d2d_contact_topology_name_returns_none_when_absent(plugin):
 def test_read_mesh1d2d_links_data_from_real_network_file(plugin):
     netcdf4 = pytest.importorskip("netCDF4")
 
-    network_path = DATA_TMP_DIR / "1d2d_net.nc"
+    network_path = DATA_1D2D
     with netcdf4.Dataset(str(network_path), "r") as ds:
         mesh1d_data = plugin._read_mesh1d_data(ds)
         links_data = plugin._read_mesh1d2d_links_data(ds, mesh1d_data)
@@ -1258,8 +1257,8 @@ def test_read_mesh1d2d_links_data_from_real_network_file(plugin):
 def test_load_ugrid_mesh_file_loads_1d2d_links_layer(plugin, tmp_path):
     pytest.importorskip("netCDF4")
 
-    src_path = tmp_path / "1d2d_net.nc"
-    shutil.copyfile(DATA_TMP_DIR / "1d2d_net.nc", src_path)
+    src_path = tmp_path / "1d2d.nc"
+    shutil.copyfile(DATA_1D2D, src_path)
 
     with patch.object(plugin, "_prompt_for_morphodynamic_variables") as prompt_mock, \
          patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock, \

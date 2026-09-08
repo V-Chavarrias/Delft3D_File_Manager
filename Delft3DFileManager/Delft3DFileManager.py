@@ -143,12 +143,20 @@ def _mesh_source_path(source):
             value = re.sub(r":(?:Mesh2d|mesh2d)$", "", value)
 
     value = unquote(value.strip().strip('"'))
-    candidates = [value]
-    if not os.path.isabs(value):
-        candidates.append(os.path.abspath(value))
+    filesystem_value = value.replace("\\", os.sep)
+    is_drive_less_rooted_path = (
+        filesystem_value.startswith(("/", "\\"))
+        and not re.match(r"^[A-Za-z]:[\\/]", filesystem_value)
+    )
+    candidates = []
+    if not is_drive_less_rooted_path:
+        candidates.append(filesystem_value)
+    if not os.path.isabs(filesystem_value) or is_drive_less_rooted_path:
+        candidates.append(os.path.abspath(filesystem_value))
     workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    relative_value = value.lstrip("\\/")
-    candidates.append(os.path.join(workspace_root, relative_value))
+    if not os.path.isabs(filesystem_value) or is_drive_less_rooted_path:
+        relative_value = filesystem_value.lstrip("\\/")
+        candidates.append(os.path.join(workspace_root, relative_value))
 
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
