@@ -373,10 +373,7 @@ class Delft3DFileManager:
     def check_mesh_properties(self):
         """Create quality, connectivity, center, and dual layers for the active mesh."""
         layer = self.iface.activeLayer()
-        try:
-            is_mesh = isinstance(layer, QgsMeshLayer)
-        except TypeError:
-            is_mesh = False
+        is_mesh = self._is_mesh_layer(layer)
         if not is_mesh or not layer.isValid():
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
@@ -420,6 +417,27 @@ class Delft3DFileManager:
     def check_mesh_orthogonality(self):
         """Compatibility alias for the former orthogonality-only action."""
         return self.check_mesh_properties()
+
+    @staticmethod
+    def _is_mesh_layer(layer):
+        """Recognize mesh layers across QGIS Python binding variants."""
+        if layer is None:
+            return False
+
+        try:
+            if isinstance(layer, QgsMeshLayer):
+                return True
+        except TypeError:
+            pass
+
+        layer_type = getattr(layer, "type", None)
+        if not callable(layer_type):
+            return False
+
+        try:
+            return layer_type() == QgsMapLayerType.MeshLayer
+        except (AttributeError, TypeError, RuntimeError):
+            return False
 
     @staticmethod
     def _native_mesh(layer):
