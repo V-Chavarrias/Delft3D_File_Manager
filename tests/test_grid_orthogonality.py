@@ -6,6 +6,7 @@ from Delft3DFileManager.grid_orthogonality import (
     edge_orthogonality,
     face_orthogonality,
     maximum_orthogonality,
+    mesh_properties,
     orthogonality_cosines,
 )
 
@@ -119,3 +120,41 @@ def test_zero_length_face_center_link_uses_worst_case_sentinel():
     values = orthogonality_cosines(node_x, node_y, [(0, 1, 2), (0, 1, 2)])
 
     assert values.tolist() == [1.0, 1.0, 1.0]
+
+
+def test_mesh_properties_classifies_neighbors_components_and_dual_links():
+    node_x = np.array([0.0, 1.0, 1.0, 0.0, 3.0, 4.0, 3.0])
+    node_y = np.array([0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0])
+    faces = [(0, 1, 2, 3), (1, 4, 5, 2), (4, 5, 6)]
+
+    properties = mesh_properties(node_x, node_y, faces)
+
+    assert properties["neighbor_counts"].tolist() == [1, 2, 1]
+    assert properties["component_ids"].tolist() == [0, 0, 0]
+    assert properties["boundary_flags"].tolist() == [True, True, True]
+    assert len(properties["dual_links"]) == 2
+    assert len(properties["edges"]) == 9
+
+
+def test_mesh_properties_preserves_disconnected_components():
+    node_x = np.array([0.0, 1.0, 0.0, 3.0, 4.0, 3.0])
+    node_y = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+    faces = [(0, 1, 2), (3, 4, 5)]
+
+    properties = mesh_properties(node_x, node_y, faces)
+
+    assert properties["neighbor_counts"].tolist() == [0, 0]
+    assert properties["component_ids"].tolist() == [0, 1]
+    assert properties["dual_links"] == []
+
+
+def test_mesh_properties_flags_nonmanifold_shared_edge():
+    node_x = np.array([0.0, 1.0, 0.0, 0.0, 1.0])
+    node_y = np.array([0.0, 0.0, 1.0, -1.0, 1.0])
+    faces = [(0, 1, 2), (1, 0, 3), (0, 1, 4)]
+
+    properties = mesh_properties(node_x, node_y, faces)
+
+    assert properties["neighbor_counts"].tolist() == [2, 2, 2]
+    assert properties["nonmanifold_flags"].tolist() == [True, True, True]
+    assert sum(edge["nonmanifold"] for edge in properties["edges"]) == 1

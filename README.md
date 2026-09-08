@@ -13,7 +13,7 @@ A QGIS plugin to manage Delft3D files.
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
-- Checks orthogonality for the active 2D mesh and creates edge and polygon quality layers.
+- Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
 - Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
 - Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
 - Writes a flattened NetCDF side-car and loads the original plus flattened datasets as separate layers, with flattened layers tagged as `morpho`.
@@ -280,25 +280,41 @@ When loading a mesh file, the following layers are created (if components exist)
 - `<file_name>_mesh1d_branches` (LineString layer, with `name` field)
 - `<file_name>_mesh1d_nodes` (Point layer, with `name`, `branch`, `offset` fields)
 
-#### Mesh Orthogonality
-
-1. Activate a loaded 2D mesh layer in QGIS.
-2. Choose **Delft3D File Manager -> Check Mesh Orthogonality**.
-
-The action creates two memory layers without changing the source mesh:
-
-- `<mesh_name>_orthogonality_edges` (LineString), with an `orthogonality` field for each internal edge. Values near `0` are more orthogonal; values near `1` are worse.
-- `<mesh_name>_orthogonality_faces` (Polygon), with a `max_orthogonality` field containing the worst adjacent internal-edge value. The polygon layer receives graduated coloring automatically and can be restyled in QGIS using that field.
-
-For partitioned imports, the active partition is analyzed independently.
-- `<file_name>_geometry_edges` (LineString layer, with `name` field)
-- `<file_name>_geometry_nodes` (Point layer, with `name` field)
-
 Flattened morphodynamic variables are stored in the sidecar file as additional derived variables whose names include the original variable name and dimension labels/values when available.
 
 #### CRS Handling
 - The plugin attempts to read EPSG code from NetCDF metadata
 - If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
+
+#### Mesh Properties
+
+1. Activate a loaded 2D mesh layer in QGIS.
+2. Choose **Delft3D File Manager -> Check Mesh Properties**.
+
+The action creates four memory layers without changing the source mesh:
+
+- `<mesh_name>_mesh_properties_faces` (Polygon), with `neighbor_count`, `boundary_flag`, `nonmanifold_flag`, `component_id`, and `max_orthogonality` fields. It receives graduated coloring by orthogonality.
+- `<mesh_name>_mesh_properties_edges` (LineString), with edge incidence, boundary/non-manifold flags, and `orthogonality`. Values near `0` are more orthogonal; values near `1` are worse.
+- `<mesh_name>_mesh_properties_centers` (Point), with one point per face and the same connectivity and quality attributes.
+- `<mesh_name>_mesh_properties_dual_links` (LineString), connecting the centers of adjacent faces and identifying their shared edge.
+
+The `neighbor_count` and `component_id` fields can be used with graduated or categorized symbology to inspect connectivity. The dual-link layer is a center-to-center dual graph; it is not a clipped polygonal Voronoi dual.
+
+#### Mesh Property Fields
+
+The properties are calculated from the mesh topology. Mesh edges are treated as undirected: an edge connecting nodes `A` and `B` is the same edge as one connecting `B` and `A`.
+
+- `neighbor_count`: number of distinct faces that share an edge with the current face. A face with no shared edges has value `0`. A normal interior quadrilateral generally has four neighbors only when all four of its edges are shared; boundary faces have fewer neighbors.
+- `boundary_flag`: `1` when at least one edge of the face belongs to only one face in the analyzed mesh, otherwise `0`. Such an edge is a mesh boundary edge. This identifies the boundary of the active mesh or active partition, not necessarily the physical model boundary.
+- `nonmanifold_flag`: `1` when at least one edge of the face belongs to more than two faces, otherwise `0`. An edge shared by exactly two faces is treated as regular; an edge shared by three or more faces is non-manifold.
+- `component_id`: identifier of the connected component containing the face. Faces are connected when they share an edge. IDs start at `0` and are assigned while traversing the mesh; the specific numeric ID is not a persistent physical identifier.
+- `max_orthogonality`: largest orthogonality cosine among the face's shared edges. It is computed from the angle between each shared mesh edge and the line joining the circumcenters of its two adjacent faces. Values near `0` indicate better orthogonality and values near `1` indicate worse orthogonality. A face without any shared edge has a null value because no orthogonality measure can be computed.
+
+For the edge layer, `incident_count` is the number of faces using the edge, `boundary_flag` is `1` for `incident_count = 1`, and `nonmanifold_flag` is `1` for `incident_count > 2`. The `face_ids` field lists the incident face IDs. Dual links are created only for adjacent face pairs and therefore represent shared-edge connectivity.
+
+For partitioned imports, the active partition is analyzed independently.
+- `<file_name>_geometry_edges` (LineString layer, with `name` field)
+- `<file_name>_geometry_nodes` (Point layer, with `name` field)
 
 ### Import: Delft3D FM HIS (`.nc`)
 

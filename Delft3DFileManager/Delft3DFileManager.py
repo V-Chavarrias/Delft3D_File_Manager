@@ -168,7 +168,7 @@ class Delft3DFileManager:
         self.profile_chart_action = None
         self.mesh_profile_action = None
         self.his_timeseries_action = None
-        self.mesh_orthogonality_action = None
+        self.mesh_properties_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -321,14 +321,14 @@ class Delft3DFileManager:
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.his_timeseries_action)
 
-        self.mesh_orthogonality_action = QAction(
-            QIcon(icon_path), "Check Mesh Orthogonality", self.iface.mainWindow()
+        self.mesh_properties_action = QAction(
+            QIcon(icon_path), "Check Mesh Properties", self.iface.mainWindow()
         )
-        self.mesh_orthogonality_action.setStatusTip(
-            "Create edge and face layers showing 2D mesh orthogonality"
+        self.mesh_properties_action.setStatusTip(
+            "Create layers showing 2D mesh quality and connectivity"
         )
-        self.mesh_orthogonality_action.triggered.connect(self.check_mesh_orthogonality)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_orthogonality_action)
+        self.mesh_properties_action.triggered.connect(self.check_mesh_properties)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_properties_action)
 
         self._connect_canvas_double_click()
 
@@ -364,14 +364,14 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_profile_action)
         if self.his_timeseries_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
-        if self.mesh_orthogonality_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_orthogonality_action)
+        if self.mesh_properties_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_properties_action)
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
 
-    def check_mesh_orthogonality(self):
-        """Create edge and face quality layers for the active 2D mesh."""
+    def check_mesh_properties(self):
+        """Create quality, connectivity, center, and dual layers for the active mesh."""
         layer = self.iface.activeLayer()
         try:
             is_mesh = isinstance(layer, QgsMeshLayer)
@@ -391,31 +391,35 @@ class Delft3DFileManager:
                 raise ValueError("The active mesh contains no faces")
 
             import numpy as np
-            from .grid_orthogonality import edge_orthogonality, face_orthogonality
+            from .grid_orthogonality import mesh_properties
 
             node_x = np.asarray([self._mesh_vertex_coordinate(vertex, "x") for vertex in vertices])
             node_y = np.asarray([self._mesh_vertex_coordinate(vertex, "y") for vertex in vertices])
-            edge_results = edge_orthogonality(node_x, node_y, faces)
-            face_values = face_orthogonality(faces, edge_results)
-            edge_layer = self._create_mesh_orthogonality_edges(
-                layer, node_x, node_y, edge_results
+            properties = mesh_properties(node_x, node_y, faces)
+            output_layers = self._create_mesh_property_layers(
+                layer, node_x, node_y, properties
             )
-            face_layer = self._create_mesh_orthogonality_faces(
-                layer, node_x, node_y, faces, face_values
-            )
-            worst = max(result[-1] for result in edge_results)
+            quality_values = properties["face_orthogonality"]
+            finite_quality = [value for value in quality_values if math.isfinite(value)]
+            worst = max(finite_quality) if finite_quality else float("nan")
             self.iface.messageBar().pushSuccess(
                 "Delft3D File Manager",
-                f"Mesh orthogonality calculated: {len(edge_results)} internal edges, "
+                f"Mesh properties calculated: {len(faces)} faces, "
+                f"{len(properties['edges'])} edges, "
+                f"{len(properties['dual_links'])} dual links, "
                 f"worst cosine {worst:.4f}.",
             )
-            return edge_layer, face_layer
+            return output_layers
         except Exception as exc:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 f"Could not calculate mesh orthogonality: {exc}",
             )
             return None
+
+    def check_mesh_orthogonality(self):
+        """Compatibility alias for the former orthogonality-only action."""
+        return self.check_mesh_properties()
 
     @staticmethod
     def _native_mesh(layer):
@@ -487,6 +491,157 @@ class Delft3DFileManager:
             authid = ""
         return authid or "EPSG:28992"
 
+    def _create_mesh_property_layers(self, source_layer, node_x, node_y, properties):
+        """Create all mesh-property outputs from one topology-analysis result."""
+        faces = properties["faces"]
+        centers = properties["centers"]
+        edges = properties["edges"]
+        dual_links = properties["dual_links"]
+        neighbor_counts = properties["neighbor_counts"]
+        boundary_flags = properties["boundary_flags"]
+        nonmanifold_flags = properties["nonmanifold_flags"]
+        component_ids = properties["component_ids"]
+        face_quality = properties["face_orthogonality"]
+        crs = self._mesh_layer_crs(source_layer)
+        prefix = source_layer.name()
+
+        face_layer = QgsVectorLayer(
+            f"Polygon?crs={crs}", f"{prefix}_mesh_properties_faces", "memory"
+        )
+        face_provider = face_layer.dataProvider()
+        face_provider.addAttributes([
+            QgsField("face_id", QVariant.Int),
+            QgsField("neighbor_count", QVariant.Int),
+            QgsField("boundary_flag", QVariant.Int),
+            QgsField("nonmanifold_flag", QVariant.Int),
+            QgsField("component_id", QVariant.Int),
+            QgsField("max_orthogonality", QVariant.Double),
+        ])
+        face_layer.updateFields()
+        face_features = []
+        for face_id, face in enumerate(faces):
+            feature = QgsFeature(face_layer.fields())
+            points = [QgsPointXY(float(node_x[node]), float(node_y[node])) for node in face]
+            feature.setGeometry(QgsGeometry.fromPolygonXY([points]))
+            quality = face_quality[face_id]
+            feature.setAttributes([
+                face_id,
+                int(neighbor_counts[face_id]),
+                int(boundary_flags[face_id]),
+                int(nonmanifold_flags[face_id]),
+                int(component_ids[face_id]),
+                float(quality) if math.isfinite(quality) else None,
+            ])
+            face_features.append(feature)
+        face_provider.addFeatures(face_features)
+        face_layer.updateExtents()
+        self._apply_orthogonality_renderer(face_layer, "max_orthogonality")
+
+        edge_layer = QgsVectorLayer(
+            f"LineString?crs={crs}", f"{prefix}_mesh_properties_edges", "memory"
+        )
+        edge_provider = edge_layer.dataProvider()
+        edge_provider.addAttributes([
+            QgsField("node_a", QVariant.Int),
+            QgsField("node_b", QVariant.Int),
+            QgsField("face_ids", QVariant.String),
+            QgsField("incident_count", QVariant.Int),
+            QgsField("boundary_flag", QVariant.Int),
+            QgsField("nonmanifold_flag", QVariant.Int),
+            QgsField("orthogonality", QVariant.Double),
+        ])
+        edge_layer.updateFields()
+        edge_features = []
+        for edge in edges:
+            feature = QgsFeature(edge_layer.fields())
+            first_node, second_node = edge["node_a"], edge["node_b"]
+            feature.setGeometry(QgsGeometry.fromPolylineXY([
+                QgsPointXY(float(node_x[first_node]), float(node_y[first_node])),
+                QgsPointXY(float(node_x[second_node]), float(node_y[second_node])),
+            ]))
+            value = edge["orthogonality"]
+            feature.setAttributes([
+                first_node,
+                second_node,
+                ",".join(str(face_id) for face_id in edge["face_ids"]),
+                edge["incident_count"],
+                int(edge["boundary"]),
+                int(edge["nonmanifold"]),
+                value,
+            ])
+            edge_features.append(feature)
+        edge_provider.addFeatures(edge_features)
+        edge_layer.updateExtents()
+
+        center_layer = QgsVectorLayer(
+            f"Point?crs={crs}", f"{prefix}_mesh_properties_centers", "memory"
+        )
+        center_provider = center_layer.dataProvider()
+        center_provider.addAttributes([
+            QgsField("face_id", QVariant.Int),
+            QgsField("neighbor_count", QVariant.Int),
+            QgsField("boundary_flag", QVariant.Int),
+            QgsField("nonmanifold_flag", QVariant.Int),
+            QgsField("component_id", QVariant.Int),
+            QgsField("max_orthogonality", QVariant.Double),
+        ])
+        center_layer.updateFields()
+        center_features = []
+        for face_id, center in enumerate(centers):
+            feature = QgsFeature(center_layer.fields())
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(center[0]), float(center[1]))))
+            quality = face_quality[face_id]
+            feature.setAttributes([
+                face_id,
+                int(neighbor_counts[face_id]),
+                int(boundary_flags[face_id]),
+                int(nonmanifold_flags[face_id]),
+                int(component_ids[face_id]),
+                float(quality) if math.isfinite(quality) else None,
+            ])
+            center_features.append(feature)
+        center_provider.addFeatures(center_features)
+        center_layer.updateExtents()
+
+        dual_layer = QgsVectorLayer(
+            f"LineString?crs={crs}", f"{prefix}_mesh_properties_dual_links", "memory"
+        )
+        dual_provider = dual_layer.dataProvider()
+        dual_provider.addAttributes([
+            QgsField("face_a", QVariant.Int),
+            QgsField("face_b", QVariant.Int),
+            QgsField("node_a", QVariant.Int),
+            QgsField("node_b", QVariant.Int),
+            QgsField("orthogonality", QVariant.Double),
+        ])
+        dual_layer.updateFields()
+        dual_features = []
+        edge_values = {
+            (edge["node_a"], edge["node_b"]): edge["orthogonality"]
+            for edge in edges
+        }
+        for face_a, face_b, node_a, node_b in dual_links:
+            feature = QgsFeature(dual_layer.fields())
+            feature.setGeometry(QgsGeometry.fromPolylineXY([
+                QgsPointXY(float(centers[face_a][0]), float(centers[face_a][1])),
+                QgsPointXY(float(centers[face_b][0]), float(centers[face_b][1])),
+            ]))
+            feature.setAttributes([
+                face_a,
+                face_b,
+                node_a,
+                node_b,
+                edge_values.get((node_a, node_b)),
+            ])
+            dual_features.append(feature)
+        dual_provider.addFeatures(dual_features)
+        dual_layer.updateExtents()
+
+        layers = (face_layer, edge_layer, center_layer, dual_layer)
+        for output_layer in layers:
+            QgsProject.instance().addMapLayer(output_layer)
+        return layers
+
     def _create_mesh_orthogonality_edges(self, source_layer, node_x, node_y, edge_results):
         crs = self._mesh_layer_crs(source_layer)
         layer = QgsVectorLayer(
@@ -545,7 +700,7 @@ class Delft3DFileManager:
         return layer
 
     @staticmethod
-    def _apply_orthogonality_renderer(layer):
+    def _apply_orthogonality_renderer(layer, field_name="max_orthogonality"):
         """Apply a simple graduated 0-to-1 renderer when supported by QGIS."""
         try:
             ranges = []
@@ -555,7 +710,7 @@ class Delft3DFileManager:
                 symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PolygonGeometry)
                 symbol.setColor(color)
                 ranges.append(QgsRendererRange(lower, upper, symbol, f"{lower:.1f} - {upper:.1f}"))
-            layer.setRenderer(QgsGraduatedSymbolRenderer("max_orthogonality", ranges))
+            layer.setRenderer(QgsGraduatedSymbolRenderer(field_name, ranges))
         except (AttributeError, RuntimeError, TypeError):
             pass
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from collections import defaultdict, deque
 
 import numpy as np
 
@@ -91,6 +92,110 @@ def face_orthogonality(
         values[first_face] = np.nanmax([values[first_face], cosine])
         values[second_face] = np.nanmax([values[second_face], cosine])
     return values
+
+
+def mesh_properties(
+    node_x: np.ndarray,
+    node_y: np.ndarray,
+    face_nodes: Sequence[Sequence[int]],
+) -> dict[str, object]:
+    """Return connectivity, centers, dual links, and orthogonality properties."""
+    node_coordinates = np.column_stack((node_x, node_y)).astype(float, copy=False)
+    faces = [tuple(int(node) for node in face) for face in face_nodes]
+    node_count = len(node_coordinates)
+    for face in faces:
+        if len(face) < 3:
+            raise ValueError("A face must contain at least three nodes")
+        if any(node < 0 or node >= node_count for node in face):
+            raise ValueError("Face references a node outside the coordinate arrays")
+
+    centers = np.asarray([
+        _face_circumcenter(node_coordinates[list(face)]) for face in faces
+    ])
+    edge_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for face_id, face in enumerate(faces):
+        for index, first_node in enumerate(face):
+            second_node = face[(index + 1) % len(face)]
+            if first_node == second_node:
+                raise ValueError("A face cannot contain a zero-length edge")
+            edge_faces[tuple(sorted((first_node, second_node)))].append(face_id)
+
+    adjacency: list[set[int]] = [set() for _ in faces]
+    edge_properties = []
+    dual_links = []
+    orthogonality_by_edge = {}
+    for (first_node, second_node), incident_faces in edge_faces.items():
+        incident_count = len(incident_faces)
+        if incident_count > 1:
+            first_face, second_face = incident_faces[:2]
+            edge = node_coordinates[second_node] - node_coordinates[first_node]
+            center_link = centers[second_face] - centers[first_face]
+            denominator = np.linalg.norm(edge) * np.linalg.norm(center_link)
+            if denominator <= np.finfo(float).eps:
+                orthogonality_by_edge[(first_node, second_node)] = 1.0
+            else:
+                orthogonality_by_edge[(first_node, second_node)] = abs(
+                    float(np.dot(edge, center_link) / denominator)
+                )
+            for first_face in incident_faces:
+                for second_face in incident_faces:
+                    if first_face < second_face:
+                        adjacency[first_face].add(second_face)
+                        adjacency[second_face].add(first_face)
+                        dual_links.append((first_face, second_face, first_node, second_node))
+        edge_properties.append({
+            "node_a": first_node,
+            "node_b": second_node,
+            "face_ids": tuple(incident_faces),
+            "incident_count": incident_count,
+            "boundary": incident_count == 1,
+            "nonmanifold": incident_count > 2,
+            "orthogonality": orthogonality_by_edge.get((first_node, second_node)),
+        })
+
+    component_ids = [-1] * len(faces)
+    component_id = 0
+    for start_face in range(len(faces)):
+        if component_ids[start_face] >= 0:
+            continue
+        queue = deque([start_face])
+        component_ids[start_face] = component_id
+        while queue:
+            face_id = queue.popleft()
+            for neighbor_id in adjacency[face_id]:
+                if component_ids[neighbor_id] < 0:
+                    component_ids[neighbor_id] = component_id
+                    queue.append(neighbor_id)
+        component_id += 1
+
+    neighbor_counts = np.asarray([len(neighbors) for neighbors in adjacency], dtype=int)
+    boundary_flags = np.asarray([
+        any(edge["boundary"] for edge in edge_properties if face_id in edge["face_ids"])
+        for face_id in range(len(faces))
+    ], dtype=bool)
+    nonmanifold_flags = np.asarray([
+        any(edge["nonmanifold"] for edge in edge_properties if face_id in edge["face_ids"])
+        for face_id in range(len(faces))
+    ], dtype=bool)
+    face_quality = np.full(len(faces), np.nan, dtype=float)
+    for edge in edge_properties:
+        value = edge["orthogonality"]
+        if value is None:
+            continue
+        for face_id in edge["face_ids"]:
+            face_quality[face_id] = np.nanmax([face_quality[face_id], value])
+
+    return {
+        "faces": faces,
+        "centers": centers,
+        "edges": edge_properties,
+        "dual_links": dual_links,
+        "neighbor_counts": neighbor_counts,
+        "boundary_flags": boundary_flags,
+        "nonmanifold_flags": nonmanifold_flags,
+        "component_ids": np.asarray(component_ids, dtype=int),
+        "face_orthogonality": face_quality,
+    }
 
 
 def maximum_orthogonality(
