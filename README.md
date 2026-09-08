@@ -13,6 +13,7 @@ A QGIS plugin to manage Delft3D files.
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
+- Checks orthogonality for the active 2D mesh and creates edge and polygon quality layers.
 - Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
 - Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
 - Writes a flattened NetCDF side-car and loads the original plus flattened datasets as separate layers, with flattened layers tagged as `morpho`.
@@ -278,6 +279,18 @@ When loading a mesh file, the following layers are created (if components exist)
 - `<file_name>_mesh2d` (Mesh layer)
 - `<file_name>_mesh1d_branches` (LineString layer, with `name` field)
 - `<file_name>_mesh1d_nodes` (Point layer, with `name`, `branch`, `offset` fields)
+
+#### Mesh Orthogonality
+
+1. Activate a loaded 2D mesh layer in QGIS.
+2. Choose **Delft3D File Manager -> Check Mesh Orthogonality**.
+
+The action creates two memory layers without changing the source mesh:
+
+- `<mesh_name>_orthogonality_edges` (LineString), with an `orthogonality` field for each internal edge. Values near `0` are more orthogonal; values near `1` are worse.
+- `<mesh_name>_orthogonality_faces` (Polygon), with a `max_orthogonality` field containing the worst adjacent internal-edge value. The polygon layer receives graduated coloring automatically and can be restyled in QGIS using that field.
+
+For partitioned imports, the active partition is analyzed independently.
 - `<file_name>_geometry_edges` (LineString layer, with `name` field)
 - `<file_name>_geometry_nodes` (Point layer, with `name` field)
 

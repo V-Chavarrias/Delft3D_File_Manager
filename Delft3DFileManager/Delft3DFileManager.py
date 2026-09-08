@@ -17,7 +17,8 @@ from qgis.PyQt.QtGui import QIcon, QColor
 from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
-    QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol
+    QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol,
+    QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange
 )
 from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt, QTimer, QT_VERSION_STR
 from datetime import datetime, timedelta
@@ -167,6 +168,7 @@ class Delft3DFileManager:
         self.profile_chart_action = None
         self.mesh_profile_action = None
         self.his_timeseries_action = None
+        self.mesh_orthogonality_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -319,6 +321,15 @@ class Delft3DFileManager:
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.his_timeseries_action)
 
+        self.mesh_orthogonality_action = QAction(
+            QIcon(icon_path), "Check Mesh Orthogonality", self.iface.mainWindow()
+        )
+        self.mesh_orthogonality_action.setStatusTip(
+            "Create edge and face layers showing 2D mesh orthogonality"
+        )
+        self.mesh_orthogonality_action.triggered.connect(self.check_mesh_orthogonality)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_orthogonality_action)
+
         self._connect_canvas_double_click()
 
     def unload(self):
@@ -353,9 +364,200 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_profile_action)
         if self.his_timeseries_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
+        if self.mesh_orthogonality_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_orthogonality_action)
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
+
+    def check_mesh_orthogonality(self):
+        """Create edge and face quality layers for the active 2D mesh."""
+        layer = self.iface.activeLayer()
+        try:
+            is_mesh = isinstance(layer, QgsMeshLayer)
+        except TypeError:
+            is_mesh = False
+        if not is_mesh or not layer.isValid():
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Activate a valid 2D mesh layer before checking orthogonality.",
+            )
+            return None
+
+        try:
+            mesh = self._native_mesh(layer)
+            vertices, faces = self._mesh_vertices_faces(mesh)
+            if not faces:
+                raise ValueError("The active mesh contains no faces")
+
+            import numpy as np
+            from .grid_orthogonality import edge_orthogonality, face_orthogonality
+
+            node_x = np.asarray([self._mesh_vertex_coordinate(vertex, "x") for vertex in vertices])
+            node_y = np.asarray([self._mesh_vertex_coordinate(vertex, "y") for vertex in vertices])
+            edge_results = edge_orthogonality(node_x, node_y, faces)
+            face_values = face_orthogonality(faces, edge_results)
+            edge_layer = self._create_mesh_orthogonality_edges(
+                layer, node_x, node_y, edge_results
+            )
+            face_layer = self._create_mesh_orthogonality_faces(
+                layer, node_x, node_y, faces, face_values
+            )
+            worst = max(result[-1] for result in edge_results)
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Mesh orthogonality calculated: {len(edge_results)} internal edges, "
+                f"worst cosine {worst:.4f}.",
+            )
+            return edge_layer, face_layer
+        except Exception as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not calculate mesh orthogonality: {exc}",
+            )
+            return None
+
+    @staticmethod
+    def _native_mesh(layer):
+        """Return the native mesh across QGIS versions and providers."""
+        for method_name in ("nativeMesh", "mesh"):
+            method = getattr(layer, method_name, None)
+            if not callable(method):
+                continue
+            mesh = method()
+            if mesh is not None:
+                return mesh
+
+        provider_method = getattr(layer, "dataProvider", None)
+        provider = provider_method() if callable(provider_method) else None
+        populate = getattr(provider, "populateMesh", None)
+        if callable(populate):
+            from qgis.core import QgsMesh
+
+            mesh = QgsMesh()
+            populate(mesh)
+            return mesh
+
+        raise AttributeError(
+            "Mesh topology is unavailable through QgsMeshLayer or its data provider"
+        )
+
+    @staticmethod
+    def _mesh_vertices_faces(mesh):
+        """Read mesh topology from bulk or indexed QGIS mesh APIs."""
+        vertices_method = getattr(mesh, "vertices", None)
+        if callable(vertices_method):
+            vertices = list(vertices_method())
+        else:
+            vertex_count = getattr(mesh, "vertexCount", None)
+            vertex_method = getattr(mesh, "vertex", None)
+            if not callable(vertex_count) or not callable(vertex_method):
+                raise AttributeError("QGIS mesh does not expose vertex topology")
+            vertices = [vertex_method(index) for index in range(int(vertex_count()))]
+
+        faces_method = getattr(mesh, "faces", None)
+        if callable(faces_method):
+            raw_faces = list(faces_method())
+        else:
+            face_count = getattr(mesh, "faceCount", None)
+            face_method = getattr(mesh, "face", None)
+            if not callable(face_count) or not callable(face_method):
+                raise AttributeError("QGIS mesh does not expose face topology")
+            raw_faces = [face_method(index) for index in range(int(face_count()))]
+        faces = [tuple(int(node) for node in face) for face in raw_faces]
+        return vertices, faces
+
+    @staticmethod
+    def _mesh_vertex_coordinate(vertex, coordinate):
+        value = getattr(vertex, coordinate, None)
+        if callable(value):
+            value = value()
+        if value is None:
+            try:
+                value = vertex[0 if coordinate == "x" else 1]
+            except (IndexError, KeyError, TypeError):
+                raise ValueError("Mesh vertices must provide x and y coordinates")
+        return float(value)
+
+    @staticmethod
+    def _mesh_layer_crs(layer):
+        try:
+            authid = layer.crs().authid()
+        except (AttributeError, RuntimeError):
+            authid = ""
+        return authid or "EPSG:28992"
+
+    def _create_mesh_orthogonality_edges(self, source_layer, node_x, node_y, edge_results):
+        crs = self._mesh_layer_crs(source_layer)
+        layer = QgsVectorLayer(
+            f"LineString?crs={crs}",
+            f"{source_layer.name()}_orthogonality_edges",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("node_a", QVariant.Int),
+            QgsField("node_b", QVariant.Int),
+            QgsField("orthogonality", QVariant.Double),
+        ])
+        layer.updateFields()
+        features = []
+        for first_node, second_node, _, _, cosine in edge_results:
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPolylineXY([
+                QgsPointXY(float(node_x[first_node]), float(node_y[first_node])),
+                QgsPointXY(float(node_x[second_node]), float(node_y[second_node])),
+            ]))
+            feature.setAttributes([first_node, second_node, cosine])
+            features.append(feature)
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        return layer
+
+    def _create_mesh_orthogonality_faces(
+        self, source_layer, node_x, node_y, faces, face_values
+    ):
+        crs = self._mesh_layer_crs(source_layer)
+        layer = QgsVectorLayer(
+            f"Polygon?crs={crs}",
+            f"{source_layer.name()}_orthogonality_faces",
+            "memory",
+        )
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("face_id", QVariant.Int),
+            QgsField("max_orthogonality", QVariant.Double),
+        ])
+        layer.updateFields()
+        features = []
+        for face_id, face in enumerate(faces):
+            points = [QgsPointXY(float(node_x[node]), float(node_y[node])) for node in face]
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPolygonXY([points]))
+            value = float(face_values[face_id]) if math.isfinite(face_values[face_id]) else None
+            feature.setAttributes([face_id, value])
+            features.append(feature)
+        provider.addFeatures(features)
+        layer.updateExtents()
+        self._apply_orthogonality_renderer(layer)
+        QgsProject.instance().addMapLayer(layer)
+        return layer
+
+    @staticmethod
+    def _apply_orthogonality_renderer(layer):
+        """Apply a simple graduated 0-to-1 renderer when supported by QGIS."""
+        try:
+            ranges = []
+            colors = [QColor("#2c7bb6"), QColor("#abd9e9"), QColor("#fdae61"), QColor("#d7191c")]
+            bounds = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.7), (0.7, 1.0)]
+            for (lower, upper), color in zip(bounds, colors):
+                symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PolygonGeometry)
+                symbol.setColor(color)
+                ranges.append(QgsRendererRange(lower, upper, symbol, f"{lower:.1f} - {upper:.1f}"))
+            layer.setRenderer(QgsGraduatedSymbolRenderer("max_orthogonality", ranges))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
 
     def run(self):
         """Main entry point: open file dialog and dispatch by extension"""
