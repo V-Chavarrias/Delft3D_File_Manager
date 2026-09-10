@@ -158,3 +158,52 @@ def test_mesh_properties_flags_nonmanifold_shared_edge():
     assert properties["neighbor_counts"].tolist() == [2, 2, 2]
     assert properties["nonmanifold_flags"].tolist() == [True, True, True]
     assert sum(edge["nonmanifold"] for edge in properties["edges"]) == 1
+
+
+def test_mesh_properties_edge_orthogonality_only_skips_optional_properties():
+    node_x, node_y, faces = _two_cell_mesh()
+
+    properties = mesh_properties(
+        node_x,
+        node_y,
+        faces,
+        compute_connectivity=False,
+        compute_face_quality=False,
+        compute_dual_links=False,
+    )
+
+    assert len(properties["edges"]) == 6
+    assert properties["dual_links"] == []
+    assert properties["neighbor_counts"].size == 0
+    assert np.isnan(properties["face_orthogonality"]).all()
+
+
+def test_mesh_properties_uses_supplied_face_centers():
+    node_x, node_y, faces = _two_cell_mesh()
+    supplied_centers = np.array([[10.0, 20.0], [30.0, 40.0]])
+
+    properties = mesh_properties(
+        node_x,
+        node_y,
+        faces,
+        face_centers=supplied_centers,
+        compute_connectivity=False,
+        compute_face_quality=False,
+    )
+
+    np.testing.assert_array_equal(properties["centers"], supplied_centers)
+
+
+def test_mesh_properties_rejects_invalid_supplied_face_centers():
+    node_x, node_y, faces = _two_cell_mesh()
+
+    with pytest.raises(ValueError, match="shape"):
+        mesh_properties(node_x, node_y, faces, face_centers=np.zeros((1, 2)))
+
+    with pytest.raises(ValueError, match="finite"):
+        mesh_properties(
+            node_x,
+            node_y,
+            faces,
+            face_centers=np.array([[0.0, 0.0], [np.nan, 1.0]]),
+        )

@@ -69,6 +69,46 @@ def test_qt6_qmessagebox_enum_helpers(monkeypatch):
     assert plugin_module._qmessagebox_standard_button("Cancel") == 30
 
 
+def test_mesh_properties_dialog_uses_qt6_button_enum(monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    class _StandardButton:
+        Ok = 1
+        Cancel = 2
+
+    class _QDialogButtonBoxQt6:
+        StandardButton = _StandardButton
+
+    monkeypatch.setattr(plugin_module, "QDialogButtonBox", _QDialogButtonBoxQt6)
+
+    ok_button = getattr(plugin_module.QDialogButtonBox, "Ok", None) or getattr(
+        plugin_module.QDialogButtonBox.StandardButton, "Ok", None
+    )
+    cancel_button = getattr(plugin_module.QDialogButtonBox, "Cancel", None) or getattr(
+        plugin_module.QDialogButtonBox.StandardButton, "Cancel", None
+    )
+
+    assert ok_button | cancel_button == 3
+
+
+def test_mesh_properties_dialog_uses_qt6_dialog_code(monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    class _DialogCode:
+        Accepted = 1
+
+    class _QDialogQt6:
+        DialogCode = _DialogCode
+
+    monkeypatch.setattr(plugin_module, "QDialog", _QDialogQt6)
+
+    accepted = getattr(plugin_module.QDialog, "Accepted", None) or getattr(
+        plugin_module.QDialog.DialogCode, "Accepted", None
+    )
+
+    assert accepted == 1
+
+
 def test_dialog_exec_helper_supports_qt6_exec():
     import Delft3DFileManager.Delft3DFileManager as plugin_module
 

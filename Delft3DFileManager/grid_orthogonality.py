@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from collections import defaultdict, deque
+import time
+from typing import Callable
 
 import numpy as np
 
@@ -98,8 +100,28 @@ def mesh_properties(
     node_x: np.ndarray,
     node_y: np.ndarray,
     face_nodes: Sequence[Sequence[int]],
+    face_centers: np.ndarray | None = None,
+    compute_connectivity: bool = True,
+    compute_face_quality: bool = True,
+    compute_dual_links: bool = True,
+    progress_callback: Callable[[int, str], None] | None = None,
+    timing_callback: Callable[[str, float], None] | None = None,
 ) -> dict[str, object]:
     """Return connectivity, centers, dual links, and orthogonality properties."""
+    timings = {}
+
+    def timed(stage, started):
+        elapsed = time.perf_counter() - started
+        timings[stage] = elapsed
+        if timing_callback is not None:
+            timing_callback(stage, elapsed)
+
+    def report(percent: int, stage: str) -> None:
+        if progress_callback is not None:
+            progress_callback(percent, stage)
+
+    report(0, "Preparing mesh topology")
+    stage_started = time.perf_counter()
     node_coordinates = np.column_stack((node_x, node_y)).astype(float, copy=False)
     faces = [tuple(int(node) for node in face) for face in face_nodes]
     node_count = len(node_coordinates)
@@ -109,9 +131,25 @@ def mesh_properties(
         if any(node < 0 or node >= node_count for node in face):
             raise ValueError("Face references a node outside the coordinate arrays")
 
-    centers = np.asarray([
-        _face_circumcenter(node_coordinates[list(face)]) for face in faces
-    ])
+    if face_centers is not None:
+        if isinstance(face_centers, np.ma.MaskedArray):
+            raise ValueError("Supplied face centers cannot be masked")
+        centers = np.asarray(face_centers, dtype=float)
+        if centers.shape != (len(faces), 2):
+            raise ValueError("Supplied face centers must have shape (face_count, 2)")
+        if not np.all(np.isfinite(centers)):
+            raise ValueError("Supplied face centers must contain finite values")
+        report(30, "Using supplied face centers")
+    else:
+        centers = np.empty((len(faces), 2), dtype=float)
+        for face_index, face in enumerate(faces):
+            centers[face_index] = _face_circumcenter(node_coordinates[list(face)])
+            if face_index % 4096 == 0:
+                report(1 + int(28 * face_index / max(len(faces), 1)), "Computing face centers")
+        report(30, "Computed face centers")
+    timed("face_centers", stage_started)
+    report(30, "Calculated face centers")
+    stage_started = time.perf_counter()
     edge_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
     for face_id, face in enumerate(faces):
         for index, first_node in enumerate(face):
@@ -119,30 +157,50 @@ def mesh_properties(
             if first_node == second_node:
                 raise ValueError("A face cannot contain a zero-length edge")
             edge_faces[tuple(sorted((first_node, second_node)))].append(face_id)
+        if face_id % 4096 == 0:
+            report(31 + int(18 * face_id / max(len(faces), 1)), "Building edge connectivity")
+    timed("edge_connectivity", stage_started)
+    report(50, "Built edge connectivity")
 
-    adjacency: list[set[int]] = [set() for _ in faces]
+    adjacency: list[set[int]] = [set() for _ in faces] if compute_connectivity else []
+    boundary_flags = np.zeros(len(faces), dtype=bool)
+    nonmanifold_flags = np.zeros(len(faces), dtype=bool)
+    face_quality = np.full(len(faces), np.nan, dtype=float)
     edge_properties = []
     dual_links = []
     orthogonality_by_edge = {}
+    stage_started = time.perf_counter()
     for (first_node, second_node), incident_faces in edge_faces.items():
         incident_count = len(incident_faces)
+        if incident_count == 1:
+            boundary_flags[incident_faces[0]] = True
+        elif incident_count > 2:
+            nonmanifold_flags[incident_faces] = True
         if incident_count > 1:
             first_face, second_face = incident_faces[:2]
             edge = node_coordinates[second_node] - node_coordinates[first_node]
             center_link = centers[second_face] - centers[first_face]
             denominator = np.linalg.norm(edge) * np.linalg.norm(center_link)
             if denominator <= np.finfo(float).eps:
-                orthogonality_by_edge[(first_node, second_node)] = 1.0
+                cosine = 1.0
             else:
-                orthogonality_by_edge[(first_node, second_node)] = abs(
+                cosine = abs(
                     float(np.dot(edge, center_link) / denominator)
                 )
-            for first_face in incident_faces:
-                for second_face in incident_faces:
-                    if first_face < second_face:
-                        adjacency[first_face].add(second_face)
-                        adjacency[second_face].add(first_face)
-                        dual_links.append((first_face, second_face, first_node, second_node))
+            orthogonality_by_edge[(first_node, second_node)] = cosine
+            if compute_face_quality:
+                for face_id in incident_faces:
+                    if np.isnan(face_quality[face_id]) or cosine > face_quality[face_id]:
+                        face_quality[face_id] = cosine
+            if compute_connectivity or compute_dual_links:
+                for first_face in incident_faces:
+                    for second_face in incident_faces:
+                        if first_face < second_face:
+                            if compute_connectivity:
+                                adjacency[first_face].add(second_face)
+                                adjacency[second_face].add(first_face)
+                            if compute_dual_links:
+                                dual_links.append((first_face, second_face, first_node, second_node))
         edge_properties.append({
             "node_a": first_node,
             "node_b": second_node,
@@ -152,38 +210,32 @@ def mesh_properties(
             "nonmanifold": incident_count > 2,
             "orthogonality": orthogonality_by_edge.get((first_node, second_node)),
         })
+    timed("edge_properties", stage_started)
+    report(70, "Calculated edge properties")
 
     component_ids = [-1] * len(faces)
-    component_id = 0
-    for start_face in range(len(faces)):
-        if component_ids[start_face] >= 0:
-            continue
-        queue = deque([start_face])
-        component_ids[start_face] = component_id
-        while queue:
-            face_id = queue.popleft()
-            for neighbor_id in adjacency[face_id]:
-                if component_ids[neighbor_id] < 0:
-                    component_ids[neighbor_id] = component_id
-                    queue.append(neighbor_id)
-        component_id += 1
+    if compute_connectivity:
+        component_id = 0
+        stage_started = time.perf_counter()
+        for start_face in range(len(faces)):
+            if component_ids[start_face] >= 0:
+                continue
+            queue = deque([start_face])
+            component_ids[start_face] = component_id
+            while queue:
+                face_id = queue.popleft()
+                for neighbor_id in adjacency[face_id]:
+                    if component_ids[neighbor_id] < 0:
+                        component_ids[neighbor_id] = component_id
+                        queue.append(neighbor_id)
+            component_id += 1
+        timed("face_components", stage_started)
+    report(85, "Calculated face connectivity")
 
     neighbor_counts = np.asarray([len(neighbors) for neighbors in adjacency], dtype=int)
-    boundary_flags = np.asarray([
-        any(edge["boundary"] for edge in edge_properties if face_id in edge["face_ids"])
-        for face_id in range(len(faces))
-    ], dtype=bool)
-    nonmanifold_flags = np.asarray([
-        any(edge["nonmanifold"] for edge in edge_properties if face_id in edge["face_ids"])
-        for face_id in range(len(faces))
-    ], dtype=bool)
-    face_quality = np.full(len(faces), np.nan, dtype=float)
-    for edge in edge_properties:
-        value = edge["orthogonality"]
-        if value is None:
-            continue
-        for face_id in edge["face_ids"]:
-            face_quality[face_id] = np.nanmax([face_quality[face_id], value])
+    stage_started = time.perf_counter()
+    timed("face_quality", stage_started)
+    report(100, "Finished mesh properties")
 
     return {
         "faces": faces,
@@ -195,6 +247,7 @@ def mesh_properties(
         "nonmanifold_flags": nonmanifold_flags,
         "component_ids": np.asarray(component_ids, dtype=int),
         "face_orthogonality": face_quality,
+        "timings": timings,
     }
 
 

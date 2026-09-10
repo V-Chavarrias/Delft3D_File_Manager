@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
+from netCDF4 import Dataset
 
 from Delft3DFileManager.Delft3DFileManager import _mesh_source_path
 
@@ -35,6 +36,29 @@ PARTITIONED_ESTRUARY_MAP_0001 = DATA_DIR / "estuary_0001_map.nc"
 
 # Access the explicitly registered qgis.core stub directly.
 _qgis_core = sys.modules["qgis.core"]
+
+
+def test_mesh_properties_options_method_is_not_shadowed(plugin):
+    assert callable(plugin._mesh_properties_options)
+
+
+def test_mesh_property_loader_accepts_valid_netcdf_face_centers(plugin, tmp_path):
+    source = tmp_path / "mesh.nc"
+    with Dataset(str(source), "w") as dataset:
+        dataset.createDimension("mesh2d_nFaces", 2)
+        face_x = dataset.createVariable("mesh2d_face_x", "f8", ("mesh2d_nFaces",))
+        face_y = dataset.createVariable("mesh2d_face_y", "f8", ("mesh2d_nFaces",))
+        face_x[:] = [10.0, 20.0]
+        face_y[:] = [30.0, 40.0]
+
+    class _Layer:
+        def customProperty(self, name, default):
+            assert name == "delft3d_mesh_source"
+            return str(source)
+
+    centers = plugin._load_mesh_property_face_centers(_Layer(), 2)
+
+    assert centers.tolist() == [[10.0, 30.0], [20.0, 40.0]]
 
 
 def _add_map_layer_mock():

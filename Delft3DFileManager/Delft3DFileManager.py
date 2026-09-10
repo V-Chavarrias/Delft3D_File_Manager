@@ -2,6 +2,7 @@
 from qgis.PyQt.QtWidgets import (
     QAction,
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -20,7 +21,17 @@ from qgis.core import (
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol,
     QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange
 )
-from qgis.PyQt.QtCore import QDateTime, QEvent, QObject, QVariant, Qt, QTimer, QT_VERSION_STR
+from qgis.PyQt.QtCore import (
+    QDateTime,
+    QEvent,
+    QObject,
+    QVariant,
+    Qt,
+    QThread,
+    QTimer,
+    QT_VERSION_STR,
+    pyqtSignal,
+)
 from datetime import datetime, timedelta
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
@@ -194,6 +205,227 @@ class _CanvasDoubleClickFilter(QObject):
             return False
         return False
 
+
+class _MeshPropertiesWorker(QThread):
+    """Run pure mesh analysis away from QGIS's GUI thread."""
+
+    progress = pyqtSignal(int, str)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, node_x, node_y, faces, options, face_centers=None, parent=None):
+        super().__init__(parent)
+        self._node_x = node_x
+        self._node_y = node_y
+        self._faces = faces
+        self._options = options
+        self._face_centers = face_centers
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def run(self):
+        try:
+            from .grid_orthogonality import mesh_properties
+
+            def report(percent, stage):
+                if self._cancel_requested:
+                    raise RuntimeError("Mesh property calculation cancelled")
+                self.progress.emit(percent // 2, stage)
+
+            properties = mesh_properties(
+                self._node_x,
+                self._node_y,
+                self._faces,
+                face_centers=self._face_centers,
+                compute_connectivity="connectivity" in self._options,
+                compute_face_quality="face_quality" in self._options,
+                compute_dual_links="dual_links" in self._options,
+                progress_callback=report,
+            )
+            if self._cancel_requested:
+                raise RuntimeError("Mesh property calculation cancelled")
+            self.completed.emit(properties)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class _MeshPropertyOutputJob(QObject):
+    """Materialize mesh-property layers in bounded GUI-thread batches."""
+
+    progress = pyqtSignal(int, str)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, manager, source_layer, node_x, node_y, properties, options, parent=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._source_layer = source_layer
+        self._node_x = node_x
+        self._node_y = node_y
+        self._properties = properties
+        self._options = options
+        self._layers = []
+        self._stages = []
+        self._stage_index = 0
+        self._feature_index = 0
+        self._cancel_requested = False
+        self._batch_size = 250
+
+    def start(self):
+        try:
+            self._build_stages()
+            self._step()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _build_stages(self):
+        properties = self._properties
+        faces = properties["faces"]
+        centers = properties["centers"]
+        edges = properties["edges"]
+        dual_links = properties["dual_links"]
+        neighbor_counts = properties["neighbor_counts"]
+        boundary_flags = properties["boundary_flags"]
+        nonmanifold_flags = properties["nonmanifold_flags"]
+        component_ids = properties["component_ids"]
+        face_quality = properties["face_orthogonality"]
+        crs = self._manager._mesh_layer_crs(self._source_layer)
+        prefix = self._source_layer.name()
+
+        def face_feature(layer, face_id):
+            face = faces[face_id]
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPolygonXY([
+                [QgsPointXY(float(self._node_x[node]), float(self._node_y[node])) for node in face]
+            ]))
+            quality = face_quality[face_id]
+            feature.setAttributes([
+                face_id, int(neighbor_counts[face_id]), int(boundary_flags[face_id]),
+                int(nonmanifold_flags[face_id]), int(component_ids[face_id]),
+                float(quality) if math.isfinite(quality) else None,
+            ])
+            return feature
+
+        def edge_feature(layer, edge_id):
+            edge = edges[edge_id]
+            feature = QgsFeature(layer.fields())
+            first_node, second_node = edge["node_a"], edge["node_b"]
+            feature.setGeometry(QgsGeometry.fromPolylineXY([
+                QgsPointXY(float(self._node_x[first_node]), float(self._node_y[first_node])),
+                QgsPointXY(float(self._node_x[second_node]), float(self._node_y[second_node])),
+            ]))
+            feature.setAttributes([
+                first_node, second_node,
+                ",".join(str(face_id) for face_id in edge["face_ids"]),
+                edge["incident_count"], int(edge["boundary"]), int(edge["nonmanifold"]),
+                edge["orthogonality"],
+            ])
+            return feature
+
+        def center_feature(layer, face_id):
+            feature = QgsFeature(layer.fields())
+            center = centers[face_id]
+            feature.setGeometry(QgsGeometry.fromPointXY(
+                QgsPointXY(float(center[0]), float(center[1]))
+            ))
+            quality = face_quality[face_id]
+            feature.setAttributes([
+                face_id, int(neighbor_counts[face_id]), int(boundary_flags[face_id]),
+                int(nonmanifold_flags[face_id]), int(component_ids[face_id]),
+                float(quality) if math.isfinite(quality) else None,
+            ])
+            return feature
+
+        edge_values = {
+            (edge["node_a"], edge["node_b"]): edge["orthogonality"]
+            for edge in edges
+        }
+
+        def dual_feature(layer, link_id):
+            face_a, face_b, node_a, node_b = dual_links[link_id]
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPolylineXY([
+                QgsPointXY(float(centers[face_a][0]), float(centers[face_a][1])),
+                QgsPointXY(float(centers[face_b][0]), float(centers[face_b][1])),
+            ]))
+            feature.setAttributes([
+                face_a, face_b, node_a, node_b, edge_values.get((node_a, node_b)),
+            ])
+            return feature
+
+        face_fields = [
+            QgsField("face_id", QVariant.Int), QgsField("neighbor_count", QVariant.Int),
+            QgsField("boundary_flag", QVariant.Int), QgsField("nonmanifold_flag", QVariant.Int),
+            QgsField("component_id", QVariant.Int), QgsField("max_orthogonality", QVariant.Double),
+        ]
+        edge_fields = [
+            QgsField("node_a", QVariant.Int), QgsField("node_b", QVariant.Int),
+            QgsField("face_ids", QVariant.String), QgsField("incident_count", QVariant.Int),
+            QgsField("boundary_flag", QVariant.Int), QgsField("nonmanifold_flag", QVariant.Int),
+            QgsField("orthogonality", QVariant.Double),
+        ]
+        center_fields = face_fields
+        dual_fields = [
+            QgsField("face_a", QVariant.Int), QgsField("face_b", QVariant.Int),
+            QgsField("node_a", QVariant.Int), QgsField("node_b", QVariant.Int),
+            QgsField("orthogonality", QVariant.Double),
+        ]
+        self._stages = []
+        if "face_quality" in self._options or "connectivity" in self._options:
+            self._stages.append(("Creating face layers", "Polygon", f"{prefix}_mesh_properties_faces", face_fields, len(faces), face_feature, True))
+        if "edge_orthogonality" in self._options:
+            self._stages.append(("Creating edge layers", "LineString", f"{prefix}_mesh_properties_edges", edge_fields, len(edges), edge_feature, False))
+        if "face_quality" in self._options:
+            self._stages.append(("Creating center layers", "Point", f"{prefix}_mesh_properties_centers", center_fields, len(faces), center_feature, False))
+        if "dual_links" in self._options:
+            self._stages.append(("Creating dual-link layers", "LineString", f"{prefix}_mesh_properties_dual_links", dual_fields, len(dual_links), dual_feature, False))
+
+    def _step(self):
+        if self._cancel_requested:
+            self.cancelled.emit()
+            return
+        if self._stage_index >= len(self._stages):
+            for layer in self._layers:
+                QgsProject.instance().addMapLayer(layer)
+            self.completed.emit(tuple(self._layers))
+            return
+
+        title, geometry, name, fields, total, build_feature, apply_renderer = self._stages[self._stage_index]
+        if self._feature_index == 0:
+            crs = self._manager._mesh_layer_crs(self._source_layer)
+            layer = QgsVectorLayer(f"{geometry}?crs={crs}", name, "memory")
+            layer.dataProvider().addAttributes(fields)
+            layer.updateFields()
+            self._layers.append(layer)
+            self._current_layer = layer
+
+        end = min(self._feature_index + self._batch_size, total)
+        features = [
+            build_feature(self._current_layer, index)
+            for index in range(self._feature_index, end)
+        ]
+        if features:
+            self._current_layer.dataProvider().addFeatures(features)
+        self._feature_index = end
+        overall = 50 + int(50 * (self._stage_index + (end / max(total, 1))) / len(self._stages))
+        self.progress.emit(overall, title)
+        if end < total:
+            QTimer.singleShot(0, self._step)
+            return
+
+        self._current_layer.updateExtents()
+        if apply_renderer:
+            self._manager._apply_orthogonality_renderer(self._current_layer, "max_orthogonality")
+        self._stage_index += 1
+        self._feature_index = 0
+        QTimer.singleShot(0, self._step)
+
 class Delft3DFileManager:
     def __init__(self, iface):
         self.iface = iface
@@ -225,6 +457,10 @@ class Delft3DFileManager:
         self._canvas_double_click_connected = False
         self._canvas_double_click_filter = None
         self._active_progress_dialog = None
+        self._mesh_properties_worker = None
+        self._mesh_properties_output_job = None
+        self._mesh_properties_context = None
+        self._mesh_properties_selection = None
         self._partition_mesh_sync_sessions = {}
         self._his_sources = {}
         self._his_series_cache = {}
@@ -492,6 +728,13 @@ class Delft3DFileManager:
 
     def check_mesh_properties(self):
         """Create quality, connectivity, center, and dual layers for the active mesh."""
+        if self._mesh_properties_worker is not None:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Mesh properties are already being calculated.",
+            )
+            return None
+
         layer = self.iface.activeLayer()
         is_mesh = self._is_mesh_layer(layer)
         if not is_mesh or not layer.isValid():
@@ -501,6 +744,10 @@ class Delft3DFileManager:
             )
             return None
 
+        options = self._mesh_properties_options()
+        if options is None:
+            return None
+
         try:
             mesh = self._native_mesh(layer)
             vertices, faces = self._mesh_vertices_faces(mesh)
@@ -508,31 +755,163 @@ class Delft3DFileManager:
                 raise ValueError("The active mesh contains no faces")
 
             import numpy as np
-            from .grid_orthogonality import mesh_properties
 
             node_x = np.asarray([self._mesh_vertex_coordinate(vertex, "x") for vertex in vertices])
             node_y = np.asarray([self._mesh_vertex_coordinate(vertex, "y") for vertex in vertices])
-            properties = mesh_properties(node_x, node_y, faces)
-            output_layers = self._create_mesh_property_layers(
-                layer, node_x, node_y, properties
+            face_centers = self._load_mesh_property_face_centers(layer, len(faces))
+            if face_centers is None:
+                self.iface.messageBar().pushWarning(
+                    "Delft3D File Manager",
+                    "mesh2d_face_x/y are unavailable or invalid; computing face centers.",
+                )
+            worker = _MeshPropertiesWorker(
+                node_x, node_y, faces, options, face_centers
             )
-            quality_values = properties["face_orthogonality"]
-            finite_quality = [value for value in quality_values if math.isfinite(value)]
-            worst = max(finite_quality) if finite_quality else float("nan")
-            self.iface.messageBar().pushSuccess(
-                "Delft3D File Manager",
-                f"Mesh properties calculated: {len(faces)} faces, "
-                f"{len(properties['edges'])} edges, "
-                f"{len(properties['dual_links'])} dual links, "
-                f"worst cosine {worst:.4f}.",
+            progress_dialog = self._create_progress_dialog(
+                "Calculating mesh properties"
             )
-            return output_layers
+            if progress_dialog is not None:
+                progress_dialog.setCancelButtonText("Cancel")
+                progress_dialog.canceled.connect(worker.cancel)
+            self._mesh_properties_context = (layer, node_x, node_y, faces, options)
+            self._mesh_properties_worker = worker
+            worker.progress.connect(self._update_mesh_properties_progress)
+            worker.completed.connect(self._finish_mesh_properties)
+            worker.failed.connect(self._fail_mesh_properties)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+            return None
         except Exception as exc:
+            self._close_progress_dialog(self._active_progress_dialog)
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 f"Could not calculate mesh orthogonality: {exc}",
             )
             return None
+
+    def _mesh_properties_options(self):
+        dialog = QDialog(self.iface.mainWindow())
+        dialog.setWindowTitle("Mesh Properties")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select properties to compute:"))
+
+        checks = {
+            "edge_orthogonality": QCheckBox("Orthogonality at edges"),
+            "face_quality": QCheckBox("Worst orthogonality per face"),
+            "connectivity": QCheckBox("Connectivity and boundary diagnostics"),
+            "dual_links": QCheckBox("Dual links between face centers"),
+        }
+        checks["edge_orthogonality"].setChecked(True)
+        for checkbox in checks.values():
+            layout.addWidget(checkbox)
+
+        ok_button = getattr(QDialogButtonBox, "Ok", None) or getattr(
+            getattr(QDialogButtonBox, "StandardButton", None), "Ok", None
+        )
+        cancel_button = getattr(QDialogButtonBox, "Cancel", None) or getattr(
+            getattr(QDialogButtonBox, "StandardButton", None), "Cancel", None
+        )
+        buttons = QDialogButtonBox(ok_button | cancel_button, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog_accepted = getattr(QDialog, "Accepted", None) or getattr(
+            getattr(QDialog, "DialogCode", None), "Accepted", None
+        )
+        if _dialog_exec(dialog) != dialog_accepted:
+            return None
+        selected = {name for name, checkbox in checks.items() if checkbox.isChecked()}
+        if not selected:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Select at least one mesh property.",
+            )
+            return None
+        return selected
+
+    def _update_mesh_properties_progress(self, value, stage):
+        self._update_progress_dialog(self._active_progress_dialog, value, stage)
+
+    def _finish_mesh_properties(self, properties):
+        worker = self._mesh_properties_worker
+        context = self._mesh_properties_context
+        self._mesh_properties_worker = None
+        if context is None:
+            self._close_progress_dialog(self._active_progress_dialog)
+            return
+
+        layer, node_x, node_y, faces, options = context
+        try:
+            output_job = _MeshPropertyOutputJob(
+                self, layer, node_x, node_y, properties, options
+            )
+            self._mesh_properties_output_job = output_job
+            output_job.progress.connect(self._update_mesh_properties_progress)
+            output_job.completed.connect(
+                lambda output_layers: self._complete_mesh_properties(
+                    output_layers, properties, faces, options
+                )
+            )
+            output_job.failed.connect(self._fail_mesh_properties_output)
+            output_job.cancelled.connect(self._cancel_mesh_properties_output)
+            if self._active_progress_dialog is not None:
+                self._active_progress_dialog.canceled.connect(output_job.cancel)
+            output_job.start()
+        except Exception as exc:  # noqa: BLE001
+            self._mesh_properties_output_job = None
+            self._mesh_properties_context = None
+            self._close_progress_dialog(self._active_progress_dialog)
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not create mesh property layers: {exc}",
+            )
+        finally:
+            if worker is not None:
+                worker.deleteLater()
+
+    def _complete_mesh_properties(self, output_layers, properties, faces, options):
+        self._mesh_properties_output_job = None
+        self._mesh_properties_context = None
+        quality_values = properties["face_orthogonality"]
+        finite_quality = [value for value in quality_values if math.isfinite(value)]
+        worst = max(finite_quality) if finite_quality else float("nan")
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Mesh properties calculated: {len(faces)} faces, "
+            f"{len(properties['edges']) if 'edge_orthogonality' in options else 0} edges, "
+            f"{len(properties['dual_links']) if 'dual_links' in options else 0} dual links, "
+            f"worst cosine {worst:.4f}.",
+        )
+        self._close_progress_dialog(self._active_progress_dialog)
+        return output_layers
+
+    def _fail_mesh_properties_output(self, message):
+        self._mesh_properties_output_job = None
+        self._mesh_properties_context = None
+        self._close_progress_dialog(self._active_progress_dialog)
+        self.iface.messageBar().pushWarning(
+            "Delft3D File Manager",
+            f"Could not create mesh property layers: {message}",
+        )
+
+    def _cancel_mesh_properties_output(self):
+        self._mesh_properties_output_job = None
+        self._mesh_properties_context = None
+        self._close_progress_dialog(self._active_progress_dialog)
+        self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Mesh property calculation cancelled.",
+            )
+
+    def _fail_mesh_properties(self, message):
+        self._mesh_properties_worker = None
+        self._mesh_properties_context = None
+        self._close_progress_dialog(self._active_progress_dialog)
+        self.iface.messageBar().pushWarning(
+            "Delft3D File Manager",
+            f"Could not calculate mesh orthogonality: {message}",
+        )
 
     def check_mesh_orthogonality(self):
         """Compatibility alias for the former orthogonality-only action."""
@@ -628,6 +1007,47 @@ class Delft3DFileManager:
         except (AttributeError, RuntimeError):
             authid = ""
         return authid or "EPSG:28992"
+
+    def _load_mesh_property_face_centers(self, layer, face_count):
+        """Read validated mesh2d face centers from the active mesh source."""
+        source = ""
+        try:
+            source = str(layer.customProperty("delft3d_mesh_source", ""))
+        except (AttributeError, RuntimeError):
+            pass
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = _mesh_source_path(source)
+        if not source or not os.path.isfile(source):
+            return None
+
+        try:
+            import netCDF4 as nc
+            import numpy as np
+
+            with nc.Dataset(source, "r") as dataset:
+                face_x_name = self._find_variable_name(dataset, "mesh2d_face_x")
+                face_y_name = self._find_variable_name(dataset, "mesh2d_face_y")
+                if face_x_name is None or face_y_name is None:
+                    return None
+                face_x = dataset.variables[face_x_name][:]
+                face_y = dataset.variables[face_y_name][:]
+                if isinstance(face_x, np.ma.MaskedArray) and np.ma.count_masked(face_x):
+                    return None
+                if isinstance(face_y, np.ma.MaskedArray) and np.ma.count_masked(face_y):
+                    return None
+                face_x = np.asarray(face_x, dtype=float)
+                face_y = np.asarray(face_y, dtype=float)
+                if face_x.ndim != 1 or face_y.ndim != 1:
+                    return None
+                if len(face_x) != face_count or len(face_y) != face_count:
+                    return None
+                if not np.all(np.isfinite(face_x)) or not np.all(np.isfinite(face_y)):
+                    return None
+                return np.column_stack((face_x, face_y))
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError):
+            return None
 
     def _create_mesh_property_layers(self, source_layer, node_x, node_y, properties):
         """Create all mesh-property outputs from one topology-analysis result."""
