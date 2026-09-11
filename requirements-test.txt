@@ -1,5 +1,6 @@
 pytest
 numpy
 scipy
+netCDF4
 defusedxml
 pre-commit
