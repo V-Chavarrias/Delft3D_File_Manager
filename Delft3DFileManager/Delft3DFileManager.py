@@ -38,6 +38,7 @@ from types import SimpleNamespace
 import itertools
 import importlib
 import io
+import time
 import json
 import math
 import os
@@ -272,7 +273,7 @@ class _MeshPropertyOutputJob(QObject):
         self._stage_index = 0
         self._feature_index = 0
         self._cancel_requested = False
-        self._batch_size = 250
+        self._batch_time_seconds = 0.200
 
     def start(self):
         try:
@@ -405,11 +406,15 @@ class _MeshPropertyOutputJob(QObject):
             self._layers.append(layer)
             self._current_layer = layer
 
-        end = min(self._feature_index + self._batch_size, total)
-        features = [
-            build_feature(self._current_layer, index)
-            for index in range(self._feature_index, end)
-        ]
+        batch_started = time.perf_counter()
+        end = self._feature_index
+        features = []
+        while end < total and (
+            end == self._feature_index
+            or time.perf_counter() - batch_started < self._batch_time_seconds
+        ):
+            features.append(build_feature(self._current_layer, end))
+            end += 1
         if features:
             self._current_layer.dataProvider().addFeatures(features)
         self._feature_index = end
