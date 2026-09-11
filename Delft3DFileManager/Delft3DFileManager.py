@@ -134,6 +134,14 @@ def _dialog_exec(dialog):
     raise AttributeError("Dialog object has neither exec nor exec_ method")
 
 
+def _mesh_property_should_create_center_layer(options):
+    return "face_centers" in options
+
+
+def _mesh_property_should_compute_connectivity(options):
+    return "connectivity" in options or "face_quality" in options
+
+
 def _mesh_source_path(source):
     """Resolve a QGIS/MDAL mesh source URI to an existing local path."""
     value = str(source or "").strip().strip('"')
@@ -240,7 +248,9 @@ class _MeshPropertiesWorker(QThread):
                 self._node_y,
                 self._faces,
                 face_centers=self._face_centers,
-                compute_connectivity="connectivity" in self._options,
+                compute_connectivity=_mesh_property_should_compute_connectivity(
+                    self._options
+                ),
                 compute_face_quality="face_quality" in self._options,
                 compute_dual_links="dual_links" in self._options,
                 progress_callback=report,
@@ -299,6 +309,11 @@ class _MeshPropertyOutputJob(QObject):
         crs = self._manager._mesh_layer_crs(self._source_layer)
         prefix = self._source_layer.name()
 
+        def face_neighbor_count(face_id):
+            if len(neighbor_counts) == len(faces):
+                return int(neighbor_counts[face_id])
+            return 0
+
         def face_feature(layer, face_id):
             face = faces[face_id]
             feature = QgsFeature(layer.fields())
@@ -307,7 +322,7 @@ class _MeshPropertyOutputJob(QObject):
             ]))
             quality = face_quality[face_id]
             feature.setAttributes([
-                face_id, int(neighbor_counts[face_id]), int(boundary_flags[face_id]),
+                face_id, face_neighbor_count(face_id), int(boundary_flags[face_id]),
                 int(nonmanifold_flags[face_id]), int(component_ids[face_id]),
                 float(quality) if math.isfinite(quality) else None,
             ])
@@ -337,7 +352,7 @@ class _MeshPropertyOutputJob(QObject):
             ))
             quality = face_quality[face_id]
             feature.setAttributes([
-                face_id, int(neighbor_counts[face_id]), int(boundary_flags[face_id]),
+                face_id, face_neighbor_count(face_id), int(boundary_flags[face_id]),
                 int(nonmanifold_flags[face_id]), int(component_ids[face_id]),
                 float(quality) if math.isfinite(quality) else None,
             ])
@@ -382,7 +397,7 @@ class _MeshPropertyOutputJob(QObject):
             self._stages.append(("Creating face layers", "Polygon", f"{prefix}_mesh_properties_faces", face_fields, len(faces), face_feature, True))
         if "edge_orthogonality" in self._options:
             self._stages.append(("Creating edge layers", "LineString", f"{prefix}_mesh_properties_edges", edge_fields, len(edges), edge_feature, False))
-        if "face_quality" in self._options:
+        if _mesh_property_should_create_center_layer(self._options):
             self._stages.append(("Creating center layers", "Point", f"{prefix}_mesh_properties_centers", center_fields, len(faces), center_feature, False))
         if "dual_links" in self._options:
             self._stages.append(("Creating dual-link layers", "LineString", f"{prefix}_mesh_properties_dual_links", dual_fields, len(dual_links), dual_feature, False))
@@ -804,6 +819,7 @@ class Delft3DFileManager:
             "edge_orthogonality": QCheckBox("Orthogonality at edges"),
             "face_quality": QCheckBox("Worst orthogonality per face"),
             "connectivity": QCheckBox("Connectivity and boundary diagnostics"),
+            "face_centers": QCheckBox("Face center points"),
             "dual_links": QCheckBox("Dual links between face centers"),
         }
         checks["edge_orthogonality"].setChecked(True)
@@ -871,9 +887,6 @@ class Delft3DFileManager:
                 "Delft3D File Manager",
                 f"Could not create mesh property layers: {exc}",
             )
-        finally:
-            if worker is not None:
-                worker.deleteLater()
 
     def _complete_mesh_properties(self, output_layers, properties, faces, options):
         self._mesh_properties_output_job = None
@@ -1068,6 +1081,11 @@ class Delft3DFileManager:
         crs = self._mesh_layer_crs(source_layer)
         prefix = source_layer.name()
 
+        def face_neighbor_count(face_id):
+            if len(neighbor_counts) == len(faces):
+                return int(neighbor_counts[face_id])
+            return 0
+
         face_layer = QgsVectorLayer(
             f"Polygon?crs={crs}", f"{prefix}_mesh_properties_faces", "memory"
         )
@@ -1089,7 +1107,7 @@ class Delft3DFileManager:
             quality = face_quality[face_id]
             feature.setAttributes([
                 face_id,
-                int(neighbor_counts[face_id]),
+                face_neighbor_count(face_id),
                 int(boundary_flags[face_id]),
                 int(nonmanifold_flags[face_id]),
                 int(component_ids[face_id]),
@@ -1156,7 +1174,7 @@ class Delft3DFileManager:
             quality = face_quality[face_id]
             feature.setAttributes([
                 face_id,
-                int(neighbor_counts[face_id]),
+                face_neighbor_count(face_id),
                 int(boundary_flags[face_id]),
                 int(nonmanifold_flags[face_id]),
                 int(component_ids[face_id]),

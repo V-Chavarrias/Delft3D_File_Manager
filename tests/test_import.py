@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 from netCDF4 import Dataset
 
-from Delft3DFileManager.Delft3DFileManager import _mesh_source_path
+from Delft3DFileManager.Delft3DFileManager import (
+    _mesh_property_should_create_center_layer,
+    _mesh_property_should_compute_connectivity,
+    _mesh_source_path,
+)
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
@@ -59,6 +63,21 @@ def test_mesh_property_loader_accepts_valid_netcdf_face_centers(plugin, tmp_path
     centers = plugin._load_mesh_property_face_centers(_Layer(), 2)
 
     assert centers.tolist() == [[10.0, 30.0], [20.0, 40.0]]
+
+
+def test_mesh_property_edge_selection_does_not_create_center_layer():
+    assert not _mesh_property_should_create_center_layer({"edge_orthogonality"})
+    assert not _mesh_property_should_create_center_layer(
+        {"edge_orthogonality", "face_quality"}
+    )
+    assert not _mesh_property_should_create_center_layer({"face_quality"})
+    assert _mesh_property_should_create_center_layer({"face_centers"})
+
+
+def test_mesh_property_face_quality_computes_neighbor_counts():
+    assert _mesh_property_should_compute_connectivity({"face_quality"})
+    assert _mesh_property_should_compute_connectivity({"connectivity"})
+    assert not _mesh_property_should_compute_connectivity({"edge_orthogonality"})
 
 
 def _add_map_layer_mock():

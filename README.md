@@ -298,12 +298,18 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 1. Activate a loaded 2D mesh layer in QGIS.
 2. Choose **Delft3D File Manager -> Check Mesh Properties**.
 
-The action creates four memory layers without changing the source mesh:
+The action can create the following memory layers without changing the source mesh,
+depending on the selected options:
 
 - `<mesh_name>_mesh_properties_faces` (Polygon), with `neighbor_count`, `boundary_flag`, `nonmanifold_flag`, `component_id`, and `max_orthogonality` fields. It receives graduated coloring by orthogonality.
 - `<mesh_name>_mesh_properties_edges` (LineString), with edge incidence, boundary/non-manifold flags, and `orthogonality`. Values near `0` are more orthogonal; values near `1` are worse.
 - `<mesh_name>_mesh_properties_centers` (Point), with one point per face and the same connectivity and quality attributes.
 - `<mesh_name>_mesh_properties_dual_links` (LineString), connecting the centers of adjacent faces and identifying their shared edge.
+
+Face center points are optional and disabled by default. They are not required for
+edge orthogonality, face quality, connectivity, or dual-link calculations; centers
+are retained internally for those calculations. Enable **Face center points** only
+when a point layer is useful for labeling, selection, or point-based processing.
 
 The `neighbor_count` and `component_id` fields can be used with graduated or categorized symbology to inspect connectivity. The dual-link layer is a center-to-center dual graph; it is not a clipped polygonal Voronoi dual.
 

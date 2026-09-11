@@ -178,6 +178,22 @@ def test_mesh_properties_edge_orthogonality_only_skips_optional_properties():
     assert np.isnan(properties["face_orthogonality"]).all()
 
 
+def test_mesh_properties_face_quality_without_connectivity_keeps_face_values():
+    node_x, node_y, faces = _two_cell_mesh()
+
+    properties = mesh_properties(
+        node_x,
+        node_y,
+        faces,
+        compute_connectivity=False,
+        compute_face_quality=True,
+        compute_dual_links=False,
+    )
+
+    assert properties["face_orthogonality"].shape == (len(faces),)
+    assert properties["neighbor_counts"].size == 0
+
+
 def test_mesh_properties_uses_supplied_face_centers():
     node_x, node_y, faces = _two_cell_mesh()
     supplied_centers = np.array([[10.0, 20.0], [30.0, 40.0]])
