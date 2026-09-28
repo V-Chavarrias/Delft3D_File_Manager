@@ -479,6 +479,7 @@ class Delft3DFileManager:
         self._one_d_results_map_tool = None
         self._one_d_results_previous_map_tool = None
         self._one_d_results_overlay_bands = []
+        self._one_d_results_hover_band = None
         self._profile_layer = None
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
@@ -2691,6 +2692,7 @@ class Delft3DFileManager:
             on_mode_requested=self._on_one_d_mode_requested,
             on_plot_requested=self._on_one_d_plot_requested,
             on_refresh_requested=self._refresh_one_d_results_dialog,
+            on_figure_position=self._on_one_d_figure_position,
         )
         return dialog
 
@@ -2842,7 +2844,13 @@ class Delft3DFileManager:
                 band.reset(QgsWkbTypes.LineGeometry)
             except (AttributeError, RuntimeError):
                 pass
+        if self._one_d_results_hover_band is not None:
+            try:
+                self._one_d_results_hover_band.reset(QgsWkbTypes.PointGeometry)
+            except (AttributeError, RuntimeError):
+                pass
         self._one_d_results_overlay_bands = []
+        self._one_d_results_hover_band = None
 
     def _show_one_d_results_overlay(self, selection):
         """Draw the selected mesh1d nodes and edges on the map canvas."""
@@ -2898,6 +2906,43 @@ class Delft3DFileManager:
 
         self._one_d_results_overlay_bands = [node_band, edge_band]
         canvas.refresh()
+
+    def _on_one_d_figure_position(self, x_value, is_datetime):
+        """Move the map marker to the hovered distance along the selected track."""
+        if is_datetime:
+            return
+        selection = self._one_d_results_selection or {}
+        state = self._one_d_results_state
+        if selection.get("mode") != "track" or not selection.get("nodes") or state is None:
+            return
+
+        distances = selection["distances"]
+        nodes = selection["nodes"]
+        distance = max(float(distances[0]), min(float(x_value), float(distances[-1])))
+        segment = next(
+            (index for index in range(len(distances) - 1) if distance <= distances[index + 1]),
+            len(distances) - 2,
+        )
+        start_distance = float(distances[segment])
+        end_distance = float(distances[segment + 1])
+        fraction = 0.0 if end_distance == start_distance else (distance - start_distance) / (end_distance - start_distance)
+        start_node = nodes[segment]
+        end_node = nodes[segment + 1]
+        x_coordinate = float(state["topology"]["node_x"][start_node]) + fraction * (
+            float(state["topology"]["node_x"][end_node]) - float(state["topology"]["node_x"][start_node])
+        )
+        y_coordinate = float(state["topology"]["node_y"][start_node]) + fraction * (
+            float(state["topology"]["node_y"][end_node]) - float(state["topology"]["node_y"][start_node])
+        )
+
+        if self._one_d_results_hover_band is None:
+            from qgis.gui import QgsRubberBand
+            self._one_d_results_hover_band = QgsRubberBand(self.iface.mapCanvas(), QgsWkbTypes.PointGeometry)
+            self._one_d_results_hover_band.setColor(QColor(255, 193, 7, 255))
+            self._one_d_results_hover_band.setWidth(12)
+        self._one_d_results_hover_band.reset(QgsWkbTypes.PointGeometry)
+        self._one_d_results_hover_band.addPoint(QgsPointXY(x_coordinate, y_coordinate), True)
+        self.iface.mapCanvas().refresh()
 
     def _stop_one_d_results_selection(self):
         if self._one_d_results_map_tool is None:
@@ -3003,6 +3048,7 @@ class Delft3DFileManager:
                             "label": f"{variable.name} ({variable.location} {selection['index']})",
                         }],
                         "x_label": "time",
+                        "x_is_datetime": True,
                         "y_label": variable.label,
                         "title": "1D Results - Point",
                     }

@@ -42,12 +42,41 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
         self.setParent(parent)
         self._message = ""
         self._colorbars = []
+        self._x_label = ""
+        self._x_is_datetime = False
+        self._x_position_callback = None
+        self._figure_position_callback = None
+        self.mpl_connect("motion_notify_event", self._on_motion)
 
     def clear_plot(self):
         self._message = ""
+        self._x_label = ""
+        self._x_is_datetime = False
         self._remove_colorbars()
         self._axes.clear()
         self.draw_idle()
+
+    def set_x_position_callback(self, callback):
+        self._x_position_callback = callback
+
+    def set_figure_position_callback(self, callback):
+        self._figure_position_callback = callback
+
+    def _on_motion(self, event):
+        if self._x_position_callback is None or event.inaxes is not self._axes or event.xdata is None:
+            return
+        x_value = event.xdata
+        if self._x_is_datetime:
+            try:
+                from matplotlib import dates as mdates
+                x_value = mdates.num2date(x_value).strftime("%Y-%m-%d %H:%M:%S")
+            except (ImportError, ValueError, OverflowError):
+                x_value = f"{x_value:g}"
+        else:
+            x_value = f"{x_value:g}"
+        self._x_position_callback(f"x = {x_value}{self._x_label}")
+        if self._figure_position_callback is not None:
+            self._figure_position_callback(event.xdata, self._x_is_datetime)
 
     def save_figure(self, parent=None):
         filename, _ = QFileDialog.getSaveFileName(
@@ -72,6 +101,8 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
             self._remove_colorbars()
             self._axes.clear()
         plot_type = plot_data.get("plot_type")
+        self._x_label = f" ({plot_data.get('x_label')})" if plot_data.get("x_label") else ""
+        self._x_is_datetime = bool(plot_data.get("x_is_datetime"))
         if plot_type == "heatmap":
             image = self._axes.imshow(
                 plot_data["values"],
@@ -142,6 +173,12 @@ class _FallbackChartWidget(QLabel):
     def save_figure(self, parent=None):
         del parent
         return False
+
+    def set_x_position_callback(self, callback):
+        del callback
+
+    def set_figure_position_callback(self, callback):
+        del callback
         self.setText("Matplotlib is not available in this environment.")
 
 
@@ -162,6 +199,7 @@ class OneDResultsDialog(QDialog):
         self._on_refresh_requested = None
         self._source_label = QLabel("Source: none")
         self._selection_label = QLabel("Selection: none")
+        self._coordinate_label = QLabel("Hover over the figure to inspect the x-axis location.")
         self._message_label = QLabel("")
         self._message_label.setWordWrap(True)
 
@@ -214,6 +252,7 @@ class OneDResultsDialog(QDialog):
         layout.addLayout(controls)
         layout.addWidget(self._selection_label)
         layout.addWidget(self._chart, 1)
+        layout.addWidget(self._coordinate_label)
         layout.addLayout(actions)
         layout.addWidget(self._message_label)
 
@@ -224,11 +263,22 @@ class OneDResultsDialog(QDialog):
         add_button.clicked.connect(lambda: self._emit_plot_requested("add"))
         clear_button.clicked.connect(self.clear_plot)
         print_button.clicked.connect(lambda: self._chart.save_figure(self))
+        self._chart.set_x_position_callback(self._set_x_position)
 
-    def set_handlers(self, on_mode_requested=None, on_plot_requested=None, on_refresh_requested=None):
+    def _set_x_position(self, text):
+        self._coordinate_label.setText(f"Figure position: {text}")
+
+    def set_handlers(
+        self,
+        on_mode_requested=None,
+        on_plot_requested=None,
+        on_refresh_requested=None,
+        on_figure_position=None,
+    ):
         self._on_mode_requested = on_mode_requested
         self._on_plot_requested = on_plot_requested
         self._on_refresh_requested = on_refresh_requested
+        self._chart.set_figure_position_callback(on_figure_position)
 
     def _set_options(self, combo, options, selected_value=None):
         combo.blockSignals(True)
