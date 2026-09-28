@@ -1297,6 +1297,31 @@ def test_read_mesh1d2d_links_data_from_real_network_file(plugin):
     assert set(links_data["link_type"]) == {3}
 
 
+def test_read_mesh1d_data_normalizes_edge_node_start_index(plugin, tmp_path):
+    source = tmp_path / "one_based_mesh1d.nc"
+    with Dataset(str(source), "w") as ds:
+        ds.createDimension("mesh1d_nNodes", 3)
+        ds.createDimension("mesh1d_nEdges", 2)
+        ds.createDimension("Two", 2)
+
+        node_x = ds.createVariable("mesh1d_node_x", "f8", ("mesh1d_nNodes",))
+        node_y = ds.createVariable("mesh1d_node_y", "f8", ("mesh1d_nNodes",))
+        edge_nodes = ds.createVariable(
+            "mesh1d_edge_nodes", "i4", ("mesh1d_nEdges", "Two")
+        )
+        edge_branch = ds.createVariable("mesh1d_edge_branch", "i4", ("mesh1d_nEdges",))
+        node_x[:] = [0.0, 1.0, 2.0]
+        node_y[:] = [0.0, 0.0, 0.0]
+        edge_nodes[:] = [[1, 2], [2, 3]]
+        edge_nodes.start_index = 1
+        edge_branch[:] = [0, 0]
+
+    with Dataset(str(source), "r") as ds:
+        mesh1d_data = plugin._read_mesh1d_data(ds)
+
+    assert mesh1d_data["edges"].tolist() == [[0, 1], [1, 2]]
+
+
 def test_load_ugrid_mesh_file_loads_1d2d_links_layer(plugin, tmp_path):
     pytest.importorskip("netCDF4")
 

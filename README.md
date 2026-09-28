@@ -21,6 +21,7 @@ A QGIS plugin to manage Delft3D files.
 - For partitioned mesh imports, loads regular and flattened partitions into separate grouping layers.
 - Visualizes imported boundary-condition timeseries in the existing profile popup window.
 - Visualizes HIS timeseries in a dedicated explorer window with variable dropdown selection and Add/New plot modes.
+- Visualizes time-dependent 1D mesh results for selected points and shortest mesh paths.
 - Exports line features and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files.
@@ -353,6 +354,27 @@ Notes:
 - No right-click is required; plotting is selection-driven.
 - Global variables can be plotted without map selection.
 - Multiple selected features are plotted together for quick comparison.
+
+#### 1D Results Visualizer
+
+Use `Delft3D File Manager -> 1D Results Visualizer` with an imported mesh layer
+active. The active mesh must have a readable NetCDF source containing mesh1d
+topology, a `time` coordinate, and time-dependent variables located at either
+`mesh1d_nodes` or `mesh1d_edges`.
+
+Workflow:
+1. Open the visualizer and click `Point` or `Track`.
+2. Click one map location for Point mode, or two mesh1d nodes for Track mode.
+	Track selection follows the shortest path through the mesh graph, including
+	junctions.
+3. Select a node or edge variable. Point mode resolves the nearest node or edge
+	according to that variable's location.
+4. Select `All times`, one of the sampled available times, or enter one-based
+	inclusive time indices such as `1:10,20:25`.
+5. Track mode supports distance-line plots and distance-time heatmaps. Point
+	mode plots time on the x-axis and the selected result on the y-axis.
+6. `New Plot` replaces the current figure. `Add To Plot` overlays compatible
+	plots; use New Plot when switching between line and heatmap views.
 
 ### Import: ShorelineS Results (`.mat`)
 

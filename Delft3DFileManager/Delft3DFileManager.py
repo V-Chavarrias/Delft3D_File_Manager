@@ -463,6 +463,7 @@ class Delft3DFileManager:
         self.profile_chart_action = None
         self.mesh_profile_action = None
         self.his_timeseries_action = None
+        self.one_d_results_action = None
         self.mesh_properties_action = None
         self.stream_function_action = None
         self._bed_level_dialog = None
@@ -472,6 +473,11 @@ class Delft3DFileManager:
         self._mesh_profile_previous_map_tool = None
         self._mesh_profile_source_layers = []
         self._his_dialog = None
+        self._one_d_results_dialog = None
+        self._one_d_results_state = None
+        self._one_d_results_selection = None
+        self._one_d_results_map_tool = None
+        self._one_d_results_previous_map_tool = None
         self._profile_layer = None
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
@@ -621,6 +627,15 @@ class Delft3DFileManager:
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.his_timeseries_action)
 
+        self.one_d_results_action = QAction(
+            QIcon(icon_path), "1D Results Visualizer", self.iface.mainWindow()
+        )
+        self.one_d_results_action.setStatusTip(
+            "Explore time-dependent mesh1d node and edge results"
+        )
+        self.one_d_results_action.triggered.connect(self.open_one_d_results_window)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.one_d_results_action)
+
         self.mesh_properties_action = QAction(
             QIcon(icon_path), "Check Mesh Properties", self.iface.mainWindow()
         )
@@ -673,6 +688,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_profile_action)
         if self.his_timeseries_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
+        if self.one_d_results_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.one_d_results_action)
         if self.mesh_properties_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_properties_action)
         if self.stream_function_action:
@@ -680,6 +697,7 @@ class Delft3DFileManager:
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
+        self._stop_one_d_results_selection()
 
     def compute_stream_function(self):
         """Create a time-dependent node streamfunction mesh from q1 output."""
@@ -2661,6 +2679,293 @@ class Delft3DFileManager:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _create_one_d_results_dialog(self):
+        """Construct the 1D results visualizer lazily."""
+        from .one_d_results_dialog import OneDResultsDialog
+
+        dialog = OneDResultsDialog(self.iface.mainWindow())
+        dialog.set_handlers(
+            on_mode_requested=self._on_one_d_mode_requested,
+            on_plot_requested=self._on_one_d_plot_requested,
+            on_refresh_requested=self._refresh_one_d_results_dialog,
+        )
+        return dialog
+
+    def _ensure_one_d_results_dialog(self):
+        if self._one_d_results_dialog is None:
+            self._one_d_results_dialog = self._create_one_d_results_dialog()
+        return self._one_d_results_dialog
+
+    def _one_d_active_source(self):
+        layer = self.iface.activeLayer()
+        if layer is None or not self._is_mesh_layer(layer):
+            raise ValueError("Activate a valid mesh layer with mesh1d results first.")
+        source = ""
+        try:
+            source = str(layer.customProperty("delft3d_mesh_source", ""))
+        except (AttributeError, RuntimeError):
+            pass
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = _mesh_source_path(source)
+        if not source or not os.path.exists(source):
+            raise ValueError("The active mesh does not have a readable NetCDF source file.")
+        return source
+
+    def _refresh_one_d_results_dialog(self):
+        """Refresh 1D source topology, variables, and available times."""
+        dialog = self._ensure_one_d_results_dialog()
+        try:
+            import netCDF4 as nc
+            import numpy as np
+            from .one_d_results import (
+                discover_result_variables,
+                read_mesh1d_topology,
+            )
+
+            source = self._one_d_active_source()
+            with nc.Dataset(source, "r") as dataset:
+                topology = read_mesh1d_topology(dataset)
+                time_name = next(
+                    (name for name in dataset.variables if str(name).lower() == "time"),
+                    None,
+                )
+                if time_name is None:
+                    raise ValueError("The results file does not contain a time coordinate.")
+                time_values = dataset.variables[time_name][:]
+                if hasattr(time_values, "filled"):
+                    time_values = time_values.filled(float("nan"))
+                time_values = [float(value) for value in time_values]
+                variables = discover_result_variables(dataset, time_dimension=time_name)
+                if not variables:
+                    raise ValueError("No time-dependent mesh1d node or edge variables were found.")
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            self._one_d_results_state = None
+            dialog.set_source_label("Source: none")
+            dialog.set_variable_options([])
+            dialog.set_time_options([])
+            dialog.set_message(str(exc))
+            return False
+
+        self._one_d_results_state = {
+            "source": source,
+            "topology": topology,
+            "variables": {item.name: item for item in variables},
+            "time_values": time_values,
+            "time_name": time_name,
+        }
+        dialog.set_source_label(f"Source: {source}")
+        dialog.set_variable_options([(item.name, item.label) for item in variables])
+        time_options = [("all", "All times")]
+        sample_count = min(8, len(time_values))
+        for index in sorted(set(round(value) for value in np.linspace(0, len(time_values) - 1, sample_count))):
+            time_options.append((index, f"{index + 1}: {time_values[index]:g}"))
+        dialog.set_time_options(time_options)
+        dialog.set_message("")
+        return True
+
+    def open_one_d_results_window(self):
+        """Open/focus the 1D results visualizer."""
+        dialog = self._ensure_one_d_results_dialog()
+        self._refresh_one_d_results_dialog()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_one_d_mode_requested(self, mode):
+        if self._one_d_results_state is None:
+            self._refresh_one_d_results_dialog()
+        if self._one_d_results_state is not None:
+            self._start_one_d_results_selection(mode)
+
+    def _start_one_d_results_selection(self, mode):
+        """Capture one point or two mesh1d nodes from the map canvas."""
+        from qgis.gui import QgsMapTool, QgsRubberBand
+
+        canvas = self.iface.mapCanvas()
+        previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        dialog = self._ensure_one_d_results_dialog()
+        manager = self
+
+        class _OneDResultsMapTool(QgsMapTool):
+            def __init__(self):
+                super().__init__(canvas)
+                self.points = []
+                self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+                self.rubber_band.setColor(QColor(38, 139, 210, 220))
+                self.rubber_band.setWidth(3)
+
+            def canvasPressEvent(self, event):
+                if event.button() != _left_mouse_button_value():
+                    return
+                transform = canvas.getCoordinateTransform()
+                point = transform.toMapCoordinates(event.pos().x(), event.pos().y())
+                self.points.append(point)
+                self.rubber_band.addPoint(point, True)
+                manager._on_one_d_map_point(point, mode)
+                if mode == "point" or len(self.points) >= 2:
+                    self._finish()
+
+            def _finish(self):
+                self.rubber_band.reset(QgsWkbTypes.LineGeometry)
+                canvas.setMapTool(previous_tool)
+                manager._one_d_results_map_tool = None
+
+        self._one_d_results_previous_map_tool = previous_tool
+        self._one_d_results_map_tool = _OneDResultsMapTool()
+        canvas.setMapTool(self._one_d_results_map_tool)
+        dialog.set_message("Click one point." if mode == "point" else "Click two mesh1d nodes.")
+
+    def _stop_one_d_results_selection(self):
+        if self._one_d_results_map_tool is None:
+            return
+        try:
+            self._one_d_results_map_tool.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        except (AttributeError, RuntimeError):
+            pass
+        try:
+            self.iface.mapCanvas().setMapTool(self._one_d_results_previous_map_tool)
+        except (AttributeError, RuntimeError):
+            pass
+        self._one_d_results_map_tool = None
+
+    def _on_one_d_map_point(self, point, mode):
+        from .one_d_results import nearest_edge, nearest_node, shortest_mesh1d_path
+
+        state = self._one_d_results_state
+        dialog = self._ensure_one_d_results_dialog()
+        topology = state["topology"]
+        variable = state["variables"].get(dialog.selected_variable())
+        if variable is None:
+            dialog.set_message("Select a node or edge variable before selecting a location.")
+            return
+        x, y = float(point.x()), float(point.y())
+        if mode == "point":
+            if variable.location == "node":
+                node = nearest_node(topology, x, y)
+                self._one_d_results_selection = {"mode": "point", "location": "node", "index": node}
+                dialog.set_selection_text(f"Point: node {node}")
+            else:
+                edge, offset = nearest_edge(topology, x, y)
+                self._one_d_results_selection = {"mode": "point", "location": "edge", "index": edge}
+                dialog.set_selection_text(f"Point: edge {edge} at {offset:.2f} m")
+            return
+
+        node = nearest_node(topology, x, y)
+        current = self._one_d_results_selection or {}
+        if current.get("mode") != "track" or "start_node" in current and "end_node" in current:
+            self._one_d_results_selection = {"mode": "track", "start_node": node}
+            dialog.set_selection_text(f"Track start: node {node}; click the end node.")
+            return
+        try:
+            nodes, edges, distances = shortest_mesh1d_path(topology, current["start_node"], node)
+        except ValueError as exc:
+            dialog.set_message(str(exc))
+            return
+        self._one_d_results_selection.update({
+            "end_node": node,
+            "nodes": nodes,
+            "edges": edges,
+            "distances": distances,
+        })
+        dialog.set_selection_text(
+            f"Track: nodes {current['start_node']} to {node} ({len(nodes)} locations, {distances[-1]:.2f} m)"
+        )
+
+    def _one_d_time_indices(self, dialog, time_count):
+        from .one_d_results import parse_time_indices
+
+        expression = dialog.time_expression()
+        if expression:
+            return parse_time_indices(expression, time_count)
+        selected = dialog.selected_time_value()
+        if selected == "all" or selected is None:
+            return list(range(time_count))
+        return [int(selected)]
+
+    def _on_one_d_plot_requested(self, mode):
+        import netCDF4 as nc
+        from .one_d_results import read_result_values
+
+        state = self._one_d_results_state
+        dialog = self._ensure_one_d_results_dialog()
+        selection = self._one_d_results_selection or {}
+        variable = state and state["variables"].get(dialog.selected_variable())
+        if state is None or variable is None:
+            dialog.set_message("Refresh the active mesh and select a result variable.")
+            return
+        if selection.get("mode") != dialog.selected_mode():
+            dialog.set_message("Select a location using the active Point or Track button first.")
+            return
+        if dialog.selected_mode() == "point" and selection.get("location") != variable.location:
+            dialog.set_message("Select the point again after changing between node and edge variables.")
+            return
+        if dialog.selected_mode() == "track" and "end_node" not in selection:
+            dialog.set_message("Select two mesh1d nodes for a track first.")
+            return
+        try:
+            time_indices = self._one_d_time_indices(dialog, len(state["time_values"]))
+            with nc.Dataset(state["source"], "r") as dataset:
+                if dialog.selected_mode() == "point":
+                    spatial_index = [selection["index"]]
+                    values = read_result_values(dataset, variable, time_indices, spatial_index)[:, 0]
+                    plot_data = {
+                        "plot_type": "lines",
+                        "series": [{
+                            "x": [state["time_values"][index] for index in time_indices],
+                            "y": values.tolist(),
+                            "label": f"{variable.name} ({variable.location} {selection['index']})",
+                        }],
+                        "x_label": "time",
+                        "y_label": variable.label,
+                        "title": "1D Results - Point",
+                    }
+                else:
+                    spatial_indices = selection["nodes"] if variable.location == "node" else selection["edges"]
+                    values = read_result_values(dataset, variable, time_indices, spatial_indices)
+                    distances = selection["distances"]
+                    if variable.location == "edge":
+                        distances = [
+                            (distances[index] + distances[index + 1]) / 2.0
+                            for index in range(len(selection["edges"]))
+                        ]
+                    if dialog.selected_plot_type() == "heatmap":
+                        plot_data = {
+                            "plot_type": "heatmap",
+                            "values": values,
+                            "extent": [distances[0], distances[-1], state["time_values"][time_indices[0]], state["time_values"][time_indices[-1]]],
+                            "x_label": "distance [m]",
+                            "y_label": "time",
+                            "title": "1D Results - Track",
+                        }
+                    else:
+                        plot_data = {
+                            "plot_type": "lines",
+                            "series": [
+                                {
+                                    "x": distances,
+                                    "y": values[row].tolist(),
+                                    "label": f"time {state['time_values'][time_index]:g}",
+                                }
+                                for row, time_index in enumerate(time_indices)
+                            ],
+                            "x_label": "distance [m]",
+                            "y_label": variable.label,
+                            "title": "1D Results - Track",
+                        }
+        except (OSError, RuntimeError, ValueError, IndexError, KeyError) as exc:
+            dialog.set_message(str(exc))
+            return
+
+        append = str(mode).lower() == "add"
+        previous_type = getattr(self, "_one_d_results_plot_type", None)
+        if append and previous_type is not None and previous_type != plot_data["plot_type"]:
+            dialog.set_message("New Plot is required when changing between line and heatmap plots.")
+            return
+        dialog.apply_plot(plot_data, append=append)
+        self._one_d_results_plot_type = plot_data["plot_type"]
 
     def _find_nearest_feature(self, layer, map_point):
         """Return nearest feature around a map click, with a map-unit tolerance."""
@@ -8104,8 +8409,15 @@ class Delft3DFileManager:
         node_x = np.asarray(node_x, dtype=float)
         node_y = np.asarray(node_y, dtype=float)
 
-        # Read edge connectivity
-        edges = nc_dataset.variables["mesh1d_edge_nodes"][:] if "mesh1d_edge_nodes" in nc_dataset.variables else None
+        # Read edge connectivity and normalize the file's node index base for Python.
+        edge_nodes_var = nc_dataset.variables.get("mesh1d_edge_nodes")
+        edges = None
+        if edge_nodes_var is not None:
+            edges = edge_nodes_var[:]
+            if isinstance(edges, np.ma.MaskedArray):
+                edges = edges.filled(-1)
+            edges = np.asarray(edges, dtype=int)
+            edges -= int(getattr(edge_nodes_var, "start_index", 0))
         edge_branch = nc_dataset.variables["mesh1d_edge_branch"][:] if "mesh1d_edge_branch" in nc_dataset.variables else None
         branch_names = self._read_string_array(nc_dataset, "network_branch_long_name")
         if not self._has_nonempty_strings(branch_names):
