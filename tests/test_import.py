@@ -1366,7 +1366,8 @@ def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
 
     with patch.object(plugin, "_prompt_for_morphodynamic_variables") as prompt_mock, \
          patch.object(plugin, "_load_mesh2d_layer") as load_mesh2d_mock, \
-         patch.object(plugin, "_load_mesh1d_branches_layer") as load_mesh1d_mock:
+            patch.object(plugin, "_load_mesh1d_branches_layer") as load_mesh1d_mock, \
+            patch.object(plugin, "_load_mesh1d_nodes_layer") as load_nodes_mock:
         plugin.load_ugrid_mesh_file(str(src_path))
 
     prompt_mock.assert_not_called()
@@ -1377,6 +1378,8 @@ def test_load_ugrid_mesh_file_mixed_1d2d_regression(plugin, tmp_path):
     edges = load_mesh1d_mock.call_args[0][2]
     assert len(node_x) == 4
     assert len(edges) == 3
+    assert load_mesh1d_mock.call_args.kwargs["source_path"] == str(src_path)
+    assert load_nodes_mock.call_args.kwargs["source_path"] == str(src_path)
 
 
 def test_load_ugrid_mesh_file_updates_status_messages(plugin, tmp_path):

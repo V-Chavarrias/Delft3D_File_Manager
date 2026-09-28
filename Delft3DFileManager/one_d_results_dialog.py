@@ -4,6 +4,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,11 +41,27 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
         super().__init__(self._figure)
         self.setParent(parent)
         self._message = ""
+        self._colorbars = []
 
     def clear_plot(self):
         self._message = ""
+        self._remove_colorbars()
         self._axes.clear()
         self.draw_idle()
+
+    def save_figure(self, parent=None):
+        filename, _ = QFileDialog.getSaveFileName(
+            parent or self,
+            "Save Figure",
+            "",
+            "PNG image (*.png)",
+        )
+        if not filename:
+            return False
+        if not filename.lower().endswith(".png"):
+            filename += ".png"
+        self._figure.savefig(filename, format="png", dpi=300)
+        return True
 
     def set_message(self, message):
         self._message = str(message or "")
@@ -52,16 +69,26 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
 
     def set_plot(self, plot_data, append=False):
         if not append:
+            self._remove_colorbars()
             self._axes.clear()
         plot_type = plot_data.get("plot_type")
         if plot_type == "heatmap":
-            self._axes.imshow(
+            image = self._axes.imshow(
                 plot_data["values"],
                 aspect="auto",
                 origin="lower",
                 extent=plot_data["extent"],
             )
-            self._axes.figure.colorbar(self._axes.images[-1], ax=self._axes)
+            colorbar = self._axes.figure.colorbar(image, ax=self._axes)
+            colorbar.set_label(plot_data.get("colorbar_label", ""))
+            self._colorbars.append(colorbar)
+            if plot_data.get("time_is_datetime"):
+                try:
+                    from matplotlib import dates as mdates
+                    self._axes.yaxis_date()
+                    self._axes.yaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
+                except (ImportError, AttributeError, ValueError):
+                    pass
         else:
             for entry in plot_data.get("series", []):
                 self._axes.plot(entry["x"], entry["y"], linewidth=1.8, label=entry["label"])
@@ -75,6 +102,14 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
         self._axes.relim()
         self._axes.autoscale_view()
         self.draw_idle()
+
+    def _remove_colorbars(self):
+        for colorbar in self._colorbars:
+            try:
+                colorbar.remove()
+            except (AttributeError, RuntimeError, ValueError):
+                pass
+        self._colorbars = []
 
     def _redraw(self):
         self._axes.clear()
@@ -103,6 +138,10 @@ class _FallbackChartWidget(QLabel):
 
     def set_plot(self, plot_data, append=False):
         del plot_data, append
+
+    def save_figure(self, parent=None):
+        del parent
+        return False
         self.setText("Matplotlib is not available in this environment.")
 
 
@@ -134,6 +173,7 @@ class OneDResultsDialog(QDialog):
 
         self._variable_combo = QComboBox()
         self._time_combo = QComboBox()
+        self._time_combo.setMaxVisibleItems(10)
         self._time_expression = QLineEdit()
         self._time_expression.setPlaceholderText("Indices, e.g. 1:10,20:25")
         self._plot_type_combo = QComboBox()
@@ -159,12 +199,14 @@ class OneDResultsDialog(QDialog):
         new_button = QPushButton("New Plot")
         add_button = QPushButton("Add To Plot")
         clear_button = QPushButton("Clear Plot")
+        print_button = QPushButton("Save Figure PNG")
         actions = QHBoxLayout()
         actions.addWidget(refresh_button)
         actions.addStretch(1)
         actions.addWidget(new_button)
         actions.addWidget(add_button)
         actions.addWidget(clear_button)
+        actions.addWidget(print_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Delft3D 1D Results"))
@@ -181,6 +223,7 @@ class OneDResultsDialog(QDialog):
         new_button.clicked.connect(lambda: self._emit_plot_requested("new"))
         add_button.clicked.connect(lambda: self._emit_plot_requested("add"))
         clear_button.clicked.connect(self.clear_plot)
+        print_button.clicked.connect(lambda: self._chart.save_figure(self))
 
     def set_handlers(self, on_mode_requested=None, on_plot_requested=None, on_refresh_requested=None):
         self._on_mode_requested = on_mode_requested

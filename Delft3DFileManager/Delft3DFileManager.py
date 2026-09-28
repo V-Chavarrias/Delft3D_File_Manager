@@ -478,6 +478,7 @@ class Delft3DFileManager:
         self._one_d_results_selection = None
         self._one_d_results_map_tool = None
         self._one_d_results_previous_map_tool = None
+        self._one_d_results_overlay_bands = []
         self._profile_layer = None
         self._profile_selection_connected = False
         self._canvas_double_click_connected = False
@@ -698,6 +699,7 @@ class Delft3DFileManager:
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
         self._stop_one_d_results_selection()
+        self._clear_one_d_results_overlay()
 
     def compute_stream_function(self):
         """Create a time-dependent node streamfunction mesh from q1 output."""
@@ -2699,13 +2701,13 @@ class Delft3DFileManager:
 
     def _one_d_active_source(self):
         layer = self.iface.activeLayer()
-        if layer is None or not self._is_mesh_layer(layer):
-            raise ValueError("Activate a valid mesh layer with mesh1d results first.")
         source = ""
         try:
             source = str(layer.customProperty("delft3d_mesh_source", ""))
         except (AttributeError, RuntimeError):
             pass
+        if not source and (layer is None or not self._is_mesh_layer(layer)):
+            raise ValueError("Activate an imported mesh or mesh1d layer with results first.")
         if not source:
             source_method = getattr(layer, "source", None)
             source = str(source_method() if callable(source_method) else "")
@@ -2738,6 +2740,17 @@ class Delft3DFileManager:
                 if hasattr(time_values, "filled"):
                     time_values = time_values.filled(float("nan"))
                 time_values = [float(value) for value in time_values]
+                time_variable = dataset.variables[time_name]
+                time_units = getattr(time_variable, "units", None)
+                if not time_units:
+                    raise ValueError("The results time coordinate has no units.")
+                time_datetimes = list(nc.num2date(
+                    time_values,
+                    units=str(time_units),
+                    calendar=str(getattr(time_variable, "calendar", "standard")),
+                    only_use_cftime_datetimes=False,
+                    only_use_python_datetimes=True,
+                ))
                 variables = discover_result_variables(dataset, time_dimension=time_name)
                 if not variables:
                     raise ValueError("No time-dependent mesh1d node or edge variables were found.")
@@ -2754,14 +2767,16 @@ class Delft3DFileManager:
             "topology": topology,
             "variables": {item.name: item for item in variables},
             "time_values": time_values,
+            "time_datetimes": time_datetimes,
             "time_name": time_name,
         }
         dialog.set_source_label(f"Source: {source}")
         dialog.set_variable_options([(item.name, item.label) for item in variables])
         time_options = [("all", "All times")]
-        sample_count = min(8, len(time_values))
-        for index in sorted(set(round(value) for value in np.linspace(0, len(time_values) - 1, sample_count))):
-            time_options.append((index, f"{index + 1}: {time_values[index]:g}"))
+        time_options.extend(
+            (index, f"{index + 1}: {time_datetimes[index]:%Y-%m-%d %H:%M:%S}")
+            for index in range(len(time_datetimes))
+        )
         dialog.set_time_options(time_options)
         dialog.set_message("")
         return True
@@ -2785,6 +2800,7 @@ class Delft3DFileManager:
         from qgis.gui import QgsMapTool, QgsRubberBand
 
         canvas = self.iface.mapCanvas()
+        self._clear_one_d_results_overlay()
         previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
         dialog = self._ensure_one_d_results_dialog()
         manager = self
@@ -2817,6 +2833,71 @@ class Delft3DFileManager:
         self._one_d_results_map_tool = _OneDResultsMapTool()
         canvas.setMapTool(self._one_d_results_map_tool)
         dialog.set_message("Click one point." if mode == "point" else "Click two mesh1d nodes.")
+
+    def _clear_one_d_results_overlay(self):
+        """Remove the map overlay showing the locations used by the current plot."""
+        for band in self._one_d_results_overlay_bands:
+            try:
+                band.reset(QgsWkbTypes.PointGeometry)
+                band.reset(QgsWkbTypes.LineGeometry)
+            except (AttributeError, RuntimeError):
+                pass
+        self._one_d_results_overlay_bands = []
+
+    def _show_one_d_results_overlay(self, selection):
+        """Draw the selected mesh1d nodes and edges on the map canvas."""
+        from qgis.gui import QgsRubberBand
+
+        state = self._one_d_results_state
+        if state is None:
+            return
+
+        self._clear_one_d_results_overlay()
+        canvas = self.iface.mapCanvas()
+        topology = state["topology"]
+
+        node_band = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
+        node_band.setColor(QColor(220, 50, 47, 230))
+        node_band.setWidth(8)
+        edge_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+        edge_band.setColor(QColor(38, 139, 210, 230))
+        edge_band.setWidth(4)
+
+        if selection.get("mode") == "point":
+            if selection.get("location") == "node":
+                node_indices = [selection["index"]]
+            else:
+                node_indices = list(topology["edges"][selection["index"]])
+                edge_start, edge_end = topology["edges"][selection["index"]]
+                edge_band.addPoint(
+                    QgsPointXY(float(topology["node_x"][edge_start]), float(topology["node_y"][edge_start])),
+                    False,
+                )
+                edge_band.addPoint(
+                    QgsPointXY(float(topology["node_x"][edge_end]), float(topology["node_y"][edge_end])),
+                    True,
+                )
+        else:
+            node_indices = selection.get("nodes", [])
+            for node_index in node_indices:
+                edge_band.addPoint(
+                    QgsPointXY(float(topology["node_x"][node_index]), float(topology["node_y"][node_index])),
+                    False,
+                )
+            if node_indices:
+                edge_band.addPoint(
+                    QgsPointXY(float(topology["node_x"][node_indices[-1]]), float(topology["node_y"][node_indices[-1]])),
+                    True,
+                )
+
+        for node_index in node_indices:
+            node_band.addPoint(
+                QgsPointXY(float(topology["node_x"][node_index]), float(topology["node_y"][node_index])),
+                True,
+            )
+
+        self._one_d_results_overlay_bands = [node_band, edge_band]
+        canvas.refresh()
 
     def _stop_one_d_results_selection(self):
         if self._one_d_results_map_tool is None:
@@ -2851,6 +2932,7 @@ class Delft3DFileManager:
                 edge, offset = nearest_edge(topology, x, y)
                 self._one_d_results_selection = {"mode": "point", "location": "edge", "index": edge}
                 dialog.set_selection_text(f"Point: edge {edge} at {offset:.2f} m")
+            self._show_one_d_results_overlay(self._one_d_results_selection)
             return
 
         node = nearest_node(topology, x, y)
@@ -2871,8 +2953,10 @@ class Delft3DFileManager:
             "distances": distances,
         })
         dialog.set_selection_text(
-            f"Track: nodes {current['start_node']} to {node} ({len(nodes)} locations, {distances[-1]:.2f} m)"
+            f"Track: nodes {current['start_node']} to {node} ({len(nodes)} locations, {distances[-1]:.2f} m); "
+            f"edges {len(edges)}"
         )
+        self._show_one_d_results_overlay(self._one_d_results_selection)
 
     def _one_d_time_indices(self, dialog, time_count):
         from .one_d_results import parse_time_indices
@@ -2914,7 +2998,7 @@ class Delft3DFileManager:
                     plot_data = {
                         "plot_type": "lines",
                         "series": [{
-                            "x": [state["time_values"][index] for index in time_indices],
+                            "x": [state["time_datetimes"][index] for index in time_indices],
                             "y": values.tolist(),
                             "label": f"{variable.name} ({variable.location} {selection['index']})",
                         }],
@@ -2932,13 +3016,21 @@ class Delft3DFileManager:
                             for index in range(len(selection["edges"]))
                         ]
                     if dialog.selected_plot_type() == "heatmap":
+                        from matplotlib import dates as mdates
                         plot_data = {
                             "plot_type": "heatmap",
                             "values": values,
-                            "extent": [distances[0], distances[-1], state["time_values"][time_indices[0]], state["time_values"][time_indices[-1]]],
+                            "extent": [
+                                distances[0],
+                                distances[-1],
+                                mdates.date2num(state["time_datetimes"][time_indices[0]]),
+                                mdates.date2num(state["time_datetimes"][time_indices[-1]]),
+                            ],
                             "x_label": "distance [m]",
                             "y_label": "time",
-                            "title": "1D Results - Track",
+                            "time_is_datetime": True,
+                            "colorbar_label": variable.label or variable.name,
+                            "title": "",
                         }
                     else:
                         plot_data = {
@@ -2947,13 +3039,13 @@ class Delft3DFileManager:
                                 {
                                     "x": distances,
                                     "y": values[row].tolist(),
-                                    "label": f"time {state['time_values'][time_index]:g}",
+                                    "label": f"time {state['time_datetimes'][time_index]:%Y-%m-%d %H:%M:%S}",
                                 }
                                 for row, time_index in enumerate(time_indices)
                             ],
                             "x_label": "distance [m]",
                             "y_label": variable.label,
-                            "title": "1D Results - Track",
+                            "title": "",
                         }
         except (OSError, RuntimeError, ValueError, IndexError, KeyError) as exc:
             dialog.set_message(str(exc))
@@ -7063,7 +7155,7 @@ class Delft3DFileManager:
                         mesh1d_data["node_x"], mesh1d_data["node_y"],
                         mesh1d_data["edges"], mesh1d_data["edge_branch"],
                         mesh1d_data["branch_names"],
-                        epsg, layer_names["mesh1d_branches"]
+                        epsg, layer_names["mesh1d_branches"], source_path=filepath
                     )
                     loaded_layers.append("mesh1d_branches")
                 except Exception as exc:
@@ -7079,7 +7171,7 @@ class Delft3DFileManager:
                         mesh1d_data["node_x"], mesh1d_data["node_y"],
                         mesh1d_data.get("node_branch"), mesh1d_data.get("node_offset"),
                         mesh1d_data.get("node_ids"), mesh1d_data["branch_names"],
-                        epsg, layer_names["mesh1d_nodes"]
+                        epsg, layer_names["mesh1d_nodes"], source_path=filepath
                     )
                     loaded_layers.append("mesh1d_nodes")
                 except Exception as exc:
@@ -8707,7 +8799,9 @@ class Delft3DFileManager:
             "Try opening directly in QGIS (File > Open Mesh) to verify."
         )
 
-    def _load_mesh1d_branches_layer(self, node_x, node_y, edges, edge_branch, branch_names, epsg, layer_name):
+    def _load_mesh1d_branches_layer(
+        self, node_x, node_y, edges, edge_branch, branch_names, epsg, layer_name, source_path=None
+    ):
         """Load mesh1d branches as polyline layer."""
         import numpy as np
 
@@ -8795,9 +8889,13 @@ class Delft3DFileManager:
 
         provider.addFeatures(features)
         layer.updateExtents()
+        if source_path:
+            layer.setCustomProperty("delft3d_mesh_source", source_path)
         QgsProject.instance().addMapLayer(layer)
 
-    def _load_mesh1d_nodes_layer(self, node_x, node_y, node_branch, node_offset, node_ids, branch_names, epsg, layer_name):
+    def _load_mesh1d_nodes_layer(
+        self, node_x, node_y, node_branch, node_offset, node_ids, branch_names, epsg, layer_name, source_path=None
+    ):
         """Load mesh1d nodes as point layer."""
         layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", layer_name, "memory")
         provider = layer.dataProvider()
@@ -8839,6 +8937,8 @@ class Delft3DFileManager:
 
         provider.addFeatures(features)
         layer.updateExtents()
+        if source_path:
+            layer.setCustomProperty("delft3d_mesh_source", source_path)
         QgsProject.instance().addMapLayer(layer)
 
     def _load_mesh1d2d_links_layer(self, node1d_x, node1d_y, face2d_x, face2d_y, link_type, epsg, layer_name):
