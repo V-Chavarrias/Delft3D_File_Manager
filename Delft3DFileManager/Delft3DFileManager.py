@@ -2694,12 +2694,19 @@ class Delft3DFileManager:
             on_refresh_requested=self._refresh_one_d_results_dialog,
             on_figure_position=self._on_one_d_figure_position,
         )
+        dialog.finished.connect(self._on_one_d_results_dialog_finished)
         return dialog
 
     def _ensure_one_d_results_dialog(self):
         if self._one_d_results_dialog is None:
             self._one_d_results_dialog = self._create_one_d_results_dialog()
         return self._one_d_results_dialog
+
+    def _on_one_d_results_dialog_finished(self, result):
+        del result
+        self._stop_one_d_results_selection()
+        self._clear_one_d_results_overlay()
+        self._one_d_results_selection = None
 
     def _one_d_active_source(self):
         layer = self.iface.activeLayer()

@@ -99,6 +99,18 @@ def test_mesh_source_path_resolves_ugrid_uri():
     assert pathlib.Path(resolved) == source
 
 
+def test_one_d_results_dialog_close_clears_map_selection(plugin):
+    plugin._one_d_results_selection = {"mode": "track", "nodes": [1, 2]}
+    plugin._stop_one_d_results_selection = MagicMock()
+    plugin._clear_one_d_results_overlay = MagicMock()
+
+    plugin._on_one_d_results_dialog_finished(0)
+
+    plugin._stop_one_d_results_selection.assert_called_once_with()
+    plugin._clear_one_d_results_overlay.assert_called_once_with()
+    assert plugin._one_d_results_selection is None
+
+
 # ---------------------------------------------------------------------------
 # Extension routing tests (load_file_by_extension)
 # ---------------------------------------------------------------------------
