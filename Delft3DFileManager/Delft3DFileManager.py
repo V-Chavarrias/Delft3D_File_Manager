@@ -11473,18 +11473,32 @@ class Delft3DFileManager:
                 return
 
             progress_dialog = QProgressDialog(
-                "Installing Python dependencies...",
+                "Preparing dependency installation...",
                 None,
                 0,
-                100,
+                len(missing),
                 self.iface.mainWindow(),
             )
             progress_dialog.setWindowTitle("Install Dependencies")
-            progress_dialog.setValue(10)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setValue(0)
             progress_dialog.show()
             QApplication.processEvents()
-            result = self._run_pip_install(missing)
-            progress_dialog.setValue(100)
+
+            result = None
+            failed_package = None
+            for index, package in enumerate(missing, start=1):
+                progress_dialog.setLabelText(
+                    f"Installing {package} ({index}/{len(missing)})..."
+                )
+                QApplication.processEvents()
+                result = self._run_pip_install([package])
+                if result.returncode != 0:
+                    failed_package = package
+                    break
+                progress_dialog.setValue(index)
+                QApplication.processEvents()
+
             progress_dialog.close()
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip()
@@ -11496,7 +11510,7 @@ class Delft3DFileManager:
                     "Dependency installation failed",
                     "Could not install Python packages with pip.\n\n"
                     "Command:\n"
-                    f"{pip_python} -m pip install {' '.join(missing)}\n\n"
+                    f"{pip_python} -m pip install {failed_package}\n\n"
                     "Error:\n"
                     f"{err}",
                 )
