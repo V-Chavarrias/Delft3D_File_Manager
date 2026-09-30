@@ -6,57 +6,182 @@ A QGIS plugin to manage Delft3D files.
 - QGIS 3.x and QGIS 4.x
 
 ## Features
-- Reads a fixed-weir text file where each weir is defined by X,Y coordinates and attributes.
-- Reads point-cloud `.xyn` files as point layers with optional generated names.
-- Reads `.xyz` point files as 2D point layers with a `z` attribute.
+- Installs the required Python dependencies from the plugin menu.
+- Imports fixed-weir, polyline, bridge, point-cloud, XYZ, ShorelineS, cross-section, and Delft3D FM input files.
 - Imports complete Delft3D FM simulations from `dimr_config.xml` and follows linked model input files.
-- Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
-- Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
-- Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
-- Computes a time-dependent node streamfunction from `q1` discharge through **Compute 2D variables -> Streamfunction**.
+- Imports Delft3D FM model-definition files (`.mdu`) and loads linked meshes, forcing, cross-sections, structures, 1D fields, and roughness data.
+- Imports external-forcing link files (`.ext`) as spatial boundary/lateral features and boundary-condition forcing files (`.bc`) as timeseries records linked to those features.
+- Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
+- Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
+- Detects morphodynamic NetCDF variables with extra dimensions and offers flattenable variables for side-car creation.
+- Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
+- Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
+- Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
+- Visualizes HIS station and cross-section timeseries in a dedicated explorer with variable selection and New Plot/Add To Plot modes.
+- Visualizes time-dependent mesh1d node and edge results in point and shortest-path track modes, including derived Froude values.
+- Draws scalar dataset slices across 2D mesh edges for imported mesh results.
+- Computes a time-dependent node streamfunction from `q1` discharge.
+- Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
-- Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
-- Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
-- Writes a flattened NetCDF side-car and loads the original plus flattened datasets as separate layers, with flattened layers tagged as `morpho`.
-- For partitioned mesh imports, loads regular and flattened partitions into separate grouping layers.
-- Visualizes imported boundary-condition timeseries in the existing profile popup window.
-- Visualizes HIS timeseries in a dedicated explorer window with variable dropdown selection and Add/New plot modes.
-- Visualizes time-dependent 1D mesh results for selected points and shortest mesh paths.
-- Exports line features and fixed-weir point layers with the main `Export` action.
+- Exports line, bridge point, and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
-- Writes bed level data into UGRID mesh NetCDF files.
-- Creates trachytopes point layers from UGRID mesh edge coordinates.
-- Bulk-updates trachytope values for points inside polygons.
-- Exports trachytopes to ASCII `.arl` files.
-- Creates 1D network UGRID NetCDF files from branch polylines with optional snapped special points.
+- Writes bed level data into UGRID mesh NetCDF files using NetCDF, raster, or vector point sources.
+- Creates trachytope point layers from UGRID mesh edge coordinates, updates values inside polygons, and exports `.arl` files.
+- Creates bridge and fixed-weir point layers from polyline vertices with editable default attributes.
+- Creates 1D network UGRID NetCDF files from branch polylines with optional snapped special points, diagnostics, and logs.
 
 ## Menu Structure
 
-The plugin menu contains these actions in order:
+The plugin menu contains these actions in order. The links point to the corresponding sections below.
 
-1. **Install Python Dependencies**
-
-2. **Viewer**
-	- **Cross-Section**
-	- **HIS Time Series**
-	- **1D MAP**
-	- **2D Slice**
-	- **Boundary Conditions**
-3. **Compute 2D Variables**
-	- **Streamfunction**
-	- **Mesh properties**
-4. **Import**
-5. **Export**
-6. **Write Bed Level to Mesh**
-7. **Create Trachytopes from Mesh**
-8. **Create Bridge Points from Polyline**
-9. **Create Fixed-Weir Points from Polyline**
-10. **Create 1D Network**
-11. **Set Trachytopes in Polygons**
-12. **Export Trachytopes (.arl)**
-13. **Export Point Cloud (.xyn)**
+1. [Install Python Dependencies](#install-python-dependencies)
+2. [Viewer](#viewer)
+	- [Cross-Section](#cross-section-and-boundary-conditions-viewer)
+	- [HIS Time Series](#his-time-series-explorer)
+	- [1D MAP](#1d-map)
+	- [2D Slice](#2d-slice)
+	- [Boundary Conditions](#cross-section-and-boundary-conditions-viewer)
+3. [Compute 2D Variables](#compute-2d-variables)
+	- [Froude Number](#froude-number)
+	- [Streamfunction](#streamfunction)
+	- [Mesh Properties](#mesh-properties)
+4. [Import](#file-import)
+5. [Export](#export)
+6. [Write Bed Level to Mesh](#bed-level-to-mesh)
+7. [Create Trachytopes from Mesh](#trachytopes-from-mesh)
+8. [Create Bridge Points from Polyline](#bridge-points-from-polyline)
+9. [Create Fixed-Weir Points from Polyline](#fixed-weir-points-from-polyline)
+10. [Create 1D Network](#create-1d-network)
+11. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
+12. [Export Trachytopes (.arl)](#export-trachytopes-arl)
+13. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
 
 The existing actions outside the two submenus remain top-level actions and keep their existing behavior.
+
+## Install Python Dependencies
+
+The plugin can install its required Python packages from **Delft3D File Manager -> Install Python Dependencies**. The allowlisted packages are `netCDF4`, `pyproj`, `scipy`, and `defusedxml`.
+
+Restart QGIS after installation. `defusedxml` is required for `dimr_config.xml` imports; the other packages support NetCDF, projection, interpolation, and mesh workflows.
+
+## Viewer
+
+The Viewer actions are documented here:
+
+- [Cross-Section and Boundary Conditions](#cross-section-and-boundary-conditions-viewer)
+- [HIS Time Series](#his-time-series-explorer)
+- [1D MAP](#1d-map)
+- [2D Slice](#2d-slice)
+
+### Cross-section and Boundary Conditions Viewer
+
+The **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions** actions open the same profile window, which supports:
+- Delft3D FM cross-section profile previews
+- Delft3D FM boundary-condition timeseries previews
+
+### HIS Time Series Explorer
+
+Use **Viewer -> HIS Time Series**.
+
+Workflow:
+1. Select source and scope in the HIS window.
+2. Select variable from dropdown.
+3. For station/cross-section scope, select one or more features in the active HIS layer.
+4. Choose `New Plot` or `Add To Plot`.
+
+Notes:
+- No right-click is required; plotting is selection-driven.
+- Global variables can be plotted without map selection.
+- Multiple selected features are plotted together for quick comparison.
+
+### 1D MAP
+
+Use **Viewer -> 1D MAP** with an imported mesh layer active. The active mesh must have a readable NetCDF source containing mesh1d topology, a `time` coordinate, and time-dependent variables located at either `mesh1d_nodes` or `mesh1d_edges`.
+
+Workflow:
+1. Open the visualizer and click `Point` or `Track`.
+2. Click one map location for Point mode, or two mesh1d nodes for Track mode. Track selection follows the shortest path through the mesh graph, including junctions.
+3. Select a node or edge variable. Point mode resolves the nearest node or edge according to that variable's location. The variable list can include a derived Froude number when compatible flow-depth and velocity variables are present at the same mesh location.
+4. Select `All times`, one of the sampled available times, or enter one-based inclusive time indices such as `1:10,20:25`.
+5. Track mode supports distance-line plots and distance-time heatmaps. Point mode plots time on the x-axis and the selected result on the y-axis.
+6. `New Plot` replaces the current figure. `Add To Plot` overlays compatible plots; use New Plot when switching between line and heatmap views.
+
+### 2D Slice
+
+The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
+
+- Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
+- Open **2D Slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
+- Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
+- Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
+- Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
+- The displayed scalar dataset is captured as a snapshot, so changing QGIS time or variable does not rewrite existing curves.
+- Partition layers are sampled as one logical mesh. Owner-masked imports are the supported mode because they avoid duplicate ghost-cell values at partition boundaries.
+- Raw ghost-overlap imports may produce ambiguous values where partitions overlap and are not silently deduplicated.
+
+### Profile Chart Window
+
+- Open by double-clicking a cross-section point or a spatial forcing feature on the map.
+- Also available from **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions**.
+- Supports `yz` definitions from `def_yCoords` / `def_zCoords` and `circle` definitions from `def_diam`.
+- Axes are labeled with units (`y [m]`, `z [m]`).
+- The window uses a matplotlib plot when matplotlib is available, and falls back to the built-in renderer otherwise.
+- The chart updates automatically when selection changes on the active supported layer.
+- No extra dependencies are required.
+- For boundary forcing linked through `.ext`, activate the imported `*_ext_spatial` layer and click or select a feature to display its series.
+
+## Compute 2D Variables
+
+These actions operate on the active imported 2D mesh layer and create derived mesh layers backed by NetCDF sidecars.
+
+### Froude Number
+
+Activate an imported 2D mesh and choose **Compute 2D Variables -> Froude Number**. The action computes the time-dependent face Froude number from flow depth and velocity magnitude:
+
+$\mathrm{Froude} = \frac{\mathrm{velocity}}{\sqrt{9.81 \cdot \mathrm{flow\ depth}}}$
+
+The required depth and velocity variables are detected from their names and metadata. The result is written beside the source MAP output as `<source>_qgis_froude.nc`, with a `froude_number` face dataset and the source mesh topology copied into the sidecar. The derived mesh layer is loaded into QGIS for time navigation and styling.
+
+The active mesh must have a readable NetCDF source containing time-dependent 2D face flow-depth and velocity-magnitude variables. Missing inputs or incompatible dimensions produce a warning without creating a layer.
+
+### Streamfunction
+
+Activate an imported 2D mesh and choose **Compute 2D Variables -> Streamfunction**. The action reads the time-dependent `q1` edge discharge, integrates it over the oriented UGRID edge connectivity, and adds a derived mesh layer with a node-centered `stream_function` dataset for every output time.
+
+Partitioned map outputs are merged globally before calculation. Partition face ownership is used to remove ghost-edge duplicates; outputs with conflicting or incomplete topology are rejected rather than producing discontinuities at partition boundaries. The generated UGRID sidecar is stored beside the source map output with the `_qgis_stream_function.nc` suffix.
+
+### Mesh Properties
+
+Activate a loaded 2D mesh and choose **Compute 2D Variables -> Mesh Properties**. The action can create quality, connectivity, center, and dual-link layers without changing the source mesh.
+
+#### Output Layers
+
+The action can create the following memory layers, depending on the selected options:
+
+- `<mesh_name>_mesh_properties_faces` (Polygon), with `neighbor_count`, `boundary_flag`, `nonmanifold_flag`, `component_id`, and `max_orthogonality` fields. It receives graduated coloring by orthogonality.
+- `<mesh_name>_mesh_properties_edges` (LineString), with edge incidence, boundary/non-manifold flags, and `orthogonality`. Values near `0` are more orthogonal; values near `1` are worse.
+- `<mesh_name>_mesh_properties_centers` (Point), with one point per face and the same connectivity and quality attributes.
+- `<mesh_name>_mesh_properties_dual_links` (LineString), connecting the centers of adjacent faces and identifying their shared edge.
+
+Face center points are optional and disabled by default. They are not required for edge orthogonality, face quality, connectivity, or dual-link calculations; centers are retained internally for those calculations. Enable **Face center points** only when a point layer is useful for labeling, selection, or point-based processing.
+
+The `neighbor_count` and `component_id` fields can be used with graduated or categorized symbology to inspect connectivity. The dual-link layer is a center-to-center dual graph; it is not a clipped polygonal Voronoi dual.
+
+#### Output Fields
+
+The properties are calculated from the mesh topology. Mesh edges are treated as undirected: an edge connecting nodes `A` and `B` is the same edge as one connecting `B` and `A`.
+
+- `neighbor_count`: number of distinct faces that share an edge with the current face. A face with no shared edges has value `0`. A normal interior quadrilateral generally has four neighbors only when all four of its edges are shared; boundary faces have fewer neighbors.
+- `boundary_flag`: `1` when at least one edge of the face belongs to only one face in the analyzed mesh, otherwise `0`. Such an edge is a mesh boundary edge. This identifies the boundary of the active mesh or active partition, not necessarily the physical model boundary.
+- `nonmanifold_flag`: `1` when at least one edge of the face belongs to more than two faces, otherwise `0`. An edge shared by exactly two faces is treated as regular; an edge shared by three or more faces is non-manifold.
+- `component_id`: identifier of the connected component containing the face. Faces are connected when they share an edge. IDs start at `0` and are assigned while traversing the mesh; the specific numeric ID is not a persistent physical identifier.
+- `max_orthogonality`: largest orthogonality cosine among the face's shared edges. It is computed from the angle between each shared mesh edge and the line joining the circumcenters of its two adjacent faces. Values near `0` indicate better orthogonality and values near `1` indicate worse orthogonality. A face without any shared edge has a null value because no orthogonality measure can be computed.
+
+For the edge layer, `incident_count` is the number of faces using the edge, `boundary_flag` is `1` for `incident_count = 1`, and `nonmanifold_flag` is `1` for `incident_count > 2`. The `face_ids` field lists the incident face IDs. Dual links are created only for adjacent face pairs and therefore represent shared-edge connectivity.
+
+For partitioned imports, the active partition is analyzed independently.
+- `<file_name>_geometry_edges` (LineString layer, with `name` field)
+- `<file_name>_geometry_nodes` (Point layer, with `name` field)
 
 ## File Import
 
@@ -69,12 +194,12 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.xyn`** — Point files (creates point layer)
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
 - **`dimr_config.xml`** — DIMR simulation config (loads referenced component input files)
-- **`.mdu`** — FM model definition file (creates a summary table and loads linked files)
-- **`.ext`** — FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
-- **`.bc`** — FM boundary-condition forcing file (creates forcing/timeseries records)
+- **`.mdu`** — Delft3D FM model definition file (creates a summary table and loads linked files)
+- **`.ext`** — Delft3D FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
+- **`.bc`** — Delft3D FM boundary-condition forcing file (creates forcing/timeseries records)
 - **`.nc`** — UGRID mesh NetCDF or Delft3D FM HIS NetCDF (auto-detected)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
-- **`.csl`, `.csd`** — FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
+- **`.csl`, `.csd`** — Delft3D FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
 ### Import: Full Delft3D FM Simulation (`dimr_config.xml`)
 
@@ -87,11 +212,11 @@ DIMR import requires `defusedxml`. If it is missing, run `Delft3D File Manager -
 2. Resolve paths relative to the DIMR file location.
 3. Dispatch each referenced file to the corresponding importer.
 
-This allows one-click loading of model configuration and linked FM inputs.
+This allows one-click loading of model configuration and linked Delft3D FM inputs.
 
-### Import: FM Model Definition (`.mdu`)
+### Import: Delft3D FM Model Definition (`.mdu`)
 
-Load an FM model definition and its primary linked inputs.
+Load a Delft3D FM model definition and its primary linked inputs.
 
 #### Behavior
 - Creates an `*_mdu_files` summary table with resolved paths and existence flags.
@@ -114,7 +239,7 @@ Load an FM model definition and its primary linked inputs.
 
 ### Import: Structures / IniField / 1dField / Roughness (`.ini`)
 
-When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`, the plugin imports these as spatial point features (not only table rows) using the FM grid as geometric context.
+When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`, the plugin imports these as spatial point features (not only table rows) using the Delft3D FM grid as geometric context.
 
 - `structure`:
 	- Imports **all** `[Structure]` blocks found in the file.
@@ -128,33 +253,6 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 - `inifield`: resolves referenced `dataFile` and imports the linked 1d field spatially.
 - `1dfield`: places branch value points from `chainage`/`values` arrays.
 - `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
-
-### Cross-section and Boundary Conditions Viewer
-
-The **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions** actions open the same profile window, which supports:
-- FM cross-section profile previews
-- FM boundary-condition timeseries previews
-
-### 2D Slice
-
-The **Viewer -> 2D Slice** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
-
-- Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
-- Open **2D Slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
-- Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
-- Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
-- Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
-- The displayed scalar dataset is captured as a snapshot, so changing QGIS time or variable does not rewrite existing curves.
-- Partition layers are sampled as one logical mesh. Owner-masked imports are the supported mode because they avoid duplicate ghost-cell values at partition boundaries.
-- Raw ghost-overlap imports may produce ambiguous values where partitions overlap and are not silently deduplicated.
-
-### Streamfunction
-
-Activate an imported 2D mesh and choose **Delft3D File Manager -> Compute 2D variables -> Streamfunction**. The action reads the time-dependent `q1` edge discharge, integrates it over the oriented UGRID edge connectivity, and adds a derived mesh layer with a node-centered `stream_function` dataset for every output time.
-
-Partitioned map outputs are merged globally before calculation. Partition face ownership is used to remove ghost-edge duplicates; outputs with conflicting or incomplete topology are rejected rather than producing discontinuities at partition boundaries. The generated UGRID sidecar is stored beside the source map output with the `_qgis_stream_function.nc` suffix.
-
-For boundary forcing linked through `.ext`, activate the imported `*_ext_spatial` layer and click/select a feature to display its series in the popup chart.
 
 ### Import: Fixed Weir (`.fxw`, `.pliz` with 9 columns)
 
@@ -322,42 +420,6 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 - The plugin attempts to read EPSG code from NetCDF metadata
 - If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
 
-#### Mesh Properties
-
-1. Activate a loaded 2D mesh layer in QGIS.
-2. Choose **Delft3D File Manager -> Compute 2D variables -> Mesh properties**.
-
-The action can create the following memory layers without changing the source mesh,
-depending on the selected options:
-
-- `<mesh_name>_mesh_properties_faces` (Polygon), with `neighbor_count`, `boundary_flag`, `nonmanifold_flag`, `component_id`, and `max_orthogonality` fields. It receives graduated coloring by orthogonality.
-- `<mesh_name>_mesh_properties_edges` (LineString), with edge incidence, boundary/non-manifold flags, and `orthogonality`. Values near `0` are more orthogonal; values near `1` are worse.
-- `<mesh_name>_mesh_properties_centers` (Point), with one point per face and the same connectivity and quality attributes.
-- `<mesh_name>_mesh_properties_dual_links` (LineString), connecting the centers of adjacent faces and identifying their shared edge.
-
-Face center points are optional and disabled by default. They are not required for
-edge orthogonality, face quality, connectivity, or dual-link calculations; centers
-are retained internally for those calculations. Enable **Face center points** only
-when a point layer is useful for labeling, selection, or point-based processing.
-
-The `neighbor_count` and `component_id` fields can be used with graduated or categorized symbology to inspect connectivity. The dual-link layer is a center-to-center dual graph; it is not a clipped polygonal Voronoi dual.
-
-#### Mesh Property Fields
-
-The properties are calculated from the mesh topology. Mesh edges are treated as undirected: an edge connecting nodes `A` and `B` is the same edge as one connecting `B` and `A`.
-
-- `neighbor_count`: number of distinct faces that share an edge with the current face. A face with no shared edges has value `0`. A normal interior quadrilateral generally has four neighbors only when all four of its edges are shared; boundary faces have fewer neighbors.
-- `boundary_flag`: `1` when at least one edge of the face belongs to only one face in the analyzed mesh, otherwise `0`. Such an edge is a mesh boundary edge. This identifies the boundary of the active mesh or active partition, not necessarily the physical model boundary.
-- `nonmanifold_flag`: `1` when at least one edge of the face belongs to more than two faces, otherwise `0`. An edge shared by exactly two faces is treated as regular; an edge shared by three or more faces is non-manifold.
-- `component_id`: identifier of the connected component containing the face. Faces are connected when they share an edge. IDs start at `0` and are assigned while traversing the mesh; the specific numeric ID is not a persistent physical identifier.
-- `max_orthogonality`: largest orthogonality cosine among the face's shared edges. It is computed from the angle between each shared mesh edge and the line joining the circumcenters of its two adjacent faces. Values near `0` indicate better orthogonality and values near `1` indicate worse orthogonality. A face without any shared edge has a null value because no orthogonality measure can be computed.
-
-For the edge layer, `incident_count` is the number of faces using the edge, `boundary_flag` is `1` for `incident_count = 1`, and `nonmanifold_flag` is `1` for `incident_count > 2`. The `face_ids` field lists the incident face IDs. Dual links are created only for adjacent face pairs and therefore represent shared-edge connectivity.
-
-For partitioned imports, the active partition is analyzed independently.
-- `<file_name>_geometry_edges` (LineString layer, with `name` field)
-- `<file_name>_geometry_nodes` (Point layer, with `name` field)
-
 ### Import: Delft3D FM HIS (`.nc`)
 
 When a selected `.nc` file is detected as a Delft3D FM HIS output, the plugin imports only observation locations and keeps timeseries data lazy-loaded.
@@ -367,42 +429,6 @@ When a selected `.nc` file is detected as a Delft3D FM HIS output, the plugin im
 - `<file_name>_his_cross_sections` (LineString layer)
 
 Each feature stores only lightweight references (`his_source`, `obs_type`, `obs_index`, `obs_name`, `obs_id`) and does not store full timeseries payloads.
-
-#### HIS Time Series Explorer
-
-Use `Delft3D File Manager -> Viewer -> HIS Time Series`.
-
-Workflow:
-1. Select source and scope in the HIS window.
-2. Select variable from dropdown.
-3. For station/cross-section scope, select one or more features in the active HIS layer.
-4. Choose `New Plot` or `Add To Plot`.
-
-Notes:
-- No right-click is required; plotting is selection-driven.
-- Global variables can be plotted without map selection.
-- Multiple selected features are plotted together for quick comparison.
-
-#### 1D MAP
-
-Use `Delft3D File Manager -> Viewer -> 1D MAP` with an imported mesh layer
-active. The active mesh must have a readable NetCDF source containing mesh1d
-topology, a `time` coordinate, and time-dependent variables located at either
-`mesh1d_nodes` or `mesh1d_edges`.
-
-Workflow:
-1. Open the visualizer and click `Point` or `Track`.
-2. Click one map location for Point mode, or two mesh1d nodes for Track mode.
-	Track selection follows the shortest path through the mesh graph, including
-	junctions.
-3. Select a node or edge variable. Point mode resolves the nearest node or edge
-	according to that variable's location.
-4. Select `All times`, one of the sampled available times, or enter one-based
-	inclusive time indices such as `1:10,20:25`.
-5. Track mode supports distance-line plots and distance-time heatmaps. Point
-	mode plots time on the x-axis and the selected result on the y-axis.
-6. `New Plot` replaces the current figure. `Add To Plot` overlays compatible
-	plots; use New Plot when switching between line and heatmap views.
 
 ### Import: ShorelineS Results (`.mat`)
 
@@ -459,7 +485,7 @@ The plugin validates ShorelineS file structure before import:
 - Incompatible data types (non-numeric) trigger an error
 - Non-ShorelineS `.mat` files are rejected with a clear diagnostic message
 
-### Import: FM Cross-Sections (`.csl` or `.csd`)
+### Import: Delft3D FM Cross-Sections (`.csl` or `.csd`)
 
 Import Delft3D Flexible Mesh 1D cross-sections into one point layer.
 
@@ -501,18 +527,6 @@ Output attributes include:
 - Cross-sections with missing branch geometry or out-of-range chainage are skipped
 - Missing definitions do not block import; points are still created with `def_found = 0`
 - Success message reports loaded points and skipped/missing-definition counts
-
-### Profile Chart Window
-
-- Open by double-clicking a cross-section point or a spatial forcing feature on the map.
-- Also available from plugin menu: `Viewer -> Cross-Section` and `Viewer -> Boundary Conditions`.
-- Supports:
-	- `yz` definitions from `def_yCoords` / `def_zCoords`
-	- `circle` definitions from `def_diam`
-- Axes are labeled with units (`y [m]`, `z [m]`).
-- The window uses a matplotlib plot when matplotlib is available, and falls back to the built-in renderer otherwise.
-- The chart updates automatically when selection changes on the active supported layer.
-- No extra dependencies are required.
 
 ### Typical Workflow
 1. Open `Import` from the plugin menu or toolbar.
@@ -618,29 +632,6 @@ For each `bridge_name`, the plugin writes one block:
 3. Choose output `.pliz` path.
 4. The plugin writes one bridge block per `bridge_name`.
 
-## Point Cloud Export (`.xyn`)
-
-Export a selected QGIS point layer to ASCII `.xyn` format.
-
-### Input Requirements
-- Active layer must be a vector point layer.
-
-### Output Format
-One row per point:
-- `x y name`
-
-### Name Handling
-- The plugin tries to use a name-like field with priority:
-	`weir_name`, `name`, `naam`, `id`, then first available field.
-- If a name is missing or empty, fallback name `obs_%d` is used in export order.
-
-### Typical Workflow
-1. Select the point layer to export.
-2. Open `Export Point Cloud (.xyn)` from the plugin menu.
-3. Choose output `.xyn` path.
-4. The plugin writes one line per valid point feature.
-5. Use this action for generic point layers that are not fixed-weir `.fxw` layers.
-
 ## Bed Level To Mesh
 
 The plugin now supports interpolation of elevation data from external datasets to
@@ -696,11 +687,6 @@ After installation, restart QGIS.
 Create trachytopes points from mesh edge coordinates and export selected values
 in Delft3D-style ASCII format.
 
-### Menu Actions
-- `Create Trachytopes from Mesh`
-- `Set Trachytopes in Polygons`
-- `Export Trachytopes (.arl)`
-
 ### Create Trachytopes Layer
 The plugin reads edge coordinates from the selected UGRID NetCDF mesh:
 - primary variables: `mesh2d_edge_x`, `mesh2d_edge_y`
@@ -712,32 +698,10 @@ It creates a point layer with one feature per mesh edge coordinate and these fie
 - `trachytope_number` (initial value `0`)
 - `fraction` (initial value `0`)
 
-### Edit Trachytope Values
-Two workflows are supported:
-- Manual editing in the QGIS attribute table.
-- Bulk assignment using polygons:
-  1. Set the trachytopes layer as active.
-  2. Open `Set Trachytopes in Polygons`.
-  3. Choose a polygon layer.
-  4. Enter target `trachytope_number` and `fraction` values.
-  5. Values are applied to points inside selected polygons (or all polygons if none are selected).
-
-### ARL Export Format
-Export writes an ASCII text file with extension `.arl` and single-space separators.
-
-Each output row is:
-- `x y 0 trachytope_number fraction`
-
-Export rules:
-- Only points with `trachytope_number != 0` are written.
-- Points with invalid or non-finite numeric values are skipped.
-
 ### Typical Workflow
 1. Open `Create Trachytopes from Mesh`.
 2. Select the UGRID mesh file and create the trachytopes point layer.
-3. Assign non-zero trachytope values (manually or with polygons).
-4. Open `Export Trachytopes (.arl)`.
-5. Save the ASCII `.arl` output file.
+3. Assign values manually or continue to [Set Trachytopes in Polygons](#set-trachytopes-in-polygons).
 
 ## Bridge Points From Polyline
 
@@ -876,7 +840,56 @@ The plugin also creates a diagnostics point layer with:
 4. Run `Create 1D Network` and fill the prompts.
 5. Inspect diagnostics (if any), then import the generated `.nc` to verify network layers.
 
-## Installation
+## Set Trachytopes in Polygons
+
+Set the trachytope values for points inside selected polygons (or all polygons when none are selected).
+
+1. Set the trachytopes layer as active.
+2. Open `Set Trachytopes in Polygons`.
+3. Choose a polygon layer.
+4. Enter target `trachytope_number` and `fraction` values.
+
+Manual editing in the QGIS attribute table is also supported.
+
+## Export Trachytopes (.arl)
+
+Export writes an ASCII text file with extension `.arl` and single-space separators.
+
+Each output row is:
+- `x y 0 trachytope_number fraction`
+
+Export rules:
+- Only points with `trachytope_number != 0` are written.
+- Points with invalid or non-finite numeric values are skipped.
+
+Typical workflow:
+1. Open `Export Trachytopes (.arl)`.
+2. Save the ASCII `.arl` output file.
+
+## Point Cloud Export (`.xyn`)
+
+Export a selected QGIS point layer to ASCII `.xyn` format.
+
+### Input Requirements
+- Active layer must be a vector point layer.
+
+### Output Format
+One row per point:
+- `x y name`
+
+### Name Handling
+- The plugin tries to use a name-like field with priority:
+	`weir_name`, `name`, `naam`, `id`, then first available field.
+- If a name is missing or empty, fallback name `obs_%d` is used in export order.
+
+### Typical Workflow
+1. Select the point layer to export.
+2. Open `Export Point Cloud (.xyn)` from the plugin menu.
+3. Choose output `.xyn` path.
+4. The plugin writes one line per valid point feature.
+5. Use this action for generic point layers that are not fixed-weir `.fxw` layers.
+
+## Plugin Installation
 1. Download the latest release ZIP from [Releases](../../releases).
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**.
 
