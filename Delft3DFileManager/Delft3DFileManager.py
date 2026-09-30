@@ -518,6 +518,7 @@ class Delft3DFileManager:
             "1d_map": os.path.join(icon_directory, "icon-1d-map.svg"),
             "2d_slice": os.path.join(icon_directory, "icon-2d-slice.svg"),
             "his_timeseries": os.path.join(icon_directory, "icon-his-timeseries.svg"),
+            "cross_sections": os.path.join(icon_directory, "icon-cross-sections.svg"),
         }
         icon_path = os.path.join(icon_directory, "icon.svg")
         self.install_deps_action = QAction(
@@ -631,7 +632,7 @@ class Delft3DFileManager:
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_pointcloud_action)
 
         self.profile_chart_action = QAction(
-            QIcon(icon_path), "Cross-section", self.iface.mainWindow()
+            QIcon(icon_paths["cross_sections"]), "Cross-section", self.iface.mainWindow()
         )
         self.profile_chart_action.setStatusTip(
             "Open the profile/timeseries chart window for cross-sections and boundary conditions"
@@ -672,6 +673,7 @@ class Delft3DFileManager:
         )
         self.one_d_results_action.triggered.connect(self.open_one_d_results_window)
 
+        self.iface.addToolBarIcon(self.profile_chart_action)
         self.iface.addToolBarIcon(self.one_d_results_action)
         self.iface.addToolBarIcon(self.mesh_profile_action)
         self.iface.addToolBarIcon(self.his_timeseries_action)
@@ -724,6 +726,8 @@ class Delft3DFileManager:
             self.iface.removeToolBarIcon(self.one_d_results_action)
         if self.mesh_profile_action:
             self.iface.removeToolBarIcon(self.mesh_profile_action)
+        if self.profile_chart_action:
+            self.iface.removeToolBarIcon(self.profile_chart_action)
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
