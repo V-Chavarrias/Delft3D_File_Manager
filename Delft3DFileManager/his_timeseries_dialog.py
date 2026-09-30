@@ -160,7 +160,7 @@ class HisTimeseriesDialog(QDialog):
             self.setWindowFlag(window_flag, True)
 
         self.setSizeGripEnabled(True)
-        self.setWindowTitle("HIS Time Series Explorer")
+        self.setWindowTitle("HIS Time Series")
         self.setMinimumSize(760, 420)
         self.resize(980, 560)
         expanding_policy = _qsizepolicy_value("Expanding")
@@ -172,9 +172,6 @@ class HisTimeseriesDialog(QDialog):
         self._on_plot_requested = None
         self._on_refresh_requested = None
         self._plotted_labels = []
-
-        self._title_label = QLabel("Delft3D FM HIS Time Series")
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._source_combo = QComboBox()
         self._scope_combo = QComboBox()
@@ -225,7 +222,6 @@ class HisTimeseriesDialog(QDialog):
         actions_row.addWidget(self._clear_plot_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title_label)
         layout.addLayout(controls_row)
         layout.addWidget(self._selection_label)
         layout.addLayout(chart_and_series_row)

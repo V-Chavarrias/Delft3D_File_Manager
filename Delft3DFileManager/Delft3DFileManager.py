@@ -1956,6 +1956,7 @@ class Delft3DFileManager:
         metadata.update(profile_meta)
 
         dialog = self._ensure_profile_dialog()
+        dialog.setWindowTitle("Cross-Section")
         dialog.set_profile(
             points=points,
             title=self._profile_title(feature),
@@ -1971,6 +1972,7 @@ class Delft3DFileManager:
         points, metadata, message = self._timeseries_from_feature(feature)
 
         dialog = self._ensure_profile_dialog()
+        dialog.setWindowTitle("Boundary Conditions")
         dialog.set_profile(
             points=points,
             title=self._timeseries_title(feature),
@@ -2063,6 +2065,11 @@ class Delft3DFileManager:
         layer = self.iface.activeLayer()
         is_cross_section = self._is_cross_section_layer(layer)
         is_boundary = self._is_boundary_condition_layer(layer)
+        dialog = self._ensure_profile_dialog()
+        if is_boundary:
+            dialog.setWindowTitle("Boundary Conditions")
+        else:
+            dialog.setWindowTitle("Cross-Section")
 
         if not is_cross_section and not is_boundary:
             self._show_profile_message(

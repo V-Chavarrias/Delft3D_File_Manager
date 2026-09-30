@@ -187,7 +187,7 @@ class OneDResultsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("1D MAP Results Visualizer")
+        self.setWindowTitle("1D MAP")
         self.setMinimumSize(820, 520)
         self.resize(1080, 680)
         expanding = _qt_value(QSizePolicy, "Expanding", "Policy")
@@ -248,7 +248,6 @@ class OneDResultsDialog(QDialog):
         actions.addWidget(print_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Delft3D 1D MAP Results"))
         layout.addWidget(self._source_label)
         layout.addLayout(controls)
         layout.addWidget(self._selection_label)

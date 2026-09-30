@@ -286,13 +286,8 @@ class CrossSectionProfileDialog(QDialog):
     def __init__(self, parent=None, mesh_mode=False):
         super().__init__(parent)
         self._mesh_mode = bool(mesh_mode)
-        self.setWindowTitle("2D Slice" if self._mesh_mode else "FM Cross-Section / Boundary Time Series")
+        self.setWindowTitle("2D Slice" if self._mesh_mode else "Cross-Section")
         self.resize(780, 460)
-
-        self._title_label = QLabel(
-            "2D Slice" if self._mesh_mode else "FM Cross-Section / Boundary Time Series"
-        )
-        self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._meta_label = QLabel("")
         self._meta_label.setWordWrap(True)
@@ -334,7 +329,6 @@ class CrossSectionProfileDialog(QDialog):
             control_layout.addWidget(self._selected_lines_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._title_label)
         layout.addWidget(self._meta_label)
         layout.addLayout(control_layout)
         layout.addWidget(self._chart_widget)
@@ -383,7 +377,6 @@ class CrossSectionProfileDialog(QDialog):
     def set_profiles(self, profiles, title, metadata, message=""):
         """Render one or more named profiles."""
         self._profiles = list(profiles or [])
-        self._title_label.setText(title or "Cross-Section Profile")
 
         metadata = metadata or {}
         x_axis_label = metadata.get("x_axis_label") or "y [m]"
