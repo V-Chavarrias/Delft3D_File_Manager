@@ -470,6 +470,7 @@ class Delft3DFileManager:
         self.one_d_results_action = None
         self.mesh_properties_action = None
         self.stream_function_action = None
+        self.froude_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -510,7 +511,15 @@ class Delft3DFileManager:
             )
             self._warned_missing_defusedxml = True
 
-        icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
+        icon_directory = os.path.dirname(__file__)
+        icon_paths = {
+            "import": os.path.join(icon_directory, "icon-import.svg"),
+            "export": os.path.join(icon_directory, "icon-export.svg"),
+            "1d_map": os.path.join(icon_directory, "icon-1d-map.svg"),
+            "2d_slice": os.path.join(icon_directory, "icon-2d-slice.svg"),
+            "his_timeseries": os.path.join(icon_directory, "icon-his-timeseries.svg"),
+        }
+        icon_path = os.path.join(icon_directory, "icon.svg")
         self.install_deps_action = QAction(
             QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
         )
@@ -531,7 +540,9 @@ class Delft3DFileManager:
             "&Delft3D File Manager", self.compute_2d_variables_menu.menuAction()
         )
 
-        self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
+        self.import_action = QAction(
+            QIcon(icon_paths["import"]), "Import", self.iface.mainWindow()
+        )
         self.import_action.setStatusTip(
             "Import Delft3D file (.fxw/.pli/.ldb/.spl/.pol/.pliz/.xyn/.xyz/.nc/.mat/.csl/.csd/.ini/.mdu/.ext/.bc/dimr_config.xml)"
         )
@@ -539,7 +550,9 @@ class Delft3DFileManager:
         self.iface.addToolBarIcon(self.import_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.import_action)
 
-        self.export_action = QAction(QIcon(icon_path), "Export", self.iface.mainWindow())
+        self.export_action = QAction(
+            QIcon(icon_paths["export"]), "Export", self.iface.mainWindow()
+        )
         self.export_action.setStatusTip("Export the active line or fixed-weir point layer to a Delft3D format")
         self.export_action.triggered.connect(self.export_active_layer)
         self.iface.addToolBarIcon(self.export_action)
@@ -636,7 +649,7 @@ class Delft3DFileManager:
         )
 
         self.mesh_profile_action = QAction(
-            QIcon(icon_path), "2D slice", self.iface.mainWindow()
+            QIcon(icon_paths["2d_slice"]), "2D slice", self.iface.mainWindow()
         )
         self.mesh_profile_action.setStatusTip(
             "Draw or select a line to profile the displayed scalar dataset across mesh partitions"
@@ -644,7 +657,7 @@ class Delft3DFileManager:
         self.mesh_profile_action.triggered.connect(self.open_mesh_profile_window)
 
         self.his_timeseries_action = QAction(
-            QIcon(icon_path), "HIS time series", self.iface.mainWindow()
+            QIcon(icon_paths["his_timeseries"]), "HIS time series", self.iface.mainWindow()
         )
         self.his_timeseries_action.setStatusTip(
             "Open the Delft3D FM HIS timeseries explorer for selected stations/cross-sections"
@@ -652,12 +665,16 @@ class Delft3DFileManager:
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
 
         self.one_d_results_action = QAction(
-            QIcon(icon_path), "1D MAP", self.iface.mainWindow()
+            QIcon(icon_paths["1d_map"]), "1D MAP", self.iface.mainWindow()
         )
         self.one_d_results_action.setStatusTip(
             "Explore time-dependent mesh1d node and edge results"
         )
         self.one_d_results_action.triggered.connect(self.open_one_d_results_window)
+
+        self.iface.addToolBarIcon(self.one_d_results_action)
+        self.iface.addToolBarIcon(self.mesh_profile_action)
+        self.iface.addToolBarIcon(self.his_timeseries_action)
 
         self.viewer_menu.addAction(self.profile_chart_action)
         self.viewer_menu.addAction(self.his_timeseries_action)
@@ -680,6 +697,14 @@ class Delft3DFileManager:
             "Compute a time-dependent node streamfunction from q1 discharge"
         )
         self.stream_function_action.triggered.connect(self.compute_stream_function)
+        self.froude_action = QAction(
+            QIcon(icon_path), "Froude number", self.iface.mainWindow()
+        )
+        self.froude_action.setStatusTip(
+            "Compute a time-dependent face Froude number from flow depth and velocity magnitude"
+        )
+        self.froude_action.triggered.connect(self.compute_froude_number)
+        self.compute_2d_variables_menu.addAction(self.froude_action)
         self.compute_2d_variables_menu.addAction(self.stream_function_action)
         self.compute_2d_variables_menu.addAction(self.mesh_properties_action)
 
@@ -693,6 +718,12 @@ class Delft3DFileManager:
         if self.export_action:
             self.iface.removeToolBarIcon(self.export_action)
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_action)
+        if self.his_timeseries_action:
+            self.iface.removeToolBarIcon(self.his_timeseries_action)
+        if self.one_d_results_action:
+            self.iface.removeToolBarIcon(self.one_d_results_action)
+        if self.mesh_profile_action:
+            self.iface.removeToolBarIcon(self.mesh_profile_action)
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
@@ -788,6 +819,63 @@ class Delft3DFileManager:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 f"Could not compute streamfunction: {exc}",
+            )
+            return None
+
+    def compute_froude_number(self):
+        """Create a time-dependent face Froude number mesh from MAP output."""
+        layer = self.iface.activeLayer()
+        if not self._is_mesh_layer(layer) or not layer.isValid():
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Activate a valid 2D mesh layer before computing a Froude number.",
+            )
+            return None
+
+        source = ""
+        try:
+            source = str(layer.customProperty("delft3d_mesh_source", ""))
+        except (RuntimeError, AttributeError):
+            pass
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = _mesh_source_path(source)
+        if not source or not os.path.exists(source):
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "The active mesh does not have a readable netCDF source file.",
+            )
+            return None
+
+        try:
+            from .froude import FroudeError, create_froude_sidecar
+
+            output_path = create_froude_sidecar(source)
+            base_name = os.path.splitext(os.path.basename(output_path))[0]
+            try:
+                import netCDF4 as nc
+                with nc.Dataset(source, "r") as source_dataset:
+                    epsg = self._read_epsg_from_nc(source_dataset) or 28992
+            except (ImportError, OSError, RuntimeError, ValueError):
+                epsg = 28992
+            derived_layer = self._load_mesh2d_layer(
+                output_path,
+                base_name,
+                epsg,
+                f"{base_name}_mesh",
+                topology_names=["mesh2d"],
+                expect_data_variables=True,
+            )
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Froude number layer created: {base_name}",
+            )
+            return derived_layer
+        except (OSError, RuntimeError, FroudeError, ValueError) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not compute Froude number: {exc}",
             )
             return None
 
@@ -2714,6 +2802,7 @@ class Delft3DFileManager:
         dialog = OneDResultsDialog(self.iface.mainWindow())
         dialog.set_handlers(
             on_mode_requested=self._on_one_d_mode_requested,
+            on_variable_requested=self._on_one_d_variable_requested,
             on_plot_requested=self._on_one_d_plot_requested,
             on_refresh_requested=self._refresh_one_d_results_dialog,
             on_figure_position=self._on_one_d_figure_position,
@@ -2827,6 +2916,23 @@ class Delft3DFileManager:
             self._refresh_one_d_results_dialog()
         if self._one_d_results_state is not None:
             self._start_one_d_results_selection(mode)
+
+    def _on_one_d_variable_requested(self):
+        """Validate derived variables as soon as they are selected."""
+        from .one_d_results import FROUDE_VARIABLE_NAME, find_froude_inputs
+
+        dialog = self._ensure_one_d_results_dialog()
+        if dialog.selected_variable() != FROUDE_VARIABLE_NAME:
+            return
+        try:
+            import netCDF4 as nc
+
+            with nc.Dataset(self._one_d_results_state["source"], "r") as dataset:
+                find_froude_inputs(dataset)
+        except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+            dialog.set_message(str(exc))
+        else:
+            dialog.set_message("")
 
     def _start_one_d_results_selection(self, mode):
         """Capture one point or two mesh1d nodes from the map canvas."""

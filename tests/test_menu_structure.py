@@ -50,6 +50,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         "Boundary conditions",
     ]
     assert [action.label for action in plugin.compute_2d_variables_menu.actions] == [
+        "Froude number",
         "Streamfunction",
         "Mesh properties",
     ]
@@ -73,6 +74,16 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         plugin.update_trachytopes_action,
         plugin.export_trachytopes_action,
         plugin.export_pointcloud_action,
+    ]
+    toolbar_actions = [
+        entry.args[0] for entry in iface.addToolBarIcon.call_args_list
+    ]
+    assert toolbar_actions == [
+        plugin.import_action,
+        plugin.export_action,
+        plugin.one_d_results_action,
+        plugin.mesh_profile_action,
+        plugin.his_timeseries_action,
     ]
 
     plugin.unload()

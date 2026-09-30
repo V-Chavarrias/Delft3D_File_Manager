@@ -195,6 +195,7 @@ class OneDResultsDialog(QDialog):
             self.setSizePolicy(expanding, expanding)
 
         self._on_mode_requested = None
+        self._on_variable_requested = None
         self._on_plot_requested = None
         self._on_refresh_requested = None
         self._source_label = QLabel("Source: none")
@@ -258,6 +259,7 @@ class OneDResultsDialog(QDialog):
 
         self._point_button.clicked.connect(lambda: self._emit_mode_requested("point"))
         self._track_button.clicked.connect(lambda: self._emit_mode_requested("track"))
+        self._variable_combo.currentIndexChanged.connect(self._emit_variable_requested)
         refresh_button.clicked.connect(self._emit_refresh_requested)
         new_button.clicked.connect(lambda: self._emit_plot_requested("new"))
         add_button.clicked.connect(lambda: self._emit_plot_requested("add"))
@@ -271,11 +273,13 @@ class OneDResultsDialog(QDialog):
     def set_handlers(
         self,
         on_mode_requested=None,
+        on_variable_requested=None,
         on_plot_requested=None,
         on_refresh_requested=None,
         on_figure_position=None,
     ):
         self._on_mode_requested = on_mode_requested
+        self._on_variable_requested = on_variable_requested
         self._on_plot_requested = on_plot_requested
         self._on_refresh_requested = on_refresh_requested
         self._chart.set_figure_position_callback(on_figure_position)
@@ -336,6 +340,11 @@ class OneDResultsDialog(QDialog):
         self._track_button.setChecked(mode == "track")
         if callable(self._on_mode_requested):
             self._on_mode_requested(mode)
+
+    def _emit_variable_requested(self, index):
+        del index
+        if callable(self._on_variable_requested):
+            self._on_variable_requested()
 
     def _emit_plot_requested(self, mode):
         if callable(self._on_plot_requested):

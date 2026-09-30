@@ -8,6 +8,9 @@ import re
 import numpy as np
 
 
+FROUDE_VARIABLE_NAME = "__froude_number__"
+
+
 @dataclass(frozen=True)
 class ResultVariable:
     name: str
@@ -22,6 +25,70 @@ class ResultVariable:
         if self.units:
             return f"{description} [{self.units}]"
         return description
+
+
+def _variable_matches(variable_name, variable, patterns):
+    text = " ".join(
+        (
+            str(variable_name),
+            str(getattr(variable, "standard_name", "") or ""),
+            str(getattr(variable, "long_name", "") or ""),
+        )
+    ).lower().replace("_", " ")
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def find_froude_inputs(dataset, location=None):
+    """Find compatible flow-depth and velocity-magnitude variables."""
+    node_dimension = _find_dimension(dataset, "mesh1d_nNodes")
+    edge_dimension = _find_dimension(dataset, "mesh1d_nEdges")
+    time_dimension = _find_dimension(dataset, "time")
+    depth_patterns = (r"flow\s*depth", r"water\s*depth", r"depth")
+    velocity_patterns = (
+        r"velocity\s*magnitude",
+        r"flow\s*velocity",
+        r"velocity",
+        r"\b(?:ucmag|umag|velocitymag)\b",
+    )
+    candidates = []
+    for name, variable in dataset.variables.items():
+        dimensions = tuple(getattr(variable, "dimensions", ()))
+        if len(dimensions) != 2 or time_dimension not in dimensions:
+            continue
+        variable_location = (
+            "node" if node_dimension in dimensions else "edge" if edge_dimension in dimensions else None
+        )
+        if variable_location is None or (location is not None and variable_location != location):
+            continue
+        if _variable_matches(name, variable, depth_patterns):
+            candidates.append((variable_location, "depth", name))
+        if _variable_matches(name, variable, velocity_patterns):
+            candidates.append((variable_location, "velocity", name))
+
+    locations = (location,) if location else ("node", "edge")
+    for candidate_location in locations:
+        depth = next((item[2] for item in candidates if item[:2] == (candidate_location, "depth")), None)
+        velocity = next((item[2] for item in candidates if item[:2] == (candidate_location, "velocity")), None)
+        if depth and velocity:
+            return {"location": candidate_location, "depth": depth, "velocity": velocity}
+    raise ValueError("Froude number requires flow depth and velocity magnitude variables at the same mesh1d location.")
+
+
+def froude_result_variable(dataset, time_dimension="time"):
+    """Return the derived Froude variable for the available mesh location."""
+    try:
+        inputs = find_froude_inputs(dataset)
+        location = inputs["location"]
+        dimensions = tuple(dataset.variables[inputs["depth"]].dimensions)
+    except ValueError:
+        location = "node"
+        dimensions = ()
+    return ResultVariable(
+        name=FROUDE_VARIABLE_NAME,
+        location=location,
+        dimensions=dimensions,
+        long_name="Froude number",
+    )
 
 
 def _read_numeric(value, fill_value=np.nan):
@@ -86,6 +153,7 @@ def discover_result_variables(dataset, time_dimension="time"):
             )
         )
     location_order = {"node": 0, "edge": 1}
+    variables.append(froude_result_variable(dataset, time_dimension=time_dimension))
     return sorted(variables, key=lambda item: (location_order[item.location], item.name.lower()))
 
 
@@ -201,7 +269,22 @@ def nearest_edge(topology, x, y):
 
 def read_result_values(dataset, variable, time_indices, spatial_indices):
     """Read values as a time-by-space array regardless of NetCDF dimension order."""
-    netcdf_variable = dataset.variables[variable.name if hasattr(variable, "name") else variable]
+    if getattr(variable, "name", variable) == FROUDE_VARIABLE_NAME:
+        inputs = find_froude_inputs(dataset, location=variable.location)
+        depth = _read_result_values_by_name(dataset, inputs["depth"], time_indices, spatial_indices)
+        velocity = _read_result_values_by_name(dataset, inputs["velocity"], time_indices, spatial_indices)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return velocity / np.sqrt(9.81 * depth)
+    return _read_result_values_by_name(
+        dataset,
+        variable.name if hasattr(variable, "name") else variable,
+        time_indices,
+        spatial_indices,
+    )
+
+
+def _read_result_values_by_name(dataset, variable_name, time_indices, spatial_indices):
+    netcdf_variable = dataset.variables[variable_name]
     dimensions = tuple(netcdf_variable.dimensions)
     time_dimension = _find_dimension(dataset, "time")
     time_axis = dimensions.index(time_dimension)

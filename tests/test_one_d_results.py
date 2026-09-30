@@ -37,6 +37,15 @@ def _create_results_file(path):
         edge_values[:] = np.arange(12).reshape(4, 3)
 
 
+def _create_froude_results_file(path):
+    _create_results_file(path)
+    with Dataset(str(path), "a") as dataset:
+        depth = dataset.createVariable("mesh1d_waterdepth", "f8", ("time", "mesh1d_nNodes"))
+        velocity = dataset.createVariable("mesh1d_ucmag", "f8", ("time", "mesh1d_nNodes"))
+        depth[:] = 4.0
+        velocity[:] = 9.81
+
+
 def test_parse_time_indices_uses_one_based_inclusive_ranges():
     assert parse_time_indices("1:3,3,4", 4) == [0, 1, 2, 3]
     assert parse_time_indices("3:1", 4) == [2, 1, 0]
@@ -48,10 +57,11 @@ def test_results_engine_discovers_node_and_edge_variables_and_reads_dimension_or
     with Dataset(str(source), "r") as dataset:
         variables = discover_result_variables(dataset)
         topology = read_mesh1d_topology(dataset)
-        node_variable = next(item for item in variables if item.location == "node")
+        node_variable = next(item for item in variables if item.name == "waterlevel")
         edge_variable = next(item for item in variables if item.location == "edge")
 
         assert [(item.name, item.location) for item in variables] == [
+            ("__froude_number__", "node"),
             ("waterlevel", "node"),
             ("discharge", "edge"),
         ]
@@ -59,6 +69,18 @@ def test_results_engine_discovers_node_and_edge_variables_and_reads_dimension_or
         assert read_result_values(dataset, edge_variable, [1, 3], [0, 2]).tolist() == [[3.0, 5.0], [9.0, 11.0]]
         assert nearest_node(topology, 1.05, 0.02) == 1
         assert nearest_edge(topology, 1.0, 0.8)[0] == 2
+
+
+def test_froude_number_is_discovered_and_computed_from_depth_and_velocity(tmp_path):
+    source = tmp_path / "results.nc"
+    _create_froude_results_file(source)
+    with Dataset(str(source), "r") as dataset:
+        variables = discover_result_variables(dataset)
+        froude = next(item for item in variables if item.name == "__froude_number__")
+
+        assert froude.location == "node"
+        assert froude.label == "Froude number"
+        assert read_result_values(dataset, froude, [0], [0, 2]).tolist() == [[1.5660459763365826, 1.5660459763365826]]
 
 
 def test_shortest_path_returns_nodes_edges_and_cumulative_distance(tmp_path):
