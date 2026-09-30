@@ -1,6 +1,14 @@
 # Delft3D File Manager
 
-A QGIS plugin to manage Delft3D files.
+An integrated QGIS workspace for importing, inspecting, analyzing, and exporting Delft3D FM models, meshes, forcing data, cross-sections, and simulation results.
+
+## About
+
+Delft3D File Manager brings common Delft3D FM pre-processing, inspection, and post-processing tasks into QGIS. It connects text-based model inputs, UGRID NetCDF meshes, FM results, and QGIS vector or raster layers in one workflow, so model data can be checked spatially before it is edited, analyzed, or exported.
+
+The plugin is intended for Delft3D FM modelers and GIS users who need to move between model files and map-based analysis. It supports complete simulation imports, mesh and partition inspection, cross-section and boundary-condition viewing, 1D and 2D result exploration, derived mesh calculations, bed-level interpolation, and creation of Delft3D-ready network and roughness-related inputs. Imported data is added to the current QGIS project as native mesh, vector, or table layers where possible, while derived outputs are written to documented NetCDF or ASCII side-cars.
+
+It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model files unchanged unless an explicit in-place write operation is selected.
 
 ## Compatibility
 - QGIS 3.x and QGIS 4.x

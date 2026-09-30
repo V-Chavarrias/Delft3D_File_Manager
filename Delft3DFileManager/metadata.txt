@@ -2,7 +2,7 @@
 name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
-description=Imports and exports Delft3D files. 
+description=Import, visualize, analyze, and export Delft3D FM models and results in QGIS.
 version=10.0.0
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
@@ -10,7 +10,7 @@ repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tracker=https://github.com/V-Chavarrias/Delft3D_File_Manager
 homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
-about=Comprehensive QGIS toolbox for Delft3D workflows: import and export fixed weirs, polylines, point clouds, UGRID meshes, ShorelineS outputs, and FM cross-sections; visualize cross-section profiles; write bed levels to meshes; and create, edit, and export trachytopes.
+about=Delft3D File Manager is a QGIS toolbox for Delft3D FM pre-processing, model inspection, analysis, and post-processing. It imports complete FM simulations and linked model inputs, fixed weirs, polylines, point clouds, XYZ data, UGRID meshes, partitioned and morphodynamic outputs, ShorelineS results, boundary forcing, structures, 1D fields, roughness, and cross-sections. It provides viewers for cross-section profiles, boundary-condition and HIS timeseries, 1D MAP results, and 2D mesh slices; computes streamfunctions, Froude numbers, and mesh properties; interpolates bed levels; and creates or exports Delft3D network, bridge, fixed-weir, trachytope, polyline, and point-cloud data. QGIS 3.x and QGIS 4.x are supported.
 changelog=
     10.0.0 - Restructuring of menu, adding icons, computations of Froude number in 1D and 2D. 
     9.18.1 - Bug removing profile. 
@@ -57,4 +57,4 @@ changelog=
 category=Vector
 experimental=False
 deprecated=False
-icon=icon.svg
+icon=icon.png
