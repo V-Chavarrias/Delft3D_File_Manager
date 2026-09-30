@@ -35,13 +35,14 @@ A QGIS plugin to manage Delft3D files.
 The plugin menu contains these actions in order:
 
 1. **Install Python Dependencies**
-2. **viewer**
-	- **Cross-section**
-	- **HIS time series**
+
+2. **Viewer**
+	- **Cross-Section**
+	- **HIS Time Series**
 	- **1D MAP**
-	- **2D slice**
-	- **Boundary conditions**
-3. **Compute 2D variables**
+	- **2D Slice**
+	- **Boundary Conditions**
+3. **Compute 2D Variables**
 	- **Streamfunction**
 	- **Mesh properties**
 4. **Import**
@@ -130,16 +131,16 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 
 ### Cross-section and Boundary Conditions Viewer
 
-The **viewer -> Cross-section** and **viewer -> Boundary conditions** actions open the same profile window, which supports:
+The **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions** actions open the same profile window, which supports:
 - FM cross-section profile previews
 - FM boundary-condition timeseries previews
 
 ### 2D Slice
 
-The **viewer -> 2D slice** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
+The **Viewer -> 2D Slice** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
 
 - Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
-- Open **2D slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
+- Open **2D Slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
 - Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
 - Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
 - Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
@@ -367,9 +368,9 @@ When a selected `.nc` file is detected as a Delft3D FM HIS output, the plugin im
 
 Each feature stores only lightweight references (`his_source`, `obs_type`, `obs_index`, `obs_name`, `obs_id`) and does not store full timeseries payloads.
 
-#### HIS Timeseries Explorer
+#### HIS Time Series Explorer
 
-Use `Delft3D File Manager -> viewer -> HIS time series`.
+Use `Delft3D File Manager -> Viewer -> HIS Time Series`.
 
 Workflow:
 1. Select source and scope in the HIS window.
@@ -384,7 +385,7 @@ Notes:
 
 #### 1D MAP
 
-Use `Delft3D File Manager -> viewer -> 1D MAP` with an imported mesh layer
+Use `Delft3D File Manager -> Viewer -> 1D MAP` with an imported mesh layer
 active. The active mesh must have a readable NetCDF source containing mesh1d
 topology, a `time` coordinate, and time-dependent variables located at either
 `mesh1d_nodes` or `mesh1d_edges`.
@@ -504,7 +505,7 @@ Output attributes include:
 ### Profile Chart Window
 
 - Open by double-clicking a cross-section point or a spatial forcing feature on the map.
-- Also available from plugin menu: `viewer -> Cross-section` and `viewer -> Boundary conditions`.
+- Also available from plugin menu: `Viewer -> Cross-Section` and `Viewer -> Boundary Conditions`.
 - Supports:
 	- `yz` definitions from `def_yCoords` / `def_zCoords`
 	- `circle` definitions from `def_diam`

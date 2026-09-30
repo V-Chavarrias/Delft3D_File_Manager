@@ -125,7 +125,7 @@ class _ResultsChartWidget(FigureCanvasQTAgg):
                 self._axes.plot(entry["x"], entry["y"], linewidth=1.8, label=entry["label"])
             if plot_data.get("series"):
                 self._axes.legend(loc="best")
-        self._axes.set_title(plot_data.get("title", "1D Results"))
+        self._axes.set_title(plot_data.get("title", "1D MAP Results"))
         self._axes.set_xlabel(plot_data.get("x_label", ""))
         self._axes.set_ylabel(plot_data.get("y_label", ""))
         self._axes.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
@@ -187,7 +187,7 @@ class OneDResultsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("1D Results Visualizer")
+        self.setWindowTitle("1D MAP Results Visualizer")
         self.setMinimumSize(820, 520)
         self.resize(1080, 680)
         expanding = _qt_value(QSizePolicy, "Expanding", "Policy")
@@ -248,7 +248,7 @@ class OneDResultsDialog(QDialog):
         actions.addWidget(print_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Delft3D 1D Results"))
+        layout.addWidget(QLabel("Delft3D 1D MAP Results"))
         layout.addWidget(self._source_label)
         layout.addLayout(controls)
         layout.addWidget(self._selection_label)

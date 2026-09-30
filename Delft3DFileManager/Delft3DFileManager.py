@@ -530,12 +530,12 @@ class Delft3DFileManager:
         self.install_deps_action.triggered.connect(self.install_dependencies)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
 
-        self.viewer_menu = QMenu("viewer", self.iface.mainWindow())
+        self.viewer_menu = QMenu("Viewer", self.iface.mainWindow())
         self.iface.addPluginToMenu(
             "&Delft3D File Manager", self.viewer_menu.menuAction()
         )
         self.compute_2d_variables_menu = QMenu(
-            "Compute 2D variables", self.iface.mainWindow()
+            "Compute 2D Variables", self.iface.mainWindow()
         )
         self.iface.addPluginToMenu(
             "&Delft3D File Manager", self.compute_2d_variables_menu.menuAction()
@@ -632,7 +632,7 @@ class Delft3DFileManager:
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_pointcloud_action)
 
         self.profile_chart_action = QAction(
-            QIcon(icon_paths["cross_sections"]), "Cross-section", self.iface.mainWindow()
+            QIcon(icon_paths["cross_sections"]), "Cross-Section", self.iface.mainWindow()
         )
         self.profile_chart_action.setStatusTip(
             "Open the profile/timeseries chart window for cross-sections and boundary conditions"
@@ -640,7 +640,7 @@ class Delft3DFileManager:
         self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
 
         self.boundary_conditions_action = QAction(
-            QIcon(icon_path), "Boundary conditions", self.iface.mainWindow()
+            QIcon(icon_path), "Boundary Conditions", self.iface.mainWindow()
         )
         self.boundary_conditions_action.setStatusTip(
             "Open the profile/timeseries chart window for boundary conditions"
@@ -650,7 +650,7 @@ class Delft3DFileManager:
         )
 
         self.mesh_profile_action = QAction(
-            QIcon(icon_paths["2d_slice"]), "2D slice", self.iface.mainWindow()
+            QIcon(icon_paths["2d_slice"]), "2D Slice", self.iface.mainWindow()
         )
         self.mesh_profile_action.setStatusTip(
             "Draw or select a line to profile the displayed scalar dataset across mesh partitions"
@@ -658,10 +658,10 @@ class Delft3DFileManager:
         self.mesh_profile_action.triggered.connect(self.open_mesh_profile_window)
 
         self.his_timeseries_action = QAction(
-            QIcon(icon_paths["his_timeseries"]), "HIS time series", self.iface.mainWindow()
+            QIcon(icon_paths["his_timeseries"]), "HIS Time Series", self.iface.mainWindow()
         )
         self.his_timeseries_action.setStatusTip(
-            "Open the Delft3D FM HIS timeseries explorer for selected stations/cross-sections"
+            "Open the Delft3D FM HIS Time Series explorer for selected stations/cross-sections"
         )
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
 
@@ -685,7 +685,7 @@ class Delft3DFileManager:
         self.viewer_menu.addAction(self.boundary_conditions_action)
 
         self.mesh_properties_action = QAction(
-            QIcon(icon_path), "Mesh properties", self.iface.mainWindow()
+            QIcon(icon_path), "Mesh Properties", self.iface.mainWindow()
         )
         self.mesh_properties_action.setStatusTip(
             "Create layers showing 2D mesh quality and connectivity"
@@ -700,7 +700,7 @@ class Delft3DFileManager:
         )
         self.stream_function_action.triggered.connect(self.compute_stream_function)
         self.froude_action = QAction(
-            QIcon(icon_path), "Froude number", self.iface.mainWindow()
+            QIcon(icon_path), "Froude Number", self.iface.mainWindow()
         )
         self.froude_action.setStatusTip(
             "Compute a time-dependent face Froude number from flow depth and velocity magnitude"
@@ -1909,8 +1909,8 @@ class Delft3DFileManager:
         feature_id = feature["id"] if feature["id"] is not None else feature.id()
         definition_id = feature["definitionId"] if feature["definitionId"] is not None else ""
         if definition_id:
-            return f"Cross-section {feature_id} ({definition_id})"
-        return f"Cross-section {feature_id}"
+            return f"Cross-Section {feature_id} ({definition_id})"
+        return f"Cross-Section {feature_id}"
 
     def _timeseries_title(self, feature):
         """Build chart title for boundary-condition features."""
@@ -1984,7 +1984,7 @@ class Delft3DFileManager:
     def _show_profile_message(self, message):
         """Show guidance or status text in the profile dialog."""
         dialog = self._ensure_profile_dialog()
-        dialog.set_profile(points=[], title="Profile / Timeseries", metadata={}, message=message)
+        dialog.set_profile(points=[], title="Profile / Time Series", metadata={}, message=message)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -1992,7 +1992,7 @@ class Delft3DFileManager:
     def _show_mesh_profile_message(self, message):
         """Show guidance or status text in the mesh slicer window."""
         dialog = self._ensure_mesh_profile_dialog()
-        dialog.set_profile(points=[], title="Mesh Dataset Slicer", metadata={}, message=message)
+        dialog.set_profile(points=[], title="2D Slice", metadata={}, message=message)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -2366,7 +2366,7 @@ class Delft3DFileManager:
         )
         try:
             self.iface.messageBar().pushInfo(
-                "Mesh Dataset Slicer",
+                "2D Slice",
                 "Click the map to add vertices; double-click or right-click to finish the slice.",
             )
         except (AttributeError, RuntimeError):
@@ -2787,7 +2787,7 @@ class Delft3DFileManager:
             series_entries,
             x_axis_label=x_axis_label,
             y_axis_label=y_axis_label,
-            title=f"HIS Timeseries - {source_info['base_name']}",
+            title=f"HIS Time Series - {source_info['base_name']}",
             append=append,
         )
 
@@ -3191,7 +3191,7 @@ class Delft3DFileManager:
                         "x_label": "time",
                         "x_is_datetime": True,
                         "y_label": variable.label,
-                        "title": "1D Results - Point",
+                        "title": "1D MAP Results - Point",
                     }
                 else:
                     spatial_indices = selection["nodes"] if variable.location == "node" else selection["edges"]
@@ -11589,7 +11589,7 @@ class Delft3DFileManager:
                 len(missing),
                 self.iface.mainWindow(),
             )
-            progress_dialog.setWindowTitle("Install Dependencies")
+            progress_dialog.setWindowTitle("Install Python Dependencies")
             progress_dialog.setMinimumDuration(0)
             progress_dialog.setValue(0)
             progress_dialog.show()

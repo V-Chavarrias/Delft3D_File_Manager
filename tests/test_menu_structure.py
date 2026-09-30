@@ -41,18 +41,18 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     plugin = plugin_module.Delft3DFileManager(iface)
     plugin.initGui()
 
-    assert [menu.label for menu in menus] == ["viewer", "Compute 2D variables"]
+    assert [menu.label for menu in menus] == ["Viewer", "Compute 2D Variables"]
     assert [action.label for action in plugin.viewer_menu.actions] == [
-        "Cross-section",
-        "HIS time series",
+        "Cross-Section",
+        "HIS Time Series",
         "1D MAP",
-        "2D slice",
-        "Boundary conditions",
+        "2D Slice",
+        "Boundary Conditions",
     ]
     assert [action.label for action in plugin.compute_2d_variables_menu.actions] == [
-        "Froude number",
+        "Froude Number",
         "Streamfunction",
-        "Mesh properties",
+        "Mesh Properties",
     ]
     assert plugin.profile_chart_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window

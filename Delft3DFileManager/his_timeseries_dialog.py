@@ -47,7 +47,7 @@ class _MatplotlibSeriesChartWidget(FigureCanvasQTAgg):
         self._series = []
         self._x_axis_label = "time"
         self._y_axis_label = "value"
-        self._title = "HIS Timeseries"
+        self._title = "HIS Time Series"
         self._message = ""
 
     def clear_series(self):
@@ -65,7 +65,7 @@ class _MatplotlibSeriesChartWidget(FigureCanvasQTAgg):
         self._series.extend(list(series_entries or []))
         self._x_axis_label = str(x_axis_label or "time")
         self._y_axis_label = str(y_axis_label or "value")
-        self._title = str(title or "HIS Timeseries")
+        self._title = str(title or "HIS Time Series")
         self._message = ""
         self._redraw()
 
@@ -160,7 +160,7 @@ class HisTimeseriesDialog(QDialog):
             self.setWindowFlag(window_flag, True)
 
         self.setSizeGripEnabled(True)
-        self.setWindowTitle("HIS Timeseries Explorer")
+        self.setWindowTitle("HIS Time Series Explorer")
         self.setMinimumSize(760, 420)
         self.resize(980, 560)
         expanding_policy = _qsizepolicy_value("Expanding")
@@ -173,7 +173,7 @@ class HisTimeseriesDialog(QDialog):
         self._on_refresh_requested = None
         self._plotted_labels = []
 
-        self._title_label = QLabel("Delft3D FM HIS Timeseries")
+        self._title_label = QLabel("Delft3D FM HIS Time Series")
         self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
 
         self._source_combo = QComboBox()

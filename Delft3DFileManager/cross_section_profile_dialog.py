@@ -286,11 +286,11 @@ class CrossSectionProfileDialog(QDialog):
     def __init__(self, parent=None, mesh_mode=False):
         super().__init__(parent)
         self._mesh_mode = bool(mesh_mode)
-        self.setWindowTitle("Mesh Dataset Slicer" if self._mesh_mode else "FM Cross-Section / Boundary Timeseries")
+        self.setWindowTitle("2D Slice" if self._mesh_mode else "FM Cross-Section / Boundary Time Series")
         self.resize(780, 460)
 
         self._title_label = QLabel(
-            "Mesh Dataset Slicer" if self._mesh_mode else "FM Cross-Section / Boundary Timeseries"
+            "2D Slice" if self._mesh_mode else "FM Cross-Section / Boundary Time Series"
         )
         self._title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
 
@@ -378,7 +378,7 @@ class CrossSectionProfileDialog(QDialog):
 
     def clear_profiles(self):
         """Remove all captured mesh profiles."""
-        self.set_profiles([], "Profile / Timeseries", {}, "")
+        self.set_profiles([], "Profile / Time Series", {}, "")
 
     def set_profiles(self, profiles, title, metadata, message=""):
         """Render one or more named profiles."""
