@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QMenu,
     QProgressDialog,
     QVBoxLayout,
 )
@@ -460,6 +461,9 @@ class Delft3DFileManager:
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
+        self.viewer_menu = None
+        self.compute_2d_variables_menu = None
+        self.boundary_conditions_action = None
         self.profile_chart_action = None
         self.mesh_profile_action = None
         self.his_timeseries_action = None
@@ -507,6 +511,26 @@ class Delft3DFileManager:
             self._warned_missing_defusedxml = True
 
         icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
+        self.install_deps_action = QAction(
+            QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
+        )
+        self.install_deps_action.setStatusTip(
+            "Install required Python packages (netCDF4, pyproj, scipy)"
+        )
+        self.install_deps_action.triggered.connect(self.install_dependencies)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
+
+        self.viewer_menu = QMenu("viewer", self.iface.mainWindow())
+        self.iface.addPluginToMenu(
+            "&Delft3D File Manager", self.viewer_menu.menuAction()
+        )
+        self.compute_2d_variables_menu = QMenu(
+            "Compute 2D variables", self.iface.mainWindow()
+        )
+        self.iface.addPluginToMenu(
+            "&Delft3D File Manager", self.compute_2d_variables_menu.menuAction()
+        )
+
         self.import_action = QAction(QIcon(icon_path), "Import", self.iface.mainWindow())
         self.import_action.setStatusTip(
             "Import Delft3D file (.fxw/.pli/.ldb/.spl/.pol/.pliz/.xyn/.xyz/.nc/.mat/.csl/.csd/.ini/.mdu/.ext/.bc/dimr_config.xml)"
@@ -593,68 +617,71 @@ class Delft3DFileManager:
         self.export_pointcloud_action.triggered.connect(self.export_point_cloud_xyn)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_pointcloud_action)
 
-        self.install_deps_action = QAction(
-            QIcon(icon_path), "Install Python Dependencies", self.iface.mainWindow()
-        )
-        self.install_deps_action.setStatusTip(
-            "Install required Python packages (netCDF4, pyproj, scipy)"
-        )
-        self.install_deps_action.triggered.connect(self.install_dependencies)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
-
         self.profile_chart_action = QAction(
-            QIcon(icon_path), "FM Cross-Section / Boundary Timeseries", self.iface.mainWindow()
+            QIcon(icon_path), "Cross-section", self.iface.mainWindow()
         )
         self.profile_chart_action.setStatusTip(
             "Open the profile/timeseries chart window for cross-sections and boundary conditions"
         )
         self.profile_chart_action.triggered.connect(self.open_cross_section_profile_window)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.profile_chart_action)
+
+        self.boundary_conditions_action = QAction(
+            QIcon(icon_path), "Boundary conditions", self.iface.mainWindow()
+        )
+        self.boundary_conditions_action.setStatusTip(
+            "Open the profile/timeseries chart window for boundary conditions"
+        )
+        self.boundary_conditions_action.triggered.connect(
+            self.open_cross_section_profile_window
+        )
 
         self.mesh_profile_action = QAction(
-            QIcon(icon_path), "Mesh Dataset Slicer", self.iface.mainWindow()
+            QIcon(icon_path), "2D slice", self.iface.mainWindow()
         )
         self.mesh_profile_action.setStatusTip(
             "Draw or select a line to profile the displayed scalar dataset across mesh partitions"
         )
         self.mesh_profile_action.triggered.connect(self.open_mesh_profile_window)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_profile_action)
 
         self.his_timeseries_action = QAction(
-            QIcon(icon_path), "HIS Timeseries", self.iface.mainWindow()
+            QIcon(icon_path), "HIS time series", self.iface.mainWindow()
         )
         self.his_timeseries_action.setStatusTip(
             "Open the Delft3D FM HIS timeseries explorer for selected stations/cross-sections"
         )
         self.his_timeseries_action.triggered.connect(self.open_his_timeseries_window)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.his_timeseries_action)
 
         self.one_d_results_action = QAction(
-            QIcon(icon_path), "1D Results Visualizer", self.iface.mainWindow()
+            QIcon(icon_path), "1D MAP", self.iface.mainWindow()
         )
         self.one_d_results_action.setStatusTip(
             "Explore time-dependent mesh1d node and edge results"
         )
         self.one_d_results_action.triggered.connect(self.open_one_d_results_window)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.one_d_results_action)
+
+        self.viewer_menu.addAction(self.profile_chart_action)
+        self.viewer_menu.addAction(self.his_timeseries_action)
+        self.viewer_menu.addAction(self.one_d_results_action)
+        self.viewer_menu.addAction(self.mesh_profile_action)
+        self.viewer_menu.addAction(self.boundary_conditions_action)
 
         self.mesh_properties_action = QAction(
-            QIcon(icon_path), "Check Mesh Properties", self.iface.mainWindow()
+            QIcon(icon_path), "Mesh properties", self.iface.mainWindow()
         )
         self.mesh_properties_action.setStatusTip(
             "Create layers showing 2D mesh quality and connectivity"
         )
         self.mesh_properties_action.triggered.connect(self.check_mesh_properties)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.mesh_properties_action)
 
         self.stream_function_action = QAction(
-            QIcon(icon_path), "Compute Streamfunction", self.iface.mainWindow()
+            QIcon(icon_path), "Streamfunction", self.iface.mainWindow()
         )
         self.stream_function_action.setStatusTip(
             "Compute a time-dependent node streamfunction from q1 discharge"
         )
         self.stream_function_action.triggered.connect(self.compute_stream_function)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.stream_function_action)
+        self.compute_2d_variables_menu.addAction(self.stream_function_action)
+        self.compute_2d_variables_menu.addAction(self.mesh_properties_action)
 
         self._connect_canvas_double_click()
 
@@ -684,18 +711,15 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_pointcloud_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
-        if self.profile_chart_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.profile_chart_action)
-        if self.mesh_profile_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_profile_action)
-        if self.his_timeseries_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.his_timeseries_action)
-        if self.one_d_results_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.one_d_results_action)
-        if self.mesh_properties_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.mesh_properties_action)
-        if self.stream_function_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.stream_function_action)
+        if self.viewer_menu:
+            self.iface.removePluginMenu(
+                "&Delft3D File Manager", self.viewer_menu.menuAction()
+            )
+        if self.compute_2d_variables_menu:
+            self.iface.removePluginMenu(
+                "&Delft3D File Manager",
+                self.compute_2d_variables_menu.menuAction(),
+            )
 
         self._disconnect_profile_layer_selection()
         self._disconnect_canvas_double_click()
@@ -11448,7 +11472,20 @@ class Delft3DFileManager:
                 )
                 return
 
+            progress_dialog = QProgressDialog(
+                "Installing Python dependencies...",
+                None,
+                0,
+                100,
+                self.iface.mainWindow(),
+            )
+            progress_dialog.setWindowTitle("Install Dependencies")
+            progress_dialog.setValue(10)
+            progress_dialog.show()
+            QApplication.processEvents()
             result = self._run_pip_install(missing)
+            progress_dialog.setValue(100)
+            progress_dialog.close()
             if result.returncode != 0:
                 err = (result.stderr or result.stdout or "").strip()
                 if len(err) > 1200:

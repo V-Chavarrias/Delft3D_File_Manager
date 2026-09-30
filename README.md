@@ -13,7 +13,7 @@ A QGIS plugin to manage Delft3D files.
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked core inputs.
 - Imports external-forcing link files (`.ext`) and boundary-condition forcing files (`.bc`).
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus 1D vector layers.
-- Computes a time-dependent node streamfunction from `q1` discharge through the **Compute Streamfunction** action.
+- Computes a time-dependent node streamfunction from `q1` discharge through **Compute 2D variables -> Streamfunction**.
 - Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
 - Loads Delft3D FM HIS NetCDF files as lightweight observation-location layers (lazy timeseries loading).
 - Detects morphodynamic NetCDF variables with extra dimensions and offers only flattenable variables for flattening.
@@ -29,6 +29,33 @@ A QGIS plugin to manage Delft3D files.
 - Bulk-updates trachytope values for points inside polygons.
 - Exports trachytopes to ASCII `.arl` files.
 - Creates 1D network UGRID NetCDF files from branch polylines with optional snapped special points.
+
+## Menu Structure
+
+The plugin menu contains these actions in order:
+
+1. **Install Python Dependencies**
+2. **viewer**
+	- **Cross-section**
+	- **HIS time series**
+	- **1D MAP**
+	- **2D slice**
+	- **Boundary conditions**
+3. **Compute 2D variables**
+	- **Streamfunction**
+	- **Mesh properties**
+4. **Import**
+5. **Export**
+6. **Write Bed Level to Mesh**
+7. **Create Trachytopes from Mesh**
+8. **Create Bridge Points from Polyline**
+9. **Create Fixed-Weir Points from Polyline**
+10. **Create 1D Network**
+11. **Set Trachytopes in Polygons**
+12. **Export Trachytopes (.arl)**
+13. **Export Point Cloud (.xyn)**
+
+The existing actions outside the two submenus remain top-level actions and keep their existing behavior.
 
 ## File Import
 
@@ -101,18 +128,18 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 - `1dfield`: places branch value points from `chainage`/`values` arrays.
 - `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
 
-### FM Cross-Section / Boundary Timeseries Viewer
+### Cross-section and Boundary Conditions Viewer
 
-The **FM Cross-Section / Boundary Timeseries** action supports:
+The **viewer -> Cross-section** and **viewer -> Boundary conditions** actions open the same profile window, which supports:
 - FM cross-section profile previews
 - FM boundary-condition timeseries previews
 
-### Mesh Dataset Slicer
+### 2D Slice
 
-The **Mesh Dataset Slicer** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
+The **viewer -> 2D slice** action is a separate window that provides a Crayfish-like scalar profile for imported 2D mesh results:
 
 - Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
-- Open **Mesh Dataset Slicer**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
+- Open **2D slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
 - Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
 - Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
 - Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
@@ -122,7 +149,7 @@ The **Mesh Dataset Slicer** action is a separate window that provides a Crayfish
 
 ### Streamfunction
 
-Activate an imported 2D mesh and choose **Delft3D File Manager -> Compute Streamfunction**. The action reads the time-dependent `q1` edge discharge, integrates it over the oriented UGRID edge connectivity, and adds a derived mesh layer with a node-centered `stream_function` dataset for every output time.
+Activate an imported 2D mesh and choose **Delft3D File Manager -> Compute 2D variables -> Streamfunction**. The action reads the time-dependent `q1` edge discharge, integrates it over the oriented UGRID edge connectivity, and adds a derived mesh layer with a node-centered `stream_function` dataset for every output time.
 
 Partitioned map outputs are merged globally before calculation. Partition face ownership is used to remove ghost-edge duplicates; outputs with conflicting or incomplete topology are rejected rather than producing discontinuities at partition boundaries. The generated UGRID sidecar is stored beside the source map output with the `_qgis_stream_function.nc` suffix.
 
@@ -297,7 +324,7 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 #### Mesh Properties
 
 1. Activate a loaded 2D mesh layer in QGIS.
-2. Choose **Delft3D File Manager -> Check Mesh Properties**.
+2. Choose **Delft3D File Manager -> Compute 2D variables -> Mesh properties**.
 
 The action can create the following memory layers without changing the source mesh,
 depending on the selected options:
@@ -342,7 +369,7 @@ Each feature stores only lightweight references (`his_source`, `obs_type`, `obs_
 
 #### HIS Timeseries Explorer
 
-Use `Delft3D File Manager -> HIS Timeseries`.
+Use `Delft3D File Manager -> viewer -> HIS time series`.
 
 Workflow:
 1. Select source and scope in the HIS window.
@@ -355,9 +382,9 @@ Notes:
 - Global variables can be plotted without map selection.
 - Multiple selected features are plotted together for quick comparison.
 
-#### 1D Results Visualizer
+#### 1D MAP
 
-Use `Delft3D File Manager -> 1D Results Visualizer` with an imported mesh layer
+Use `Delft3D File Manager -> viewer -> 1D MAP` with an imported mesh layer
 active. The active mesh must have a readable NetCDF source containing mesh1d
 topology, a `time` coordinate, and time-dependent variables located at either
 `mesh1d_nodes` or `mesh1d_edges`.
@@ -477,7 +504,7 @@ Output attributes include:
 ### Profile Chart Window
 
 - Open by double-clicking a cross-section point or a spatial forcing feature on the map.
-- Also available from plugin menu: `FM Cross-Section / Boundary Timeseries`.
+- Also available from plugin menu: `viewer -> Cross-section` and `viewer -> Boundary conditions`.
 - Supports:
 	- `yz` definitions from `def_yCoords` / `def_zCoords`
 	- `circle` definitions from `def_diam`
