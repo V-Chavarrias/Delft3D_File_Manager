@@ -2266,7 +2266,7 @@ class Delft3DFileManager:
         if group_index is None or group_index < 0:
             return None
 
-        for method_name in ("staticScalarDatasetIndex", "activeScalarDatasetAtTime"):
+        for method_name in ("activeScalarDatasetAtTime", "staticScalarDatasetIndex"):
             method = getattr(layer, method_name, None)
             if not callable(method):
                 continue
@@ -2274,8 +2274,14 @@ class Delft3DFileManager:
                 if method_name == "staticScalarDatasetIndex":
                     index = method(group_index)
                 else:
-                    temporal = layer.temporalProperties()
-                    time_range = temporal.referenceTemporalRange()
+                    time_range = None
+                    try:
+                        time_range = self.iface.mapCanvas().temporalRange()
+                    except (RuntimeError, TypeError, AttributeError):
+                        pass
+                    if time_range is None or not getattr(time_range, "isValid", lambda: True)():
+                        temporal = layer.temporalProperties()
+                        time_range = temporal.referenceTemporalRange()
                     index = method(time_range, group_index)
                 if getattr(index, "isValid", lambda: True)():
                     return index

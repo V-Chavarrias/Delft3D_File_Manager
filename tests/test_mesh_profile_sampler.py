@@ -179,3 +179,51 @@ def test_dataset_index_for_displayed_scalar_accepts_renderer_group():
 
     layer = _RendererLayer({}, group=-1, dataset=1)
     assert dataset_index_for_displayed_scalar(layer) == (3, 1)
+
+
+def test_mesh_profile_uses_temporal_dataset_before_static_dataset():
+    from Delft3DFileManager.Delft3DFileManager import Delft3DFileManager
+
+    class _Index:
+        def __init__(self, value):
+            self.value = value
+
+        def isValid(self):
+            return True
+
+    class _Renderer:
+        def activeScalarDatasetGroup(self):
+            return 2
+
+    class _Temporal:
+        def referenceTemporalRange(self):
+            return "reference range"
+
+    class _Canvas:
+        def temporalRange(self):
+            return "displayed range"
+
+    class _Iface:
+        def mapCanvas(self):
+            return _Canvas()
+
+    class _Layer:
+        def rendererSettings(self):
+            return _Renderer()
+
+        def temporalProperties(self):
+            return _Temporal()
+
+        def activeScalarDatasetAtTime(self, time_range, group_index):
+            assert time_range == "displayed range"
+            assert group_index == 2
+            return _Index(8)
+
+        def staticScalarDatasetIndex(self, group_index):
+            raise AssertionError("static dataset must not replace the temporal dataset")
+
+    plugin = Delft3DFileManager.__new__(Delft3DFileManager)
+    plugin.iface = _Iface()
+    result = plugin._mesh_profile_dataset_index(_Layer())
+
+    assert result.value == 8
