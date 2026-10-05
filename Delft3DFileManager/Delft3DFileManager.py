@@ -2162,16 +2162,7 @@ class Delft3DFileManager:
             if not source:
                 source_method = getattr(layer, "source", None)
                 source = str(source_method() if callable(source_method) else "").split("|", 1)[0]
-                if source.lower().startswith("mdal:"):
-                    source = source[5:]
-                    if source.startswith('"'):
-                        closing_quote = source.find('"', 1)
-                        if closing_quote > 1:
-                            source = source[1:closing_quote]
-                    else:
-                        source = re.sub(r":(?:Mesh2d|mesh2d)$", "", source)
-                if source.lower().startswith("file:///"):
-                    source = source[8:]
+            source = _mesh_source_path(source)
             if not source:
                 continue
 
