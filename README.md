@@ -118,14 +118,16 @@ Workflow:
 
 The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
 
-- Activate an imported mesh partition and choose the scalar dataset and timestep in QGIS.
-- Open **2D Slice**, click **Draw Dataset Slice**, then draw a polyline on the map. Single-click to add vertices and double-click to finish.
-- Alternatively, activate a line layer, select one or more line features, and choose **Add Selected Line Slices** in the slicer window.
-- Each slice is sampled exactly where the drawn line intersects UGRID mesh edges; it is not sampled using a fixed probe grid.
-- Each capture is appended as a named chainage/value curve; **Clear Slices** removes the captured curves.
-- The displayed scalar dataset is captured as a snapshot, so changing QGIS time or variable does not rewrite existing curves.
-- Partition layers are sampled as one logical mesh. Owner-masked imports are the supported mode because they avoid duplicate ghost-cell values at partition boundaries.
-- Raw ghost-overlap imports may produce ambiguous values where partitions overlap and are not silently deduplicated.
+
+For morphodynamic outputs with more than one sediment fraction, first import the
+selection dialog, select `mesh2d_lyrfrac`; the flattened mesh then includes
+one `substrate: fraction ...` dataset for each fraction/layer combination.
+Importing the map does not require a sediment file and does not create mean
+grain-size datasets. To request a substrate patch, import the sediment `.sed`
+file first; the first sediment table loaded is used for grain sizes. Choose
+**Volume fraction**, **Arithmetic mean grain size**, or **Geometric mean grain
+size** and click **Draw Substrate Patch** to render the selected profile as a
+chainage/elevation patch.
 
 ### Profile Chart Window
 
@@ -201,6 +203,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.pliz`** — Auto-detected as polyline, bridge, or fixed weir based on header column count
 - **`.xyn`** — Point files (creates point layer)
 - **`.xyz`** — Point files with elevation attribute (creates point layer)
+- **`.sed`** — Sediment definition files (imports characteristic grain sizes)
 - **`dimr_config.xml`** — DIMR simulation config (loads referenced component input files)
 - **`.mdu`** — Delft3D FM model definition file (creates a summary table and loads linked files)
 - **`.ext`** — Delft3D FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)

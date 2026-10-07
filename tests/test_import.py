@@ -203,6 +203,12 @@ def test_route_xyz(plugin):
     plugin.load_xyz_file.assert_called_once_with("/fake/file.xyz")
 
 
+def test_route_sed(plugin):
+    plugin.load_sediment_file = MagicMock()
+    plugin.load_file_by_extension("/fake/file.sed")
+    plugin.load_sediment_file.assert_called_once_with("/fake/file.sed")
+
+
 def test_route_nc_uses_netcdf_router(plugin):
     plugin.load_netcdf_file = MagicMock()
 
@@ -1708,6 +1714,133 @@ def test_load_ugrid_mesh_file_partition_raw_mode_with_morpho_uses_flattened_side
     flattened_paths = [pathlib.Path(path).name for path in load_partitioned_flat_mock.call_args.args[1]]
     assert original_paths == PARTITIONED_DELTA_MAP_NAMES
     assert all(name.endswith("_flat") for name in flattened_paths)
+
+
+def test_substrate_requires_multiple_fractions_and_layer_variables(plugin, tmp_path):
+    single_fraction = tmp_path / "single_fraction.nc"
+    with Dataset(str(single_fraction), "w") as dataset:
+        dataset.createDimension("time", 1)
+        dataset.createDimension("mesh2d_nFaces", 1)
+        dataset.createDimension("nBedLayers", 2)
+        dataset.createDimension("nSedTot", 1)
+        dataset.createVariable("mesh2d_lyrfrac", "f8", ("time", "mesh2d_nFaces", "nBedLayers", "nSedTot"))
+        dataset.createVariable("mesh2d_thlyr", "f8", ("time", "mesh2d_nFaces", "nBedLayers"))
+
+    missing_thickness = tmp_path / "missing_thickness.nc"
+    with Dataset(str(missing_thickness), "w") as dataset:
+        dataset.createDimension("time", 1)
+        dataset.createDimension("mesh2d_nFaces", 1)
+        dataset.createDimension("nBedLayers", 2)
+        dataset.createDimension("nSedTot", 2)
+        dataset.createVariable("mesh2d_lyrfrac", "f8", ("time", "mesh2d_nFaces", "nBedLayers", "nSedTot"))
+
+    for source_path in (single_fraction, missing_thickness):
+        with Dataset(str(source_path), "r") as source_ds:
+            assert not plugin._has_substrate_data(source_ds, "mesh2d_lyrfrac")
+
+
+def test_substrate_variables_preserve_raw_variable_name(plugin, tmp_path):
+    source_path = tmp_path / "substrate.nc"
+    sidecar_path = tmp_path / "substrate_flat.nc"
+    with Dataset(str(source_path), "w") as source_ds:
+        source_ds.createDimension("time", 1)
+        source_ds.createDimension("mesh2d_nFaces", 1)
+        source_ds.createDimension("nBedLayers", 2)
+        source_ds.createDimension("nSedTot", 2)
+        source_ds.createDimension("nStringlen", 16)
+        fractions = source_ds.createVariable(
+            "mesh2d_lyrfrac", "f8", ("time", "mesh2d_nFaces", "nBedLayers", "nSedTot")
+        )
+        thickness = source_ds.createVariable(
+            "mesh2d_thlyr", "f8", ("time", "mesh2d_nFaces", "nBedLayers")
+        )
+        bedlevel = source_ds.createVariable("mesh2d_mor_bl", "f8", ("time", "mesh2d_nFaces"))
+        fractions.long_name = "Original layered fraction content"
+        fraction_names = source_ds.createVariable(
+            "sedfrac_name", "S1", ("nSedTot", "nStringlen")
+        )
+        fractions[:] = [[[[0.25, 0.75], [0.75, 0.25]]]]
+        thickness[:] = [[[1.0, 3.0]]]
+        bedlevel[:] = [[10.0]]
+        fraction_names[:] = [[*"Sediment1", *(["\x00"] * 7)], [*"Sediment2", *(["\x00"] * 7)]]
+
+    with Dataset(str(source_path), "r") as source_ds, Dataset(str(sidecar_path), "w") as sidecar_ds:
+        sidecar_ds.createDimension("time", 1)
+        sidecar_ds.createDimension("mesh2d_nFaces", 1)
+        generated = plugin._create_substrate_fraction_variables(
+            source_ds,
+            sidecar_ds,
+            "mesh2d_lyrfrac",
+            set(),
+        )
+        assert len(generated) == 4
+        assert sidecar_ds.variables[generated[0]][:].tolist() == [[0.25]]
+        assert sidecar_ds.variables[generated[1]][:].tolist() == [[0.75]]
+        assert sidecar_ds.variables[generated[2]][:].tolist() == [[0.75]]
+        assert sidecar_ds.variables[generated[3]][:].tolist() == [[0.25]]
+
+        assert generated == [
+            "mesh2d_lyrfrac_Sediment1_1",
+            "mesh2d_lyrfrac_Sediment2_1",
+            "mesh2d_lyrfrac_Sediment1_2",
+            "mesh2d_lyrfrac_Sediment2_2",
+        ]
+        assert sidecar_ds.variables[generated[0]].long_name == (
+            "Original layered fraction content "
+            "(substrate fraction Sediment1, layer 1)"
+        )
+        assert sidecar_ds.variables[generated[0]].substrate_source_variable == "mesh2d_lyrfrac"
+
+
+def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
+    source_path = tmp_path / "map.nc"
+    shutil.copyfile(
+        pathlib.Path(__file__).parent.parent / "data_tmp" / "blom_T9_map.nc",
+        source_path,
+    )
+
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        ["mesh2d_lyrfrac", "mesh2d_hidexp"],
+    )
+
+    with Dataset(sidecar_path, "r") as sidecar:
+        assert "mesh2d_mor_bl" in sidecar.variables
+        assert any(
+            name.startswith("mesh2d_lyrfrac_")
+            for name in sidecar.variables
+        )
+        assert any(
+            name.startswith("mesh2d_hidexp_")
+            for name in sidecar.variables
+        )
+
+
+def test_first_loaded_sediment_table_is_used(plugin):
+    first_records = [SimpleNamespace(
+        name="first",
+        sediment_type="bedload",
+        characteristic_diameter=0.001,
+        diameter=0.001,
+        minimum_diameter=None,
+        maximum_diameter=None,
+    )]
+    second_records = [SimpleNamespace(
+        name="second",
+        sediment_type="bedload",
+        characteristic_diameter=0.002,
+        diameter=0.002,
+        minimum_diameter=None,
+        maximum_diameter=None,
+    )]
+    with patch(
+        "Delft3DFileManager.Delft3DFileManager.read_sediment_file",
+        side_effect=[first_records, second_records],
+    ):
+        plugin.load_sediment_file("first.sed")
+        plugin.load_sediment_file("second.sed")
+
+    assert plugin._sediment_records is first_records
 
 
 def test_prepare_partition_mesh_sources_real_estuary_fixture_masks_ghosts(plugin, tmp_path):

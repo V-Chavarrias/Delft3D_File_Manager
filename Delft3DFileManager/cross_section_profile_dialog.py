@@ -8,6 +8,7 @@ from qgis.PyQt.QtGui import QPainter, QPen
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -60,6 +61,7 @@ class _ProfileChartWidget(QWidget):
         super().__init__(parent)
         self._points = []
         self._profiles = []
+        self._patch_data = None
         self._message = ""
         self._vertical_exaggeration = 1.0
         self._default_points = []
@@ -68,6 +70,7 @@ class _ProfileChartWidget(QWidget):
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
+        self._patch_data = None
         self._points = list(points or [])
         self._profiles = [{"points": self._points, "label": "Profile"}]
         self._default_points = list(self._points)
@@ -75,6 +78,7 @@ class _ProfileChartWidget(QWidget):
         self.update()
 
     def set_profiles(self, profiles, message=""):
+        self._patch_data = None
         self._profiles = list(profiles or [])
         self._points = list(self._profiles[0].get("points", []) if self._profiles else [])
         self._default_points = list(self._points)
@@ -88,6 +92,10 @@ class _ProfileChartWidget(QWidget):
     def set_axis_labels(self, x_label, y_label):
         self._x_axis_label = str(x_label or "y [m]")
         self._y_axis_label = str(y_label or "z [m]")
+        self.update()
+
+    def set_patch(self, chainages, elevations, values, colorbar_label=None):
+        self._patch_data = (list(chainages), elevations, values, colorbar_label)
         self.update()
 
     def reset_view(self):
@@ -119,6 +127,18 @@ class _ProfileChartWidget(QWidget):
 
         painter.setPen(QPen(_qt_color("gray"), 1))
         painter.drawRect(plot_left, plot_top, plot_right - plot_left, plot_bottom - plot_top)
+
+        if self._patch_data is not None:
+            painter.setPen(QPen(_qt_color("darkGray"), 1))
+            painter.drawText(
+                plot_left,
+                plot_top,
+                plot_right - plot_left,
+                plot_bottom - plot_top,
+                _qt_alignment_flag("AlignCenter"),
+                "Substrate patch view requires matplotlib.",
+            )
+            return
 
         valid_points = [point for point in self._points if point[1] is not None]
         if not valid_points:
@@ -196,6 +216,7 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
 
         self._points = []
         self._profiles = []
+        self._patch_data = None
         self._default_points = []
         self._message = ""
         self._vertical_exaggeration = 1.0
@@ -204,6 +225,7 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
+        self._patch_data = None
         self._points = list(points or [])
         self._profiles = [{"points": self._points, "label": "Profile"}]
         self._default_points = list(self._points)
@@ -211,6 +233,7 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._redraw()
 
     def set_profiles(self, profiles, message=""):
+        self._patch_data = None
         self._profiles = list(profiles or [])
         self._points = list(self._profiles[0].get("points", []) if self._profiles else [])
         self._default_points = list(self._points)
@@ -226,6 +249,10 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._y_axis_label = str(y_label or "z [m]")
         self._redraw()
 
+    def set_patch(self, chainages, elevations, values, colorbar_label=None):
+        self._patch_data = (chainages, elevations, values, colorbar_label)
+        self._redraw()
+
     def reset_view(self):
         self._points = list(self._default_points)
         self._vertical_exaggeration = 1.0
@@ -236,6 +263,20 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._axes.set_xlabel(self._x_axis_label)
         self._axes.set_ylabel(self._y_axis_label)
         self._axes.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+
+        if self._patch_data is not None:
+            chainages, elevations, values, colorbar_label = self._patch_data
+            mesh = self._axes.pcolormesh(
+                chainages,
+                elevations,
+                values,
+                shading="auto",
+            )
+            colorbar = self._figure.colorbar(mesh, ax=self._axes)
+            if colorbar_label:
+                colorbar.set_label(colorbar_label)
+            self.draw_idle()
+            return
 
         if not any(point[1] is not None for profile in self._profiles for point in profile.get("points", [])):
             self._axes.text(
@@ -299,6 +340,7 @@ class CrossSectionProfileDialog(QDialog):
         self._chart_widget = _create_chart_widget(self)
         self._on_draw_requested = None
         self._on_selected_lines_requested = None
+        self._on_substrate_patch_requested = None
 
         self._ve_spin = QDoubleSpinBox()
         self._ve_spin.setMinimum(0.1)
@@ -317,6 +359,12 @@ class CrossSectionProfileDialog(QDialog):
         self._draw_button.clicked.connect(self._draw_profile)
         self._selected_lines_button = QPushButton("Add Selected Line Slices")
         self._selected_lines_button.clicked.connect(self._add_selected_lines)
+        self._substrate_patch_button = QPushButton("Draw Substrate Patch")
+        self._substrate_patch_button.clicked.connect(self._draw_substrate_patch)
+        self._substrate_mode_combo = QComboBox()
+        self._substrate_mode_combo.addItem("Volume fraction", "volume")
+        self._substrate_mode_combo.addItem("Arithmetic mean grain size", "arithmetic")
+        self._substrate_mode_combo.addItem("Geometric mean grain size", "geometric")
 
         control_layout = QHBoxLayout()
         control_layout.addWidget(QLabel("Vertical exaggeration:"))
@@ -327,6 +375,8 @@ class CrossSectionProfileDialog(QDialog):
             control_layout.addWidget(self._clear_button)
             control_layout.addWidget(self._draw_button)
             control_layout.addWidget(self._selected_lines_button)
+            control_layout.addWidget(self._substrate_mode_combo)
+            control_layout.addWidget(self._substrate_patch_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._meta_label)
@@ -334,10 +384,16 @@ class CrossSectionProfileDialog(QDialog):
         layout.addWidget(self._chart_widget)
         layout.addWidget(self._message_label)
 
-    def set_mesh_handlers(self, on_draw_requested=None, on_selected_lines_requested=None):
+    def set_mesh_handlers(
+        self,
+        on_draw_requested=None,
+        on_selected_lines_requested=None,
+        on_substrate_patch_requested=None,
+    ):
         """Set callbacks used by the mesh profile capture controls."""
         self._on_draw_requested = on_draw_requested
         self._on_selected_lines_requested = on_selected_lines_requested
+        self._on_substrate_patch_requested = on_substrate_patch_requested
 
     def _draw_profile(self):
         if callable(self._on_draw_requested):
@@ -346,6 +402,15 @@ class CrossSectionProfileDialog(QDialog):
     def _add_selected_lines(self):
         if callable(self._on_selected_lines_requested):
             self._on_selected_lines_requested()
+
+    def _draw_substrate_patch(self):
+        if callable(self._on_substrate_patch_requested):
+            self._on_substrate_patch_requested(self.substrate_patch_mode())
+
+    def substrate_patch_mode(self):
+        """Return the selected substrate patch mode."""
+        data = self._substrate_mode_combo.currentData()
+        return str(data or "volume")
 
     def set_status_message(self, message):
         """Update the non-modal status text without changing the chart."""
@@ -363,6 +428,24 @@ class CrossSectionProfileDialog(QDialog):
             metadata,
             message,
         )
+
+    def set_substrate_patch(self, chainages, elevations, values, title, metadata, message=""):
+        """Render a chainage/elevation substrate patch."""
+        metadata = metadata or {}
+        if hasattr(self._chart_widget, "set_axis_labels"):
+            self._chart_widget.set_axis_labels(
+                metadata.get("x_axis_label") or "chainage [m]",
+                metadata.get("y_axis_label") or "elevation [m]",
+            )
+        self._meta_label.setText("")
+        self._message_label.setText(message or "")
+        if hasattr(self._chart_widget, "set_patch"):
+            self._chart_widget.set_patch(
+                chainages,
+                elevations,
+                values,
+                metadata.get("colorbar_label"),
+            )
 
     def add_profile(self, points, title, metadata=None, message=""):
         """Append a captured profile without changing existing curves."""

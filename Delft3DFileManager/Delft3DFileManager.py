@@ -48,6 +48,7 @@ import shutil
 import sys
 import glob
 from urllib.parse import unquote, urlsplit
+from .sediment import read_sediment_file
 try:
     from defusedxml import ElementTree as ET
     _HAS_DEFUSEDXML = True
@@ -477,6 +478,8 @@ class Delft3DFileManager:
         self._mesh_profile_map_tool = None
         self._mesh_profile_previous_map_tool = None
         self._mesh_profile_source_layers = []
+        self._substrate_patch_requested = False
+        self._substrate_patch_mode = "volume"
         self._his_dialog = None
         self._one_d_results_dialog = None
         self._one_d_results_state = None
@@ -499,6 +502,7 @@ class Delft3DFileManager:
         self._his_series_cache = {}
         self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
         self._warned_missing_defusedxml = False
+        self._sediment_records = []
 
     def initGui(self):
         """Create toolbar button and menu item"""
@@ -1438,7 +1442,7 @@ class Delft3DFileManager:
             self.iface.mainWindow(),
             "Select Delft3D file",
             "",
-            "Delft3D Files (*.fxw *.pli *.ldb *.spl *.pol *.pliz *.xyn *.xyz *.nc *.mat *.csl *.csd *.ini *.mdu *.ext *.bc *.xml);;All Files (*)"
+            "Delft3D Files (*.fxw *.pli *.ldb *.spl *.pol *.pliz *.xyn *.xyz *.sed *.nc *.mat *.csl *.csd *.ini *.mdu *.ext *.bc *.xml);;All Files (*)"
         )
         if filepath:
             self.load_file_by_extension(filepath)
@@ -1474,6 +1478,8 @@ class Delft3DFileManager:
             self.load_xyn_file(filepath)
         elif ext_lower == ".xyz":
             self.load_xyz_file(filepath)
+        elif ext_lower == ".sed":
+            self.load_sediment_file(filepath)
         elif ext_lower == ".nc":
             self.load_netcdf_file(filepath)
         elif ext_lower == ".mat":
@@ -1520,6 +1526,7 @@ class Delft3DFileManager:
                 "  .pliz - Polyline or fixed weir file (auto-detected by column count)\n"
                 "  .xyn - Point file\n"
                 "  .xyz - Point file with elevation\n"
+                "  .sed - Sediment definition file\n"
                 "  .nc - UGRID mesh file\n"
                 "  .mat - ShorelineS results file\n"
                 "  .csl/.csd/.ini - Cross-section location/definition or generic INI file\n"
@@ -1934,6 +1941,7 @@ class Delft3DFileManager:
         dialog.set_mesh_handlers(
             on_draw_requested=self._start_mesh_profile_capture,
             on_selected_lines_requested=self._add_selected_mesh_profiles,
+            on_substrate_patch_requested=self._start_substrate_patch_capture,
         )
         return dialog
 
@@ -2312,8 +2320,10 @@ class Delft3DFileManager:
         dialog.activateWindow()
         self._start_mesh_profile_capture()
 
-    def _start_mesh_profile_capture(self):
+    def _start_mesh_profile_capture(self, substrate_patch=False, substrate_mode="volume"):
         """Capture a polyline from the map canvas and append its mesh profile."""
+        self._substrate_patch_requested = bool(substrate_patch)
+        self._substrate_patch_mode = str(substrate_mode or "volume")
         from qgis.gui import QgsMapTool, QgsRubberBand
 
         canvas = self.iface.mapCanvas()
@@ -2347,7 +2357,10 @@ class Delft3DFileManager:
 
             def _finish(self):
                 if len(self.points) >= 2:
-                    manager._append_mesh_profile(self.points)
+                    if manager._substrate_patch_requested:
+                        manager._append_substrate_profile(self.points, manager._substrate_patch_mode)
+                    else:
+                        manager._append_mesh_profile(self.points)
                 self.rubber_band.reset(QgsWkbTypes.LineGeometry)
                 dialog.set_status_message("Dataset slice captured. Draw another slice or close this window.")
                 canvas.setMapTool(previous_tool)
@@ -2375,6 +2388,13 @@ class Delft3DFileManager:
             )
         except (AttributeError, RuntimeError):
             pass
+
+    def _start_substrate_patch_capture(self, substrate_mode="volume"):
+        """Capture a polyline for a chainage/elevation substrate patch."""
+        self._start_mesh_profile_capture(
+            substrate_patch=True,
+            substrate_mode=substrate_mode,
+        )
 
     def _add_selected_mesh_profiles(self):
         """Append profiles for selected line features in the active vector layer."""
@@ -2455,6 +2475,239 @@ class Delft3DFileManager:
         )
         if profile_message:
             dialog.set_status_message(f"Slice captured. {profile_message}")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _append_substrate_profile(self, qgis_points, substrate_mode="volume"):
+        """Render the selected substrate fraction as a chainage/elevation patch."""
+        import netCDF4 as nc
+        import numpy as np
+
+        substrate_mode = str(substrate_mode or "volume")
+        if substrate_mode not in ("volume", "arithmetic", "geometric"):
+            substrate_mode = "volume"
+        if not self._sediment_records:
+            self._show_mesh_profile_message(
+                "Import a sediment (.sed) file before requesting a substrate profile."
+            )
+            return
+
+        layers = list(self._mesh_profile_source_layers or self._mesh_profile_layers_for_active())
+        if not layers:
+            self._show_mesh_profile_message("Activate an imported mesh layer before capturing a substrate patch.")
+            return
+
+        dataset_index = self._mesh_profile_dataset_index(layers[0])
+        if dataset_index is None:
+            self._show_mesh_profile_message("Select a substrate fraction dataset in the mesh renderer first.")
+            return
+
+        group_index = None
+        try:
+            group_index = int(layers[0].rendererSettings().activeScalarDatasetGroup())
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            pass
+        if group_index is None:
+            self._show_mesh_profile_message("Select a substrate fraction dataset in the mesh renderer first.")
+            return
+
+        try:
+            metadata = layers[0].datasetGroupMetadata(group_index)
+            group_name = str(metadata.name() if callable(getattr(metadata, "name", None)) else metadata.name)
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            group_name = ""
+        fraction_match = re.search(r"substrate\s*:?\s*fraction\s+([^,]+)", group_name, re.IGNORECASE)
+        if fraction_match is None:
+            fraction_match = re.search(
+                r"(?:substrate_fraction|mesh2d_lyrfrac)_(.+?)_\d+$",
+                group_name,
+                re.IGNORECASE,
+            )
+        if fraction_match is None:
+            self._show_mesh_profile_message("Select a substrate: fraction dataset first.")
+            return
+        fraction_label = fraction_match.group(1).strip()
+
+        crossings = self._mesh_profile_edge_crossings(layers, qgis_points)
+        if not crossings:
+            self._show_mesh_profile_message("The drawn line does not cross any mesh edge in the imported partition topology.")
+            return
+
+        def _source_path(layer):
+            try:
+                source = str(layer.customProperty("delft3d_mesh_source", ""))
+            except (RuntimeError, AttributeError):
+                source = ""
+            if not source:
+                source_method = getattr(layer, "source", None)
+                source = str(source_method() if callable(source_method) else "")
+            return _mesh_source_path(source.split("|", 1)[0])
+
+        def _face_index(node_x, node_y, face_nodes, point):
+            for face_index, face in enumerate(face_nodes):
+                vertices = [
+                    (float(node_x[int(index)]), float(node_y[int(index)]))
+                    for index in face
+                    if 0 <= int(index) < len(node_x)
+                ]
+                inside = False
+                if len(vertices) < 3:
+                    continue
+                previous = vertices[-1]
+                for current in vertices:
+                    if ((current[1] > point[1]) != (previous[1] > point[1]) and
+                            point[0] < (previous[0] - current[0]) * (point[1] - current[1]) /
+                            (previous[1] - current[1]) + current[0]):
+                        inside = not inside
+                    previous = current
+                if inside:
+                    return face_index
+            return None
+
+        samples = []
+        for layer, chainage, point in crossings:
+            source = _source_path(layer)
+            if not source:
+                continue
+            try:
+                with nc.Dataset(source, "r") as dataset:
+                    variables = {name.lower(): name for name in dataset.variables}
+                    required = ["mesh2d_node_x", "mesh2d_node_y", "mesh2d_face_nodes", "mesh2d_mor_bl", "mesh2d_thlyr"]
+                    if any(name not in variables for name in required):
+                        continue
+                    fraction_name = variables.get("mesh2d_lyrfrac")
+                    if fraction_name is None:
+                        continue
+                    node_x = np.asarray(dataset.variables[variables["mesh2d_node_x"]][:], dtype=float)
+                    node_y = np.asarray(dataset.variables[variables["mesh2d_node_y"]][:], dtype=float)
+                    face_variable = dataset.variables[variables["mesh2d_face_nodes"]]
+                    face_nodes = face_variable[:]
+                    if isinstance(face_nodes, np.ma.MaskedArray):
+                        face_nodes = face_nodes.filled(-1)
+                    start_index = int(getattr(face_variable, "start_index", 0))
+                    face_nodes = np.asarray(face_nodes, dtype=int) - start_index
+                    face_index = _face_index(node_x, node_y, face_nodes, point)
+                    if face_index is None:
+                        continue
+
+                    fraction_variable = dataset.variables[fraction_name]
+                    layer_variable = dataset.variables[variables["mesh2d_thlyr"]]
+                    bed_variable = dataset.variables[variables["mesh2d_mor_bl"]]
+                    time_index = 0
+                    try:
+                        time_index = int(dataset_index.dataset())
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+
+                    def _face_values(variable, include_fraction=False):
+                        data = np.asarray(variable[:], dtype=float)
+                        dimensions = list(variable.dimensions)
+                        time_axis = next((dimensions.index(dim) for dim in dimensions if self._is_time_dimension(dim)), None)
+                        face_axis = next((dimensions.index(dim) for dim in dimensions if self._is_space_dimension(dim) and "face" in dim.lower()), None)
+                        if time_axis is not None:
+                            data = np.take(data, min(time_index, data.shape[time_axis] - 1), axis=time_axis)
+                            dimensions.pop(time_axis)
+                            if face_axis is not None and face_axis > time_axis:
+                                face_axis -= 1
+                        if face_axis is None:
+                            face_axis = next((index for index, dim in enumerate(dimensions) if "face" in dim.lower()), 0)
+                        data = np.take(data, face_index, axis=face_axis)
+                        dimensions.pop(face_axis)
+                        return data, dimensions
+
+                    bed_data, _ = _face_values(bed_variable)
+                    thickness_data, _ = _face_values(layer_variable)
+                    fraction_data, fraction_dimensions = _face_values(fraction_variable)
+                    fraction_dimension = next(
+                        (
+                            dim for dim in fraction_dimensions
+                            if self._is_sediment_dimension(dim) and "layer" not in dim.lower()
+                        ),
+                        fraction_dimensions[-1] if fraction_dimensions else None,
+                    )
+                    if fraction_dimension is None:
+                        continue
+                    fraction_labels = self._dimension_labels(dataset, fraction_dimension)
+                    fraction_index = next(
+                        (
+                            index for index, label in enumerate(fraction_labels)
+                            if str(label).strip().strip("#").casefold() == fraction_label.strip().strip("#").casefold()
+                        ),
+                        None,
+                    )
+                    if fraction_index is None:
+                        continue
+                    grain_sizes = self._loaded_grain_sizes(fraction_labels)
+                    if grain_sizes is None:
+                        self._show_mesh_profile_message(
+                            "The first loaded sediment table does not contain grain sizes for every substrate fraction."
+                        )
+                        return
+                    fraction_axis = fraction_dimensions.index(fraction_dimension)
+                    if substrate_mode == "volume":
+                        sample_values = np.take(
+                            fraction_data,
+                            fraction_index,
+                            axis=fraction_axis,
+                        ).reshape(-1)
+                    elif substrate_mode == "arithmetic":
+                        sample_values = np.sum(
+                            fraction_data * grain_sizes,
+                            axis=fraction_axis,
+                        ).reshape(-1)
+                    else:
+                        d0 = 1e-3
+                        sample_values = (
+                            d0 * 2.0 ** np.sum(
+                                fraction_data * np.log2(grain_sizes / d0),
+                                axis=fraction_axis,
+                            )
+                        ).reshape(-1)
+                    bed = float(np.asarray(bed_data).reshape(-1)[0])
+                    thickness = np.maximum(thickness_data, 0.0).reshape(-1)
+                    top = bed - np.concatenate(([0.0], np.cumsum(thickness)))[:-1]
+                    bottom = bed - np.cumsum(thickness)
+                    samples.append((float(chainage), top, bottom, sample_values))
+            except (OSError, RuntimeError, ValueError, KeyError, IndexError):
+                continue
+
+        if not samples:
+            self._show_mesh_profile_message("No substrate values were found along this slice.")
+            return
+
+        samples.sort(key=lambda item: item[0])
+        chainages = np.asarray([sample[0] for sample in samples], dtype=float)
+        layer_count = max(len(sample[3]) for sample in samples)
+        x_edges = np.empty(len(samples) + 1, dtype=float)
+        x_edges[1:-1] = (chainages[:-1] + chainages[1:]) / 2.0
+        x_edges[0] = chainages[0] - (x_edges[1] - chainages[0] if len(samples) > 1 else 0.5)
+        x_edges[-1] = chainages[-1] + (chainages[-1] - x_edges[-2] if len(samples) > 1 else 0.5)
+        elevations = np.full((layer_count + 1, len(samples) + 1), np.nan, dtype=float)
+        values = np.full((layer_count, len(samples) + 1), np.nan, dtype=float)
+        for column, (_, top, bottom, sample_values) in enumerate(samples):
+            elevations[:len(top), column] = top
+            elevations[len(bottom), column] = bottom[-1] if len(bottom) else np.nan
+            values[:len(sample_values), column] = sample_values
+        elevations[:, -1] = elevations[:, -2]
+        values[:, -1] = values[:, -2]
+
+        dialog = self._ensure_mesh_profile_dialog()
+        dialog.set_substrate_patch(
+            x_edges,
+            elevations,
+            values,
+            title=group_name,
+            metadata={
+                "x_axis_label": "chainage [m]",
+                "y_axis_label": "elevation [m]",
+                "colorbar_label": {
+                    "volume": f"volume fraction ({fraction_label})",
+                    "arithmetic": "arithmetic mean grain size [m]",
+                    "geometric": "geometric mean grain size [m]",
+                }[substrate_mode],
+            },
+        )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -4801,6 +5054,58 @@ class Delft3DFileManager:
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
             f"Loaded {len(features)} spatial roughness point(s) from {os.path.basename(rough_path)} (unresolved: {unresolved}).",
+        )
+
+    def load_sediment_file(self, filepath):
+        """Import sediment definitions and characteristic grain sizes as a table."""
+        sediment_path = os.path.abspath(filepath)
+        try:
+            records = read_sediment_file(sediment_path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                f"Could not import sediment file: {exc}",
+            )
+            return
+
+        if not self._sediment_records:
+            self._sediment_records = records
+
+        base_name = os.path.splitext(os.path.basename(sediment_path))[0]
+        layer = QgsVectorLayer("None", f"{base_name}_sediment", "memory")
+        provider = layer.dataProvider()
+        provider.addAttributes([
+            QgsField("name", QVariant.String),
+            QgsField("sed_type", QVariant.String),
+            QgsField("characteristic_d", QVariant.Double),
+            QgsField("diameter", QVariant.Double),
+            QgsField("minimum_d", QVariant.Double),
+            QgsField("maximum_d", QVariant.Double),
+            QgsField("source", QVariant.String),
+        ])
+        layer.updateFields()
+
+        features = []
+        for record in records:
+            feature = QgsFeature(layer.fields())
+            feature.setAttributes([
+                record.name,
+                record.sediment_type,
+                record.characteristic_diameter,
+                record.diameter,
+                record.minimum_diameter,
+                record.maximum_diameter,
+                os.path.basename(sediment_path),
+            ])
+            features.append(feature)
+
+        provider.addFeatures(features)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        self.iface.messageBar().pushSuccess(
+            "Delft3D File Manager",
+            f"Loaded {len(features)} sediment fraction(s) from {os.path.basename(sediment_path)}",
         )
 
     def load_ini_table_file(self, filepath):
@@ -8288,7 +8593,10 @@ class Delft3DFileManager:
         dialog.resize(520, 480)
 
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Select data variables to include in the flattened file:"))
+        layout.addWidget(QLabel(
+            "Select data variables to include in the flattened file. "
+            "Select mesh2d_lyrfrac to generate substrate fraction and grain-size datasets."
+        ))
 
         # Qt6 moved flag/state enums into sub-namespaces; fall back gracefully.
         _item_checkable = getattr(Qt, "ItemIsUserCheckable", None) or getattr(getattr(Qt, "ItemFlag", None), "ItemIsUserCheckable", None)
@@ -8348,7 +8656,7 @@ class Delft3DFileManager:
         source_path = os.path.abspath(source_path)
         sidecar_path = os.path.abspath(self._sidecar_flattened_path(source_path))
         source_mtime = str(int(os.path.getmtime(source_path)))
-        signature = "v3|" + "|".join(sorted(selected_variables))
+        signature = "v5|" + "|".join(sorted(selected_variables))
 
         if os.path.exists(sidecar_path):
             try:
@@ -8458,6 +8766,16 @@ class Delft3DFileManager:
 
                 required_variable_names.update(_referenced_variable_tokens(selected_var))
 
+                if (
+                    self._is_substrate_fraction_variable(selected_name)
+                    and self._has_substrate_data(source_ds, selected_name)
+                ):
+                    required_variable_names.add(selected_name)
+                    for required_name in ("mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name"):
+                        actual_name = self._find_variable_name(source_ds, required_name)
+                        if actual_name:
+                            required_variable_names.add(actual_name)
+
                 for dim_name in selected_var.dimensions:
                     if dim_name in source_ds.variables:
                         required_variable_names.add(dim_name)
@@ -8489,7 +8807,7 @@ class Delft3DFileManager:
                 if required_var is None:
                     continue
                 for dim_name in required_var.dimensions:
-                    if not self._is_time_dimension(dim_name):
+                    if self._is_space_dimension(dim_name):
                         spatial_dimensions.add(dim_name)
 
             for required_name in sorted(required_variable_names):
@@ -8508,6 +8826,20 @@ class Delft3DFileManager:
 
                 variable = source_ds.variables[variable_name]
                 if not self._is_numeric_netcdf_variable(variable):
+                    continue
+
+                if (
+                    self._is_substrate_fraction_variable(variable_name)
+                    and self._has_substrate_data(source_ds, variable_name)
+                ):
+                    generated_names.extend(
+                        self._create_substrate_fraction_variables(
+                            source_ds,
+                            sidecar_ds,
+                            variable_name,
+                            used_names,
+                        )
+                    )
                     continue
 
                 extra_dims = [
@@ -8592,6 +8924,150 @@ class Delft3DFileManager:
 
         return sidecar_path
 
+    def _is_substrate_fraction_variable(self, variable_name):
+        """Return True for the layered substrate fraction variable."""
+        return str(variable_name).lower() == "mesh2d_lyrfrac"
+
+    def _has_substrate_data(self, source_ds, fraction_name):
+        """Return True when layered substrate data has multiple fractions."""
+        fraction_var = source_ds.variables.get(fraction_name)
+        thickness_name = self._find_variable_name(source_ds, "mesh2d_thlyr")
+        if fraction_var is None or thickness_name is None:
+            return False
+
+        fraction_dimensions = [
+            dim for dim in fraction_var.dimensions
+            if not self._is_time_dimension(dim) and not self._is_space_dimension(dim)
+        ]
+        thickness_dimensions = [
+            dim for dim in source_ds.variables[thickness_name].dimensions
+            if not self._is_time_dimension(dim) and not self._is_space_dimension(dim)
+        ]
+        fraction_dimension = next(
+            (dim for dim in fraction_dimensions if dim not in thickness_dimensions),
+            None,
+        )
+        return fraction_dimension is not None and len(source_ds.dimensions[fraction_dimension]) > 1
+
+    def _create_substrate_fraction_variables(self, source_ds, sidecar_ds, fraction_name, used_names):
+        """Create per-layer/per-fraction substrate scalars for QGIS."""
+        import numpy as np
+
+        if not self._has_substrate_data(source_ds, fraction_name):
+            return []
+
+        fraction_var = source_ds.variables[fraction_name]
+        thickness_name = self._find_variable_name(source_ds, "mesh2d_thlyr")
+        if not thickness_name:
+            return []
+
+        thickness_var = source_ds.variables[thickness_name]
+        fraction_dimensions = [
+            dim for dim in fraction_var.dimensions
+            if not self._is_time_dimension(dim) and not self._is_space_dimension(dim)
+        ]
+        thickness_dimensions = [
+            dim for dim in thickness_var.dimensions
+            if not self._is_time_dimension(dim) and not self._is_space_dimension(dim)
+        ]
+        layer_dimension = next(
+            (dim for dim in thickness_dimensions if dim in fraction_dimensions),
+            next((dim for dim in fraction_dimensions if "layer" in dim.lower()), None),
+        )
+        fraction_dimension = next(
+            (dim for dim in fraction_dimensions if dim != layer_dimension),
+            None,
+        )
+        if layer_dimension is None or fraction_dimension is None:
+            return []
+
+        thickness_data = thickness_var[:]
+        fraction_data = fraction_var[:]
+        thickness = np.asarray(
+            thickness_data.filled(0.0) if isinstance(thickness_data, np.ma.MaskedArray) else thickness_data,
+            dtype=float,
+        )
+        fractions = np.asarray(
+            fraction_data.filled(np.nan) if isinstance(fraction_data, np.ma.MaskedArray) else fraction_data,
+            dtype=float,
+        )
+
+        def _ordered_axes(dimensions, include_fraction):
+            shared = [
+                dim for dim in dimensions
+                if self._is_time_dimension(dim) or self._is_space_dimension(dim)
+            ]
+            shared.sort(key=lambda dim: (not self._is_time_dimension(dim), dim))
+            ordered = shared + [layer_dimension]
+            if include_fraction:
+                ordered.append(fraction_dimension)
+            return [list(dimensions).index(dim) for dim in ordered if dim in dimensions]
+
+        thickness = np.transpose(thickness, _ordered_axes(thickness_var.dimensions, False))
+        fractions = np.transpose(fractions, _ordered_axes(fraction_var.dimensions, True))
+        if thickness.shape[:-1] != fractions.shape[:-2] or thickness.shape[-1] != fractions.shape[-2]:
+            return []
+
+        labels = self._dimension_labels(source_ds, fraction_dimension)
+        layer_labels = self._dimension_labels(source_ds, layer_dimension)
+        output_dimensions = tuple(
+            dim for dim in fraction_var.dimensions
+            if dim not in (layer_dimension, fraction_dimension)
+        )
+        created = []
+        for layer_index, layer_label in enumerate(layer_labels):
+            if layer_index >= fractions.shape[-2]:
+                break
+            for fraction_index, fraction_label in enumerate(labels):
+                if fraction_index >= fractions.shape[-1]:
+                    break
+                name = self._build_flattened_variable_name(
+                    fraction_name,
+                    [fraction_label, layer_label],
+                    used_names,
+                )
+                out_var = sidecar_ds.createVariable(name, "f8", output_dimensions, fill_value=np.nan)
+                for attr_name in fraction_var.ncattrs():
+                    if attr_name == "_FillValue":
+                        continue
+                    out_var.setncattr(attr_name, getattr(fraction_var, attr_name))
+                original_long_name = str(getattr(fraction_var, "long_name", fraction_name))
+                out_var.long_name = (
+                    f"{original_long_name} "
+                    f"(substrate fraction {fraction_label}, layer {layer_label})"
+                )
+                out_var.description = "Volume fraction content of a substrate layer"
+                out_var.substrate_source_variable = fraction_name
+                out_var.substrate_fraction_name = fraction_label
+                out_var.substrate_fraction_index = fraction_index
+                out_var.substrate_layer_index = layer_index
+                out_var[:] = fractions[..., layer_index, fraction_index]
+                created.append(name)
+        return created
+
+    def _loaded_grain_sizes(self, fraction_labels):
+        """Return loaded grain sizes aligned with NetCDF fraction labels."""
+        if not self._sediment_records:
+            return None
+
+        records_by_name = {
+            str(record.name).strip().strip("#").casefold(): record
+            for record in self._sediment_records
+        }
+        grain_sizes = []
+        for label in fraction_labels:
+            record = records_by_name.get(str(label).strip().strip("#").casefold())
+            if record is None or not math.isfinite(record.characteristic_diameter):
+                return None
+            grain_sizes.append(record.characteristic_diameter)
+
+        import numpy as np
+
+        grain_sizes = np.asarray(grain_sizes, dtype=float)
+        if np.any(grain_sizes <= 0):
+            return None
+        return grain_sizes
+
     def _dimension_labels(self, nc_dataset, dim_name):
         """Return preferred labels for a dimension, using coordinate variables when available."""
         size = len(nc_dataset.dimensions[dim_name])
@@ -8602,7 +9078,9 @@ class Delft3DFileManager:
                 return labels
 
         for variable_name, variable in nc_dataset.variables.items():
-            if len(variable.dimensions) != 1 or variable.dimensions[0] != dim_name:
+            if not variable.dimensions or variable.dimensions[0] != dim_name:
+                continue
+            if len(variable.dimensions) > 2:
                 continue
             if variable_name.lower() == dim_name.lower():
                 continue
@@ -8627,11 +9105,11 @@ class Delft3DFileManager:
             values = values.filled(fill_value)
 
         values_array = np.asarray(values)
-        if values_array.size != expected_size:
-            return None
-
         if values_array.dtype.kind in ("S", "U") and values_array.ndim > 1:
             values_array = nc.chartostring(values_array)
+
+        if values_array.size != expected_size:
+            return None
 
         if values_array.dtype.kind not in ("S", "U", "i", "u", "f"):
             return None
