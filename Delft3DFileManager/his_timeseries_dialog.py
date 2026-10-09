@@ -5,6 +5,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -69,9 +70,22 @@ class _MatplotlibSeriesChartWidget(FigureCanvasQTAgg):
         self._message = ""
         self._redraw()
 
+    def save_figure(self, parent=None):
+        filename, _ = QFileDialog.getSaveFileName(
+            parent or self,
+            "Print PNG",
+            "",
+            "PNG image (*.png)",
+        )
+        if not filename:
+            return False
+        if not filename.lower().endswith(".png"):
+            filename += ".png"
+        self._figure.savefig(filename, format="png", dpi=300)
+        return True
+
     def _redraw(self):
         self._axes.clear()
-        self._axes.set_title(self._title)
         self._axes.set_xlabel(self._x_axis_label)
         self._axes.set_ylabel(self._y_axis_label)
         self._axes.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
@@ -121,6 +135,10 @@ class _FallbackChartWidget(QWidget):
     def set_series(self, series_entries, x_axis_label, y_axis_label, title, append=False):
         del series_entries, x_axis_label, y_axis_label, title, append
         self._label.setText("Matplotlib is not available in this environment.")
+
+    def save_figure(self, parent=None):
+        del parent
+        return False
 
 
 def _create_chart_widget(parent=None):
@@ -213,6 +231,7 @@ class HisTimeseriesDialog(QDialog):
         self._new_plot_button = QPushButton("New Plot")
         self._add_plot_button = QPushButton("Add To Plot")
         self._clear_plot_button = QPushButton("Clear Plot")
+        self._print_button = QPushButton("Print PNG")
 
         actions_row = QHBoxLayout()
         actions_row.addWidget(self._refresh_button)
@@ -220,6 +239,7 @@ class HisTimeseriesDialog(QDialog):
         actions_row.addWidget(self._new_plot_button)
         actions_row.addWidget(self._add_plot_button)
         actions_row.addWidget(self._clear_plot_button)
+        actions_row.addWidget(self._print_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls_row)
@@ -235,6 +255,7 @@ class HisTimeseriesDialog(QDialog):
         self._new_plot_button.clicked.connect(lambda: self._emit_plot_requested("new"))
         self._add_plot_button.clicked.connect(lambda: self._emit_plot_requested("add"))
         self._clear_plot_button.clicked.connect(self.clear_plot)
+        self._print_button.clicked.connect(lambda: self._chart_widget.save_figure(self))
 
     def set_handlers(self, on_controls_changed=None, on_plot_requested=None, on_refresh_requested=None):
         self._on_controls_changed = on_controls_changed

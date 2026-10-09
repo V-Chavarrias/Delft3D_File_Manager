@@ -2007,6 +2007,17 @@ class Delft3DFileManager:
         dialog.raise_()
         dialog.activateWindow()
 
+    @staticmethod
+    def _log_substrate_debug(message):
+        """Write substrate-patch diagnostics to the QGIS message log."""
+        text = str(message)
+        try:
+            from qgis.core import Qgis, QgsMessageLog
+            level = getattr(Qgis, "Info", 0)
+            QgsMessageLog.logMessage(text, "Delft3D File Manager", level)
+        except (ImportError, AttributeError, RuntimeError):
+            print(f"Delft3D File Manager substrate: {text}")
+
     def _disconnect_profile_layer_selection(self):
         """Disconnect existing profile layer selection signal safely."""
         if self._profile_layer is None or not self._profile_selection_connected:
@@ -2396,14 +2407,35 @@ class Delft3DFileManager:
             substrate_mode=substrate_mode,
         )
 
+    def _selected_mesh_profile_line_layer(self):
+        """Return the active or selected vector line layer for mesh profiles."""
+        active_layer = self.iface.activeLayer()
+        candidates = []
+        if active_layer is not None:
+            candidates.append(active_layer)
+        candidates.extend(
+            layer
+            for layer in QgsProject.instance().mapLayers().values()
+            if layer is not active_layer
+        )
+
+        for layer in candidates:
+            try:
+                if (
+                    layer.type() == QgsMapLayerType.VectorLayer
+                    and layer.geometryType() == QgsWkbTypes.LineGeometry
+                    and list(layer.getSelectedFeatures())
+                ):
+                    return layer
+            except (RuntimeError, AttributeError, TypeError):
+                continue
+        return None
+
     def _add_selected_mesh_profiles(self):
-        """Append profiles for selected line features in the active vector layer."""
-        layer = self.iface.activeLayer()
-        if layer is None or layer.type() != QgsMapLayerType.VectorLayer:
+        """Append profiles for selected line features in a vector line layer."""
+        layer = self._selected_mesh_profile_line_layer()
+        if layer is None:
             self._show_mesh_profile_message("Activate a line layer with selected features.")
-            return
-        if layer.geometryType() != QgsWkbTypes.LineGeometry:
-            self._show_mesh_profile_message("The active layer must contain line features.")
             return
 
         features = list(layer.getSelectedFeatures())
@@ -2487,6 +2519,9 @@ class Delft3DFileManager:
         substrate_mode = str(substrate_mode or "volume")
         if substrate_mode not in ("volume", "arithmetic", "geometric"):
             substrate_mode = "volume"
+        self._log_substrate_debug(
+            f"start mode={substrate_mode}, sediment_records={len(self._sediment_records)}"
+        )
         if not self._sediment_records:
             self._show_mesh_profile_message(
                 "Import a sediment (.sed) file before requesting a substrate profile."
@@ -2494,11 +2529,13 @@ class Delft3DFileManager:
             return
 
         layers = list(self._mesh_profile_source_layers or self._mesh_profile_layers_for_active())
+        self._log_substrate_debug(f"layers={len(layers)}")
         if not layers:
             self._show_mesh_profile_message("Activate an imported mesh layer before capturing a substrate patch.")
             return
 
         dataset_index = self._mesh_profile_dataset_index(layers[0])
+        self._log_substrate_debug(f"dataset_index={dataset_index!r}")
         if dataset_index is None:
             self._show_mesh_profile_message("Select a substrate fraction dataset in the mesh renderer first.")
             return
@@ -2513,10 +2550,16 @@ class Delft3DFileManager:
             return
 
         try:
-            metadata = layers[0].datasetGroupMetadata(group_index)
+            metadata = layers[0].datasetGroupMetadata(dataset_index)
             group_name = str(metadata.name() if callable(getattr(metadata, "name", None)) else metadata.name)
-        except (RuntimeError, TypeError, ValueError, AttributeError):
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
             group_name = ""
+            self._log_substrate_debug(
+                f"dataset group metadata lookup failed: {type(exc).__name__}: {exc}"
+            )
+        self._log_substrate_debug(
+            f"group_index={group_index!r}, group_name={group_name!r}"
+        )
         fraction_match = re.search(r"substrate\s*:?\s*fraction\s+([^,]+)", group_name, re.IGNORECASE)
         if fraction_match is None:
             fraction_match = re.search(
@@ -2525,11 +2568,14 @@ class Delft3DFileManager:
                 re.IGNORECASE,
             )
         if fraction_match is None:
+            self._log_substrate_debug("fraction metadata did not match substrate patterns")
             self._show_mesh_profile_message("Select a substrate: fraction dataset first.")
             return
         fraction_label = fraction_match.group(1).strip()
+        self._log_substrate_debug(f"fraction_label={fraction_label!r}")
 
         crossings = self._mesh_profile_edge_crossings(layers, qgis_points)
+        self._log_substrate_debug(f"mesh_crossings={len(crossings)}")
         if not crossings:
             self._show_mesh_profile_message("The drawn line does not cross any mesh edge in the imported partition topology.")
             return
@@ -2568,16 +2614,22 @@ class Delft3DFileManager:
         samples = []
         for layer, chainage, point in crossings:
             source = _source_path(layer)
+            self._log_substrate_debug(f"sample chainage={chainage}, source={source!r}")
             if not source:
+                self._log_substrate_debug("skipping crossing without a source path")
                 continue
             try:
                 with nc.Dataset(source, "r") as dataset:
                     variables = {name.lower(): name for name in dataset.variables}
                     required = ["mesh2d_node_x", "mesh2d_node_y", "mesh2d_face_nodes", "mesh2d_mor_bl", "mesh2d_thlyr"]
                     if any(name not in variables for name in required):
+                        self._log_substrate_debug(
+                            f"missing required variables={[name for name in required if name not in variables]}"
+                        )
                         continue
                     fraction_name = variables.get("mesh2d_lyrfrac")
                     if fraction_name is None:
+                        self._log_substrate_debug("missing mesh2d_lyrfrac")
                         continue
                     node_x = np.asarray(dataset.variables[variables["mesh2d_node_x"]][:], dtype=float)
                     node_y = np.asarray(dataset.variables[variables["mesh2d_node_y"]][:], dtype=float)
@@ -2588,6 +2640,7 @@ class Delft3DFileManager:
                     start_index = int(getattr(face_variable, "start_index", 0))
                     face_nodes = np.asarray(face_nodes, dtype=int) - start_index
                     face_index = _face_index(node_x, node_y, face_nodes, point)
+                    self._log_substrate_debug(f"face_index={face_index}")
                     if face_index is None:
                         continue
 
@@ -2669,9 +2722,11 @@ class Delft3DFileManager:
                     top = bed - np.concatenate(([0.0], np.cumsum(thickness)))[:-1]
                     bottom = bed - np.cumsum(thickness)
                     samples.append((float(chainage), top, bottom, sample_values))
-            except (OSError, RuntimeError, ValueError, KeyError, IndexError):
+            except (OSError, RuntimeError, ValueError, KeyError, IndexError) as exc:
+                self._log_substrate_debug(f"sample failed: {type(exc).__name__}: {exc}")
                 continue
 
+        self._log_substrate_debug(f"samples={len(samples)}")
         if not samples:
             self._show_mesh_profile_message("No substrate values were found along this slice.")
             return
@@ -3031,7 +3086,7 @@ class Delft3DFileManager:
                     {
                         "x": series_payload["x"],
                         "y": series_payload["y"],
-                        "label": f"{obs_name} | {series_payload['variable_label']}",
+                        "label": obs_name,
                     }
                 )
 

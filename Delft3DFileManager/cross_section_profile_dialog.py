@@ -9,6 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -102,6 +103,10 @@ class _ProfileChartWidget(QWidget):
         self._points = list(self._default_points)
         self._vertical_exaggeration = 1.0
         self.update()
+
+    def save_figure(self, parent=None):
+        del parent
+        return False
 
     def paintEvent(self, event):
         del event
@@ -258,6 +263,20 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._vertical_exaggeration = 1.0
         self._redraw()
 
+    def save_figure(self, parent=None):
+        filename, _ = QFileDialog.getSaveFileName(
+            parent or self,
+            "Print PNG",
+            "",
+            "PNG image (*.png)",
+        )
+        if not filename:
+            return False
+        if not filename.lower().endswith(".png"):
+            filename += ".png"
+        self._figure.savefig(filename, format="png", dpi=300)
+        return True
+
     def _redraw(self):
         self._axes.clear()
         self._axes.set_xlabel(self._x_axis_label)
@@ -351,6 +370,8 @@ class CrossSectionProfileDialog(QDialog):
 
         self._reset_button = QPushButton("Reset View")
         self._reset_button.clicked.connect(self._on_reset)
+        self._print_button = QPushButton("Print PNG")
+        self._print_button.clicked.connect(lambda: self._chart_widget.save_figure(self))
 
         self._clear_button = QPushButton("Clear Slices")
         self._clear_button.clicked.connect(self.clear_profiles)
@@ -371,6 +392,7 @@ class CrossSectionProfileDialog(QDialog):
         control_layout.addWidget(self._ve_spin)
         control_layout.addStretch(1)
         control_layout.addWidget(self._reset_button)
+        control_layout.addWidget(self._print_button)
         if self._mesh_mode:
             control_layout.addWidget(self._clear_button)
             control_layout.addWidget(self._draw_button)
