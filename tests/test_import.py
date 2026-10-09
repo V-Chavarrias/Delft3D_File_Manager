@@ -320,6 +320,56 @@ def test_load_fm_his_file_creates_cross_sections_as_line_layer(plugin):
     assert cross_call.kwargs.get("geometry_kind") == "line"
 
 
+@pytest.mark.parametrize("action", ["open_his_timeseries_window", "_on_his_dialog_refresh_requested"])
+def test_his_viewer_recovers_source_from_project_layer(plugin, action):
+    source_path = str(HIS_01.resolve())
+    layer = MagicMock()
+    layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    layer.getFeatures.side_effect = lambda: iter([{"his_source": source_path}])
+    plugin._field_name_map = MagicMock(return_value={"his_source": "his_source"})
+    dialog = MagicMock()
+    dialog.selected_source.return_value = None
+    dialog.selected_scope.return_value = "global"
+    plugin._his_dialog = dialog
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QgsProject") as project, patch(
+        "netCDF4.Dataset", wraps=Dataset
+    ) as dataset_factory:
+        project.instance.return_value.mapLayers.return_value = {"stations": layer, "sections": layer}
+        getattr(plugin, action)()
+        dataset_factory.assert_called_once_with(source_path, "r")
+        assert plugin._discover_his_sources() == []
+        dataset_factory.assert_called_once_with(source_path, "r")
+        project.instance.return_value.addMapLayer.assert_not_called()
+
+    assert source_path in plugin._his_sources
+    assert plugin._his_sources[source_path]["station_variables"]
+    dialog.set_source_options.assert_called_once_with(
+        [(source_path, f"{HIS_01.stem} ({source_path})")], selected_value=source_path
+    )
+    assert dialog.set_variable_options.call_args.args[0]
+    dialog.set_message.assert_called_with("")
+
+
+def test_his_viewer_reports_missing_project_source(plugin, tmp_path):
+    source_path = str(tmp_path / "missing_his.nc")
+    layer = MagicMock()
+    layer.type.return_value = _qgis_core.QgsMapLayerType.VectorLayer
+    layer.name.return_value = "restored_his_stations"
+    layer.getFeatures.return_value = iter([{"his_source": source_path}])
+    plugin._field_name_map = MagicMock(return_value={"his_source": "his_source"})
+    plugin._his_dialog = MagicMock()
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QgsProject") as project:
+        project.instance.return_value.mapLayers.return_value = {"his": layer}
+        plugin._on_his_dialog_refresh_requested()
+
+    assert plugin._his_sources == {}
+    message = plugin._his_dialog.set_message.call_args.args[0]
+    assert "Could not recover HIS source from restored_his_stations" in message
+    assert "missing_his.nc" in message
+
+
 def test_close_progress_dialog_survives_partial_cleanup_failures(plugin):
     class _Dialog:
         def __init__(self):

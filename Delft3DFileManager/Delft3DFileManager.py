@@ -2125,12 +2125,19 @@ class Delft3DFileManager:
             source = source.split("|", 1)[0].replace("\\", "/").lower()
             return source
 
+        def _partition_family(source):
+            match = re.match(r"^(.*_)\d{4}(_(?:map|fou|his|rst)(?:_.*)?\.nc)$", source, re.IGNORECASE)
+            if match is None:
+                return None
+            return f"{match.group(1)}####{match.group(2)}"
+
         active_id = None
         try:
             active_id = str(active_layer.id())
         except (RuntimeError, AttributeError):
             active_id = None
         active_source = _source_key(active_layer)
+        active_family = _partition_family(active_source)
 
         for session in self._partition_mesh_sync_sessions.values():
             layers = list(session.get("layers", []))
@@ -2140,6 +2147,16 @@ class Delft3DFileManager:
                 or (active_source and any(_source_key(layer) == active_source for layer in layers))
             ):
                 return layers
+
+        if active_family:
+            sibling_layers = []
+            for layer in QgsProject.instance().mapLayers().values():
+                if not callable(getattr(layer, "datasetValue", None)):
+                    continue
+                if _partition_family(_source_key(layer)) == active_family:
+                    sibling_layers.append(layer)
+            if sibling_layers:
+                return sibling_layers
 
         if callable(getattr(active_layer, "datasetValue", None)):
             return [active_layer]
@@ -2478,12 +2495,11 @@ class Delft3DFileManager:
             )
             return
         values_by_chainage = {}
-        for layer, chainage, point in crossings:
-            layer_dataset_index = self._mesh_profile_dataset_index(layer) or dataset_index
+        for _layer, chainage, point in crossings:
             sampled = sample_partitioned_mesh(
-                [layer],
+                layers,
                 [point],
-                layer_dataset_index,
+                dataset_index,
                 point_factory=lambda value: QgsPointXY(value[0], value[1]),
             )
             value = sampled[0][1] if sampled else None
@@ -2785,6 +2801,52 @@ class Delft3DFileManager:
             self._his_dialog = self._create_his_timeseries_dialog()
         return self._his_dialog
 
+    def _discover_his_sources(self):
+        """Recover HIS source metadata from observation layers in the project."""
+        errors = []
+        checked_sources = set()
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.type() != QgsMapLayerType.VectorLayer:
+                continue
+            field_lookup = self._field_name_map(layer)
+            if "his_source" not in field_lookup:
+                continue
+            try:
+                feature = next(layer.getFeatures(), None)
+                if feature is None:
+                    continue
+                source_value = str(feature[field_lookup["his_source"]] or "").strip()
+                if not source_value:
+                    continue
+                source_path = os.path.abspath(source_value)
+                if source_path in self._his_sources or source_path in checked_sources:
+                    continue
+                checked_sources.add(source_path)
+                import netCDF4 as nc
+
+                with nc.Dataset(source_path, "r") as dataset:
+                    schema = self._resolve_his_schema(dataset)
+                    if schema is None:
+                        raise ValueError("Could not detect HIS schema")
+                    epsg = self._read_epsg_from_nc(dataset) or 28992
+                source_info = {
+                    key: schema[key]
+                    for key in (
+                        "time_var", "time_dim", "time_name", "time_units",
+                        "station_dim", "cross_section_dim", "station_variables",
+                        "cross_section_variables", "global_variables",
+                    )
+                }
+                source_info.update(
+                    path=source_path,
+                    base_name=os.path.splitext(os.path.basename(source_path))[0],
+                    epsg=epsg,
+                )
+                self._his_sources[source_path] = source_info
+            except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                errors.append(f"Could not recover HIS source from {layer.name()}: {exc}")
+        return errors
+
     def _his_source_options(self):
         """Return source combo options for all loaded HIS sources."""
         options = []
@@ -2863,6 +2925,7 @@ class Delft3DFileManager:
         """Refresh dialog combo options and selection status."""
         dialog = self._ensure_his_timeseries_dialog()
 
+        source_errors = self._discover_his_sources()
         source_options = self._his_source_options()
         selected_source = dialog.selected_source() if keep_current else None
         if not source_options:
@@ -2870,7 +2933,7 @@ class Delft3DFileManager:
             dialog.set_scope_options([])
             dialog.set_variable_options([])
             dialog.set_selection_text("Selection: no HIS source loaded")
-            dialog.set_message("Import a Delft3D FM HIS .nc file first.")
+            dialog.set_message("\n".join(source_errors) or "Import a Delft3D FM HIS .nc file first.")
             return
 
         if selected_source is None or selected_source not in dict(source_options):

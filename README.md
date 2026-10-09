@@ -101,6 +101,7 @@ Notes:
 - No right-click is required; plotting is selection-driven.
 - Global variables can be plotted without map selection.
 - Multiple selected features are plotted together for quick comparison.
+- Opening the viewer or choosing `Refresh Selection` recovers HIS sources from observation layers already in the project, including after a plugin restart. The referenced HIS files must remain accessible.
 
 ### 1D MAP
 
