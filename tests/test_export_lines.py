@@ -61,6 +61,35 @@ def test_export_lines_pli_single(plugin, tmp_path):
     assert lines[3] == "3.000000 4.000000"
 
 
+def test_export_lines_preserves_every_mesh_corner(plugin, tmp_path):
+    out = str(tmp_path / "mesh_route.pli")
+    layer = _make_layer("mesh_route")
+    feature = _make_feature("mesh_route")
+    points = [
+        _make_point(0.0, 0.0),
+        _make_point(1.0, 0.0),
+        _make_point(1.0, 1.0),
+        _make_point(2.0, 1.0),
+    ]
+    feature.geometry.return_value.isMultipart.return_value = False
+    feature.geometry.return_value.asPolyline.return_value = points
+    layer.getFeatures.return_value = [feature]
+    plugin.iface.activeLayer.return_value = layer
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QFileDialog") as mock_dlg:
+        mock_dlg.getSaveFileName.return_value = (out, "")
+        plugin.export_lines()
+
+    lines = open(out).read().splitlines()
+    assert lines[1] == "4 2"
+    assert lines[2:] == [
+        "0.000000 0.000000",
+        "1.000000 0.000000",
+        "1.000000 1.000000",
+        "2.000000 1.000000",
+    ]
+
+
 def test_export_lines_pli_multipart(plugin, tmp_path):
     out = str(tmp_path / "result.pli")
     layer = _make_layer()

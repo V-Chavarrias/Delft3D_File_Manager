@@ -56,6 +56,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     ]
     assert plugin.profile_chart_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
+    assert plugin.create_mesh_polyline_action.triggered.callback == plugin.create_polyline_from_mesh
 
     registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
     assert registered[:4] == [
@@ -72,6 +73,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         plugin.create_bridge_points_action,
         plugin.create_fixed_weir_points_action,
         plugin.create_1d_network_action,
+        plugin.create_mesh_polyline_action,
         plugin.update_trachytopes_action,
         plugin.export_trachytopes_action,
         plugin.export_pointcloud_action,
@@ -93,4 +95,5 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.viewer_menu.menuAction() in removed
     assert plugin.compute_2d_variables_menu.menuAction() in removed
     assert plugin.open_guide_action in removed
+    assert plugin.create_mesh_polyline_action in removed
     assert plugin.boundary_conditions_action not in removed

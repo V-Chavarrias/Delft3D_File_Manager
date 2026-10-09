@@ -21,7 +21,8 @@ from qgis.core import (
     QgsVectorLayer, QgsField, QgsFeature, QgsGeometry, QgsPointXY, QgsProject,
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol,
-    QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange
+    QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange,
+    QgsCoordinateTransform, QgsDistanceArea, QgsUnitTypes,
 )
 from qgis.PyQt.QtCore import (
     QDateTime,
@@ -460,6 +461,7 @@ class Delft3DFileManager:
         self.create_bridge_points_action = None
         self.create_fixed_weir_points_action = None
         self.create_1d_network_action = None
+        self.create_mesh_polyline_action = None
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
@@ -489,6 +491,9 @@ class Delft3DFileManager:
         self._one_d_results_selection = None
         self._one_d_results_map_tool = None
         self._one_d_results_previous_map_tool = None
+        self._mesh_polyline_map_tool = None
+        self._mesh_polyline_previous_map_tool = None
+        self._mesh_polyline_source_layer = None
         self._one_d_results_overlay_bands = []
         self._one_d_results_hover_band = None
         self._profile_layer = None
@@ -620,6 +625,19 @@ class Delft3DFileManager:
         self.create_1d_network_action.triggered.connect(self.create_1d_network)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.create_1d_network_action)
 
+        self.create_mesh_polyline_action = QAction(
+            QIcon(icon_path), "Create Polyline from Mesh", self.iface.mainWindow()
+        )
+        self.create_mesh_polyline_action.setStatusTip(
+            "Create a polyline along active mesh cell edges by clicking mesh corners"
+        )
+        self.create_mesh_polyline_action.triggered.connect(
+            self.create_polyline_from_mesh
+        )
+        self.iface.addPluginToMenu(
+            "&Delft3D File Manager", self.create_mesh_polyline_action
+        )
+
         self.update_trachytopes_action = QAction(
             QIcon(icon_path), "Set Trachytopes in Polygons", self.iface.mainWindow()
         )
@@ -730,6 +748,8 @@ class Delft3DFileManager:
 
     def unload(self):
         """Remove the plugin menu item and icon"""
+        if self._mesh_polyline_map_tool is not None:
+            self._mesh_polyline_map_tool.cancel()
         if self.import_action:
             self.iface.removeToolBarIcon(self.import_action)
             self.iface.removePluginMenu("&Delft3D File Manager", self.import_action)
@@ -754,6 +774,10 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.create_fixed_weir_points_action)
         if self.create_1d_network_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.create_1d_network_action)
+        if self.create_mesh_polyline_action:
+            self.iface.removePluginMenu(
+                "&Delft3D File Manager", self.create_mesh_polyline_action
+            )
         if self.update_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
         if self.export_trachytopes_action:
@@ -1189,6 +1213,191 @@ class Delft3DFileManager:
             raw_faces = [face_method(index) for index in range(int(face_count()))]
         faces = [tuple(int(node) for node in face) for face in raw_faces]
         return vertices, faces
+
+    def create_polyline_from_mesh(self):
+        """Start a routed polyline capture using only the active mesh topology."""
+        from .mesh_edge_paths import build_edge_graph
+
+        if self._mesh_polyline_map_tool is not None:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "A mesh polyline capture is already active.",
+            )
+            return None
+
+        layer = self.iface.activeLayer()
+        if not self._is_mesh_layer(layer) or not layer.isValid():
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Activate a valid mesh layer before creating a polyline.",
+            )
+            return None
+
+        canvas = self.iface.mapCanvas()
+        project = QgsProject.instance()
+        try:
+            mesh_crs = layer.crs()
+            canvas_crs = canvas.mapSettings().destinationCrs()
+            if not mesh_crs.isValid():
+                raise ValueError("The active mesh has an invalid coordinate reference system")
+            if not canvas_crs.isValid():
+                raise ValueError("The map canvas has an invalid coordinate reference system")
+
+            mesh = self._native_mesh(layer)
+            vertices, faces = self._mesh_vertices_faces(mesh)
+            coordinates = [
+                (
+                    self._mesh_vertex_coordinate(vertex, "x"),
+                    self._mesh_vertex_coordinate(vertex, "y"),
+                )
+                for vertex in vertices
+            ]
+            if not faces:
+                raise ValueError("The active mesh contains no faces")
+
+            distance_area = QgsDistanceArea()
+            distance_area.setSourceCrs(mesh_crs, project.transformContext())
+            ellipsoid = mesh_crs.ellipsoidAcronym()
+            if not ellipsoid or str(ellipsoid).upper() == "NONE":
+                ellipsoid = project.ellipsoid()
+            if not ellipsoid or str(ellipsoid).upper() == "NONE":
+                raise ValueError(
+                    "Set a valid project ellipsoid or use a mesh CRS with a declared ellipsoid"
+                )
+            distance_area.setEllipsoid(ellipsoid)
+            distance_area.setLengthUnits(QgsUnitTypes.DistanceMeters)
+            if not distance_area.willUseEllipsoid():
+                raise ValueError(f"Could not configure ellipsoid {ellipsoid!r}")
+
+            def physical_edge_length(first, second):
+                return distance_area.measureLine(
+                    QgsPointXY(float(first[0]), float(first[1])),
+                    QgsPointXY(float(second[0]), float(second[1])),
+                )
+
+            graph = build_edge_graph(coordinates, faces, physical_edge_length)
+            transform = QgsCoordinateTransform(
+                mesh_crs, canvas_crs, project.transformContext()
+            )
+            if not transform.isValid():
+                raise ValueError("Could not transform mesh corners to the map canvas CRS")
+
+            spatial_index = QgsSpatialIndex()
+            display_coordinates = {}
+            for node in sorted(graph.neighbors):
+                source_point = QgsPointXY(*graph.coordinates[node])
+                display_point = transform.transform(source_point)
+                display_x, display_y = float(display_point.x()), float(display_point.y())
+                if not math.isfinite(display_x) or not math.isfinite(display_y):
+                    raise ValueError(
+                        f"Mesh corner {node} could not be transformed to the canvas CRS"
+                    )
+                display_coordinates[node] = QgsPointXY(display_x, display_y)
+                feature = QgsFeature()
+                feature.setId(node)
+                feature.setGeometry(
+                    QgsGeometry.fromPointXY(display_coordinates[node])
+                )
+                if not spatial_index.addFeature(feature):
+                    raise ValueError(f"Could not index mesh corner {node} for snapping")
+
+            from .mesh_polyline_capture import MeshPolylineCaptureTool
+
+            previous_map_tool = canvas.mapTool()
+            tool = MeshPolylineCaptureTool(
+                canvas=canvas,
+                graph=graph,
+                spatial_index=spatial_index,
+                display_coordinates=display_coordinates,
+                previous_map_tool=previous_map_tool,
+                source_layer_id=layer.id(),
+                on_finished=self._finish_mesh_polyline_capture,
+                on_closed=self._mesh_polyline_capture_closed,
+                on_warning=self._warn_mesh_polyline_capture,
+            )
+            self._mesh_polyline_map_tool = tool
+            self._mesh_polyline_previous_map_tool = previous_map_tool
+            self._mesh_polyline_source_layer = layer
+            try:
+                canvas.setMapTool(tool)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                tool.cancel()
+                raise
+            self.iface.messageBar().pushInfo(
+                "Delft3D File Manager",
+                "Click mesh corners to route along cell edges. Right-click finishes; "
+                "Backspace undoes the last clicked segment; Esc cancels.",
+            )
+            return tool
+        except (
+            AttributeError,
+            ImportError,
+            OverflowError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not start mesh polyline capture: {exc}",
+            )
+            return None
+
+    def _finish_mesh_polyline_capture(self, node_ids):
+        """Create and add one temporary line feature from the captured node path."""
+        source_layer = self._mesh_polyline_source_layer
+        if source_layer is None or not source_layer.isValid():
+            self._warn_mesh_polyline_capture(
+                "The source mesh is no longer available; the polyline was not created."
+            )
+            return False
+        try:
+            tool = self._mesh_polyline_map_tool
+            if tool is None:
+                raise ValueError("The captured mesh path is unavailable")
+            points = [
+                QgsPointXY(*tool.graph.coordinates[node])
+                for node in node_ids
+            ]
+            geometry = QgsGeometry.fromPolylineXY(points)
+            if geometry.isEmpty() or not geometry.isGeosValid():
+                raise ValueError("The captured path does not form a valid line geometry")
+
+            output = QgsVectorLayer(
+                "LineString", f"{source_layer.name()}_mesh_polyline", "memory"
+            )
+            if not output.isValid():
+                raise ValueError("QGIS could not create a temporary line layer")
+            output.setCrs(source_layer.crs())
+            feature = QgsFeature(output.fields())
+            feature.setGeometry(geometry)
+            result = output.dataProvider().addFeatures([feature])
+            added = bool(result[0]) if isinstance(result, tuple) else bool(result)
+            if not added or output.featureCount() != 1:
+                raise RuntimeError("The memory provider did not save the line feature")
+            output.updateExtents()
+            project = QgsProject.instance()
+            added_layer = project.addMapLayer(output)
+            if added_layer is None or added_layer is False:
+                raise RuntimeError("QGIS could not add the temporary line layer to the project")
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Temporary mesh polyline created: {output.name()}",
+            )
+            return True
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self._warn_mesh_polyline_capture(
+                f"Could not create mesh polyline: {exc}"
+            )
+            return False
+
+    def _warn_mesh_polyline_capture(self, message):
+        self.iface.messageBar().pushWarning("Delft3D File Manager", str(message))
+
+    def _mesh_polyline_capture_closed(self):
+        self._mesh_polyline_map_tool = None
+        self._mesh_polyline_previous_map_tool = None
+        self._mesh_polyline_source_layer = None
 
     @staticmethod
     def _mesh_vertex_coordinate(vertex, coordinate):

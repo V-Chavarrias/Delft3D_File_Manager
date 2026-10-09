@@ -1,9 +1,8 @@
 ---
-name: Feature Delivery
-description: "Implement new plugin functionality with mandatory README, metadata/changelog, tests, and passing testbench"
+name: feature-delivery
+description: Implement new plugin functionality with mandatory README, metadata/changelog, tests, and passing testbench
+disable-model-invocation: true
 argument-hint: "Describe the feature to add or modify"
-agent: "Feature Delivery Agent"
-model: "GPT-5.3-Codex"
 ---
 Implement the requested plugin functionality end-to-end.
 

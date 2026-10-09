@@ -37,6 +37,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Creates trachytope point layers from UGRID mesh edge coordinates, updates values inside polygons, and exports `.arl` files.
 - Creates bridge and fixed-weir point layers from polyline vertices with editable default attributes.
 - Creates 1D network UGRID NetCDF files from branch polylines with optional snapped special points, diagnostics, and logs.
+- Creates a temporary polyline routed along the active mesh's cell edges.
 
 ## Menu Structure
 
@@ -61,13 +62,31 @@ The plugin menu contains these actions in order. The links point to the correspo
 9. [Create Bridge Points from Polyline](#create-bridge-points-from-polyline)
 10. [Create Fixed-Weir Points from Polyline](#fixed-weir-points-from-polyline)
 11. [Create 1D Network](#create-1d-network)
-12. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
-13. [Export Trachytopes (.arl)](#export-trachytopes-arl)
-14. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
+12. [Create Polyline from Mesh](#create-polyline-from-mesh)
+13. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
+14. [Export Trachytopes (.arl)](#export-trachytopes-arl)
+15. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
 
 The **Open Guide** action displays this README in a Qt window. The build packages a copy of this file with the plugin so the guide is available offline.
 
 The existing actions outside the two submenus remain top-level actions and keep their existing behavior.
+
+## Create Polyline from Mesh
+
+Use **Create Polyline from Mesh** with the intended 2D mesh layer active. Only that layer's native mesh topology is used; partition siblings are never joined. A valid mesh CRS and readable native face topology are required.
+
+Workflow:
+1. Start **Create Polyline from Mesh**. The map tool builds the active mesh's edge graph and snapping index once for the capture.
+2. Left-click to select the nearest mesh corner, then click further corners. Each click snaps in displayed canvas coordinates and appends the shortest physical-distance route along cell edges, including every intermediate mesh corner.
+3. Right-click to finish and create one temporary line feature in the mesh CRS. Use the existing **Export** action to save it to a supported line format.
+
+Controls and behavior:
+- Backspace removes the complete route added by the last accepted click; undoing the first click clears the start.
+- Esc cancels without creating a layer. Changing map tools, removing the source mesh, or unloading the plugin also cancels and cleans up the draft.
+- Clicking the current endpoint does nothing. An unreachable corner produces a warning and leaves the current route and undo history unchanged.
+- Snapping uses Euclidean distance in the canvas CRS (the displayed map coordinate space), with ties resolved by the lowest source mesh node ID. There is no snap-radius limit.
+- Edge routing uses metre-based ellipsoidal lengths, measured with the mesh CRS's declared ellipsoid; if that CRS declares none, the QGIS project ellipsoid is used. If neither is available, capture does not start.
+- The output layer is temporary and contains one feature. All intermediate cell-edge vertices are retained for export.
 
 ## Install Python Dependencies
 
@@ -926,6 +945,11 @@ Security guardrails (for contributors and coding agents):
 - Prefer in-process Python APIs (for example `pip` or `ensurepip`) over spawning external commands.
 - Keep package installation restricted to the internal allowlist (`self._required_packages`) and never pass user-controlled strings into command execution.
 - If process execution is absolutely required in future work, use strict allowlists, argument lists (never shell strings), and document the threat model in the pull request.
+
+Test:
+```bash
+python -m pytest
+```
 
 Build:
 ```bash
