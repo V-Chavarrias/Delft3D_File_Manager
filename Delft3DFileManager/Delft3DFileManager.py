@@ -22,7 +22,7 @@ from qgis.core import (
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol,
     QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange,
-    QgsCoordinateTransform, QgsDistanceArea, QgsUnitTypes,
+    QgsCoordinateTransform, QgsDistanceArea,
 )
 from qgis.PyQt.QtCore import (
     QDateTime,
@@ -1265,7 +1265,6 @@ class Delft3DFileManager:
                     "Set a valid project ellipsoid or use a mesh CRS with a declared ellipsoid"
                 )
             distance_area.setEllipsoid(ellipsoid)
-            distance_area.setLengthUnits(QgsUnitTypes.DistanceMeters)
             if not distance_area.willUseEllipsoid():
                 raise ValueError(f"Could not configure ellipsoid {ellipsoid!r}")
 

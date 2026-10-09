@@ -1,4 +1,7 @@
+import importlib
 import math
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -159,3 +162,53 @@ def test_plugin_rejects_invalid_mesh_crs_before_capture(plugin, monkeypatch):
     assert plugin.create_polyline_from_mesh() is None
     warning = plugin.iface.messageBar().pushWarning.call_args.args[1]
     assert "invalid coordinate reference system" in warning
+
+
+def test_plugin_starts_capture_without_distance_area_length_units(plugin, monkeypatch):
+    plugin_module = importlib.import_module("Delft3DFileManager.Delft3DFileManager")
+    layer = MagicMock()
+    layer.isValid.return_value = True
+    layer.crs.return_value.isValid.return_value = True
+    layer.crs.return_value.ellipsoidAcronym.return_value = "WGS84"
+    layer.id.return_value = "mesh-layer"
+    plugin.iface.activeLayer.return_value = layer
+    monkeypatch.setattr(plugin, "_is_mesh_layer", lambda active: active is layer)
+    monkeypatch.setattr(plugin, "_native_mesh", lambda active: object())
+    monkeypatch.setattr(
+        plugin,
+        "_mesh_vertices_faces",
+        lambda mesh: ([(0, 0), (1, 0), (0, 1)], [(0, 1, 2)]),
+    )
+
+    class DistanceArea:
+        def setSourceCrs(self, crs, transform_context):
+            self.source_crs = crs
+
+        def setEllipsoid(self, ellipsoid):
+            self.ellipsoid = ellipsoid
+
+        def willUseEllipsoid(self):
+            return True
+
+        def measureLine(self, first, second):
+            return 1.0
+
+    distance_area = DistanceArea()
+    monkeypatch.setattr(plugin_module, "QgsDistanceArea", lambda: distance_area)
+
+    class CaptureTool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "Delft3DFileManager.mesh_polyline_capture",
+        SimpleNamespace(MeshPolylineCaptureTool=CaptureTool),
+    )
+    plugin._mesh_polyline_map_tool = None
+
+    capture = plugin.create_polyline_from_mesh()
+
+    assert isinstance(capture, CaptureTool)
+    assert distance_area.ellipsoid == "WGS84"
+    plugin.iface.messageBar().pushWarning.assert_not_called()

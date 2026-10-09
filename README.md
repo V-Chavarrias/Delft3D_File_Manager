@@ -85,7 +85,7 @@ Controls and behavior:
 - Esc cancels without creating a layer. Changing map tools, removing the source mesh, or unloading the plugin also cancels and cleans up the draft.
 - Clicking the current endpoint does nothing. An unreachable corner produces a warning and leaves the current route and undo history unchanged.
 - Snapping uses Euclidean distance in the canvas CRS (the displayed map coordinate space), with ties resolved by the lowest source mesh node ID. There is no snap-radius limit.
-- Edge routing uses metre-based ellipsoidal lengths, measured with the mesh CRS's declared ellipsoid; if that CRS declares none, the QGIS project ellipsoid is used. If neither is available, capture does not start.
+- Edge routing uses metre-based ellipsoidal lengths, measured with the mesh CRS's declared ellipsoid; if that CRS declares none, the QGIS project ellipsoid is used. If neither is available, capture does not start. QGIS supplies ellipsoidal measurements in metres directly; project display units do not affect routing.
 - The output layer is temporary and contains one feature. All intermediate cell-edge vertices are retained for export.
 
 ## Install Python Dependencies
