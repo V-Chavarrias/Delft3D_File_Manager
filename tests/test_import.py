@@ -165,6 +165,47 @@ def test_route_pliz_fixed_weir(plugin):
     plugin.load_polyline_file.assert_not_called()
 
 
+@pytest.mark.parametrize("column_count", range(5, 10))
+def test_import_fixed_weir_optional_columns(plugin, tmp_path, column_count):
+    source = tmp_path / "summerdikes.pliz"
+    optional_values = [10.0, 4.0, 4.0, 0.0][:column_count - 5]
+    rows = [
+        [546631.361, 2350533.841, 18.560, 2.0, 2.0] + optional_values,
+        [546609.960, 2350289.297, 18.198, 2.0, 2.0] + optional_values,
+    ]
+    source.write_text(
+        f"TuTrung\n2 {column_count}\n"
+        + "\n".join(" ".join(str(value) for value in row) for row in rows),
+        encoding="utf-8",
+    )
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QgsFeature") as feature, patch(
+        "Delft3DFileManager.Delft3DFileManager.QgsProject"
+    ) as project, patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as message_box:
+        plugin.load_file_by_extension(str(source))
+
+        message_box.warning.assert_not_called()
+        assert project.instance.return_value.addMapLayer.call_count == 2
+        assert feature.return_value.setAttributes.call_args_list == [
+            ((["TuTrung"] + row[2:] + [None] * (9 - column_count),),)
+            for row in rows
+        ] + [((["TuTrung"],),)]
+
+
+def test_import_fixed_weir_rejects_missing_required_value(plugin, tmp_path):
+    source = tmp_path / "incomplete.pliz"
+    source.write_text("TuTrung\n1 5\n546631.361 2350533.841 18.560 2.000\n", encoding="utf-8")
+
+    with patch("Delft3DFileManager.Delft3DFileManager.QgsProject") as project, patch(
+        "Delft3DFileManager.Delft3DFileManager.QMessageBox"
+    ) as message_box:
+        plugin.load_fixed_weir_file(str(source))
+
+        project.instance.return_value.addMapLayer.assert_not_called()
+        message_box.warning.assert_called_once()
+        assert "fewer than 5 values" in message_box.warning.call_args.args[2]
+
+
 def test_route_pliz_polyline(plugin):
     plugin.load_fixed_weir_file = MagicMock()
     plugin.load_polyline_file = MagicMock()
@@ -1229,9 +1270,10 @@ def test_export_bridge_pliz_from_point_layer_case_insensitive_fields(plugin, tmp
     assert lines[3] == "120010.000000 450010.000000 2.750000 0.950000"
 
 
-def test_load_fixed_weir_file_invalid_column_count_warns(plugin, tmp_path):
+@pytest.mark.parametrize("column_count", [4, 10])
+def test_load_fixed_weir_file_invalid_column_count_warns(plugin, tmp_path, column_count):
     bad = tmp_path / "bad_fixed_weir.pliz"
-    bad.write_text("weir_a:\n2 8\n0 0 1 0 0 10 4 4\n1 1 1 0 0 10 4 4\n", encoding="utf-8")
+    bad.write_text(f"weir_a:\n1 {column_count}\n" + "0 " * column_count + "\n", encoding="utf-8")
 
     with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
         plugin.load_fixed_weir_file(str(bad))

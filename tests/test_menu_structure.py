@@ -58,12 +58,13 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
 
     registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
-    assert registered[:3] == [
+    assert registered[:4] == [
         plugin.install_deps_action,
+        plugin.open_guide_action,
         plugin.viewer_menu.menuAction(),
         plugin.compute_2d_variables_menu.menuAction(),
     ]
-    assert registered[3:] == [
+    assert registered[4:] == [
         plugin.import_action,
         plugin.export_action,
         plugin.bed_level_action,
@@ -91,4 +92,5 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     removed = [entry.args[1] for entry in iface.removePluginMenu.call_args_list]
     assert plugin.viewer_menu.menuAction() in removed
     assert plugin.compute_2d_variables_menu.menuAction() in removed
+    assert plugin.open_guide_action in removed
     assert plugin.boundary_conditions_action not in removed

@@ -50,20 +50,33 @@ def mesh_edge_crossings(node_x, node_y, face_nodes, polyline, tolerance=1e-9):
     hits are deduplicated, while the returned chainage remains ordered along
     the drawn polyline.
     """
+    import numpy as np
+
     coordinates = [(float(x), float(y)) for x, y in zip(node_x, node_y)]
     line = [(float(point[0]), float(point[1])) for point in (polyline or [])]
     if len(coordinates) == 0 or len(line) < 2:
         return []
 
     chainage = cumulative_chainage(line)
-    edges = set()
-    for face in face_nodes:
-        valid_nodes = [int(index) for index in face if 0 <= int(index) < len(coordinates)]
-        if len(valid_nodes) < 2:
-            continue
-        for start, end in zip(valid_nodes, valid_nodes[1:] + valid_nodes[:1]):
-            if start != end:
-                edges.add(tuple(sorted((start, end))))
+    faces = np.asarray(face_nodes, dtype=int)
+    if faces.ndim != 2 or faces.shape[1] < 2:
+        return []
+    starts = faces
+    ends = np.roll(faces, -1, axis=1)
+    valid_edges = (
+        (starts >= 0) & (starts < len(coordinates)) &
+        (ends >= 0) & (ends < len(coordinates)) &
+        (starts != ends)
+    )
+    edges = np.column_stack((starts[valid_edges], ends[valid_edges]))
+    if len(edges) == 0:
+        return []
+    edges.sort(axis=1)
+    edges = np.unique(edges, axis=0)
+    coordinate_array = np.asarray(coordinates, dtype=float)
+    edge_start = coordinate_array[edges[:, 0]]
+    edge_end = coordinate_array[edges[:, 1]]
+    edge_direction = edge_end - edge_start
 
     def point_inside_face(point, face):
         vertices = [coordinates[int(index)] for index in face if 0 <= int(index) < len(coordinates)]
@@ -79,54 +92,54 @@ def mesh_edge_crossings(node_x, node_y, face_nodes, polyline, tolerance=1e-9):
             previous = current
         return inside
 
-    def cross(first, second):
-        return first[0] * second[1] - first[1] * second[0]
-
-    def subtract(first, second):
-        return (first[0] - second[0], first[1] - second[1])
-
     hits = []
-    # A line can be entirely contained in one face. Such a valid slice has no
-    # edge crossing, so retain its clicked vertices as exact face samples.
-    for line_index, point in enumerate(line):
-        if any(point_inside_face(point, face) for face in face_nodes):
-            hits.append((chainage[line_index], point))
-
     for line_index, (line_start, line_end) in enumerate(zip(line, line[1:])):
-        direction = subtract(line_end, line_start)
-        segment_length = math.hypot(direction[0], direction[1])
+        direction = np.asarray(line_end, dtype=float) - np.asarray(line_start, dtype=float)
+        segment_length = float(np.hypot(direction[0], direction[1]))
         if segment_length <= tolerance:
             continue
-        for edge_start_index, edge_end_index in edges:
-            edge_start = coordinates[edge_start_index]
-            edge_end = coordinates[edge_end_index]
-            edge_direction = subtract(edge_end, edge_start)
-            denominator = cross(direction, edge_direction)
-            offset = subtract(edge_start, line_start)
 
-            if abs(denominator) <= tolerance:
-                if abs(cross(offset, direction)) > tolerance:
-                    continue
-                for candidate in (edge_start, edge_end):
-                    parameter = ((candidate[0] - line_start[0]) * direction[0] +
-                                 (candidate[1] - line_start[1]) * direction[1]) / (segment_length ** 2)
-                    if -tolerance <= parameter <= 1.0 + tolerance:
-                        parameter = min(1.0, max(0.0, parameter))
-                        hits.append((chainage[line_index] + parameter * segment_length, candidate))
-                continue
+        offset = edge_start - np.asarray(line_start, dtype=float)
+        denominator = direction[0] * edge_direction[:, 1] - direction[1] * edge_direction[:, 0]
+        nonparallel = np.abs(denominator) > tolerance
+        if np.any(nonparallel):
+            line_parameter = np.full(len(edges), np.nan, dtype=float)
+            edge_parameter = np.full(len(edges), np.nan, dtype=float)
+            line_parameter[nonparallel] = (
+                edge_direction[nonparallel, 1] * offset[nonparallel, 0] -
+                edge_direction[nonparallel, 0] * offset[nonparallel, 1]
+            ) / denominator[nonparallel]
+            edge_parameter[nonparallel] = (
+                direction[1] * offset[nonparallel, 0] -
+                direction[0] * offset[nonparallel, 1]
+            ) / denominator[nonparallel]
+            crossing = (
+                nonparallel &
+                (line_parameter >= -tolerance) & (line_parameter <= 1.0 + tolerance) &
+                (edge_parameter >= -tolerance) & (edge_parameter <= 1.0 + tolerance)
+            )
+            for parameter in np.clip(line_parameter[crossing], 0.0, 1.0):
+                point = np.asarray(line_start, dtype=float) + parameter * direction
+                hits.append((chainage[line_index] + parameter * segment_length, tuple(point)))
 
-            line_parameter = cross(offset, edge_direction) / denominator
-            edge_parameter = cross(offset, direction) / denominator
-            if (-tolerance <= line_parameter <= 1.0 + tolerance and
-                    -tolerance <= edge_parameter <= 1.0 + tolerance):
-                line_parameter = min(1.0, max(0.0, line_parameter))
-                hits.append((
-                    chainage[line_index] + line_parameter * segment_length,
-                    (
-                        line_start[0] + line_parameter * direction[0],
-                        line_start[1] + line_parameter * direction[1],
-                    ),
-                ))
+        parallel = ~nonparallel
+        if np.any(parallel):
+            collinear = np.abs(offset[parallel, 0] * direction[1] - offset[parallel, 1] * direction[0]) <= tolerance
+            parallel_edges = edges[parallel][collinear]
+            for candidate_index in parallel_edges.reshape(-1):
+                candidate = coordinate_array[int(candidate_index)]
+                parameter = float(np.dot(candidate - line_start, direction) / (segment_length ** 2))
+                if -tolerance <= parameter <= 1.0 + tolerance:
+                    parameter = min(1.0, max(0.0, parameter))
+                    point = np.asarray(line_start, dtype=float) + parameter * direction
+                    hits.append((chainage[line_index] + parameter * segment_length, tuple(point)))
+
+    if not hits:
+        # A line can be entirely contained in one face. Such a valid slice has no
+        # edge crossing, so retain its clicked vertices as exact face samples.
+        for line_index, point in enumerate(line):
+            if any(point_inside_face(point, face) for face in face_nodes):
+                hits.append((chainage[line_index], point))
 
     unique = {}
     for distance, point in hits:

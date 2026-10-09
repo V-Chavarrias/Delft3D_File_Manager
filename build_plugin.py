@@ -8,6 +8,7 @@ PACKAGE_NAME = "Delft3D_File_Manager"
 METADATA_FILE = os.path.join(PLUGIN_FOLDER, "metadata.txt")
 ROOT_LICENSE_FILE = "LICENSE"
 PLUGIN_LICENSE_FILE = os.path.join(PLUGIN_FOLDER, "LICENSE")
+ROOT_README_FILE = "README.md"
 
 def get_version(metadata_path):
     """Read version from metadata.txt"""
@@ -30,6 +31,12 @@ def zipdir(path, ziph):
             arcname = os.path.relpath(file_path, os.path.dirname(PLUGIN_FOLDER))
             ziph.write(file_path, arcname)
 
+def add_readme_to_archive(ziph, readme_path=ROOT_README_FILE):
+    """Package the repository guide at the plugin root."""
+    if not os.path.isfile(readme_path):
+        raise FileNotFoundError(f"Required guide not found: {readme_path}")
+    ziph.write(readme_path, f"{PLUGIN_FOLDER}/README.md")
+
 if __name__ == "__main__":
     version = get_version(METADATA_FILE)
     output_zip = f"{PACKAGE_NAME}_v{version}.zip"
@@ -45,5 +52,6 @@ if __name__ == "__main__":
 
     with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
         zipdir(PLUGIN_FOLDER, zipf)
+        add_readme_to_archive(zipf)
 
     print(f"✅ Plugin ZIP created: {output_zip}")

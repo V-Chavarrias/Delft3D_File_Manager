@@ -13,6 +13,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QMenu,
     QProgressDialog,
+    QTextBrowser,
     QVBoxLayout,
 )
 from qgis.PyQt.QtGui import QIcon, QColor
@@ -462,6 +463,8 @@ class Delft3DFileManager:
         self.update_trachytopes_action = None
         self.export_trachytopes_action = None
         self.install_deps_action = None
+        self.open_guide_action = None
+        self._guide_dialog = None
         self.viewer_menu = None
         self.compute_2d_variables_menu = None
         self.boundary_conditions_action = None
@@ -533,6 +536,15 @@ class Delft3DFileManager:
         )
         self.install_deps_action.triggered.connect(self.install_dependencies)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.install_deps_action)
+
+        self.open_guide_action = QAction(
+            QIcon(icon_path), "Open Guide", self.iface.mainWindow()
+        )
+        self.open_guide_action.setStatusTip(
+            "Open the Delft3D File Manager user guide"
+        )
+        self.open_guide_action.triggered.connect(self.open_guide)
+        self.iface.addPluginToMenu("&Delft3D File Manager", self.open_guide_action)
 
         self.viewer_menu = QMenu("Viewer", self.iface.mainWindow())
         self.iface.addPluginToMenu(
@@ -750,6 +762,8 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_pointcloud_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
+        if self.open_guide_action:
+            self.iface.removePluginMenu("&Delft3D File Manager", self.open_guide_action)
         if self.viewer_menu:
             self.iface.removePluginMenu(
                 "&Delft3D File Manager", self.viewer_menu.menuAction()
@@ -764,6 +778,35 @@ class Delft3DFileManager:
         self._disconnect_canvas_double_click()
         self._stop_one_d_results_selection()
         self._clear_one_d_results_overlay()
+
+    def open_guide(self):
+        """Display the packaged README guide in a Qt window."""
+        guide_path = os.path.join(os.path.dirname(__file__), "README.md")
+        try:
+            with open(guide_path, "r", encoding="utf-8") as guide_file:
+                guide_text = guide_file.read()
+        except OSError as exc:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Guide unavailable",
+                f"The user guide could not be opened:\n{exc}",
+            )
+            return
+
+        dialog = QDialog(self.iface.mainWindow())
+        dialog.setWindowTitle("Delft3D File Manager Guide")
+        dialog.resize(900, 700)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        set_markdown = getattr(browser, "setMarkdown", None)
+        if callable(set_markdown):
+            set_markdown(guide_text)
+        else:
+            browser.setPlainText(guide_text)
+        layout.addWidget(browser)
+        self._guide_dialog = dialog
+        dialog.show()
 
     def compute_stream_function(self):
         """Create a time-dependent node streamfunction mesh from q1 output."""
@@ -1464,13 +1507,13 @@ class Delft3DFileManager:
                 self.load_polyline_file(filepath)
             elif column_count == 4:
                 self.load_bridge_file(filepath)
-            elif column_count == 9:
+            elif column_count in range(5, 10):
                 self.load_fixed_weir_file(filepath)
             else:
                 QMessageBox.warning(
                     self.iface.mainWindow(),
                     "Delft3D File Manager",
-                    "Unsupported .pliz header column count. Expected 2 (polyline), 4 (bridge), or 9 (fixed-weir).",
+                    "Unsupported .pliz header column count. Expected 2 (polyline), 4 (bridge), or 5-9 (fixed-weir).",
                 )
         elif ext_lower in [".pli", ".ldb", ".spl", ".pol"]:
             self.load_polyline_file(filepath)
@@ -5621,6 +5664,7 @@ class Delft3DFileManager:
 
     def _parse_pliz_blocks(self, filepath, expected_columns, block_label):
         """Parse PLIZ-like blocks and return a list of (name, rows) pairs."""
+        allowed_columns = (expected_columns,) if isinstance(expected_columns, int) else expected_columns
         lines = self._read_non_empty_lines(filepath)
         if not lines:
             QMessageBox.warning(
@@ -5665,11 +5709,12 @@ class Delft3DFileManager:
                 )
                 return None
 
-            if ncols != expected_columns:
+            if ncols not in allowed_columns:
+                expected_description = ", ".join(str(count) for count in allowed_columns)
                 QMessageBox.warning(
                     self.iface.mainWindow(),
                     "Delft3D File Manager",
-                    f"Malformed {block_label} file: block '{block_name}' expected {expected_columns} columns but found {ncols}.",
+                    f"Malformed {block_label} file: block '{block_name}' expected {expected_description} columns but found {ncols}.",
                 )
                 return None
 
@@ -5685,16 +5730,16 @@ class Delft3DFileManager:
                     return None
 
                 parts = lines[i].split()
-                if len(parts) < expected_columns:
+                if len(parts) < ncols:
                     QMessageBox.warning(
                         self.iface.mainWindow(),
                         "Delft3D File Manager",
-                        f"Malformed file: block '{block_name}' row {row_idx+1} has fewer than {expected_columns} values.",
+                        f"Malformed file: block '{block_name}' row {row_idx+1} has fewer than {ncols} values.",
                     )
                     return None
 
                 try:
-                    rows.append([float(value) for value in parts[:expected_columns]])
+                    rows.append([float(value) for value in parts[:ncols]])
                 except ValueError as exc:
                     QMessageBox.warning(
                         self.iface.mainWindow(),
@@ -5791,7 +5836,7 @@ class Delft3DFileManager:
         point_pr.addAttributes(point_fields)
         point_layer.updateFields()
 
-        blocks = self._parse_pliz_blocks(filepath, expected_columns=9, block_label="fixed-weir")
+        blocks = self._parse_pliz_blocks(filepath, expected_columns=range(5, 10), block_label="fixed-weir")
         if blocks is None:
             return
 
@@ -5801,7 +5846,7 @@ class Delft3DFileManager:
             for row in rows:
                 x_coord = row[0]
                 y_coord = row[1]
-                vals = row[2:]
+                vals = row[2:] + [None] * (9 - len(row))
                 pts.append(QgsPointXY(x_coord, y_coord))
 
                 point_feat = QgsFeature()

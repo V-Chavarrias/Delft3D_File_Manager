@@ -43,26 +43,29 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 The plugin menu contains these actions in order. The links point to the corresponding sections below.
 
 1. [Install Python Dependencies](#install-python-dependencies)
-2. [Viewer](#viewer)
+2. [Open Guide](#menu-structure)
+3. [Viewer](#viewer)
 	- [Cross-Section](#cross-section-and-boundary-conditions-viewer)
 	- [HIS Time Series](#his-time-series-explorer)
 	- [1D MAP](#1d-map)
 	- [2D Slice](#2d-slice)
 	- [Boundary Conditions](#cross-section-and-boundary-conditions-viewer)
-3. [Compute 2D Variables](#compute-2d-variables)
+4. [Compute 2D Variables](#compute-2d-variables)
 	- [Froude Number](#froude-number)
 	- [Streamfunction](#streamfunction)
 	- [Mesh Properties](#mesh-properties)
-4. [Import](#file-import)
-5. [Export](#export)
-6. [Write Bed Level to Mesh](#bed-level-to-mesh)
-7. [Create Trachytopes from Mesh](#trachytopes-from-mesh)
-8. [Create Bridge Points from Polyline](#bridge-points-from-polyline)
-9. [Create Fixed-Weir Points from Polyline](#fixed-weir-points-from-polyline)
-10. [Create 1D Network](#create-1d-network)
-11. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
-12. [Export Trachytopes (.arl)](#export-trachytopes-arl)
-13. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
+5. [Import](#file-import)
+6. [Export](#export)
+7. [Write Bed Level to Mesh](#bed-level-to-mesh)
+8. [Create Trachytopes from Mesh](#trachytopes-from-mesh)
+9. [Create Bridge Points from Polyline](#create-bridge-points-from-polyline)
+10. [Create Fixed-Weir Points from Polyline](#fixed-weir-points-from-polyline)
+11. [Create 1D Network](#create-1d-network)
+12. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
+13. [Export Trachytopes (.arl)](#export-trachytopes-arl)
+14. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
+
+The **Open Guide** action displays this README in a Qt window. The build packages a copy of this file with the plugin so the guide is available offline.
 
 The existing actions outside the two submenus remain top-level actions and keep their existing behavior.
 
@@ -266,7 +269,7 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 - `1dfield`: places branch value points from `chainage`/`values` arrays.
 - `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
 
-### Import: Fixed Weir (`.fxw`, `.pliz` with 9 columns)
+### Import: Fixed Weir (`.fxw`, `.pliz` with 5-9 columns)
 
 Parse a fixed-weir text file into two memory layers:
 - a line layer containing one polyline per weir
@@ -285,6 +288,10 @@ Each weir block is read in this structure:
 	 - left slope
 	 - right slope
 	 - roughness coefficient
+
+The first five columns (X, Y, crest level, and left/right sill heights) are required.
+Trailing columns may be omitted; their corresponding point attributes are left null.
+Each row must contain at least the number of values declared in its block header.
 
 #### Output Layers
 - `<file_name>_lines` (LineString, EPSG:28992)
@@ -312,7 +319,7 @@ Each polyline block is read in this structure:
 When loading a `.pliz` file, the plugin reads the block header line and checks the declared number of columns:
 - If the header column count is `2`, the file is loaded as a polyline.
 - If the header column count is `4`, the file is loaded as a bridge file.
-- If the header column count is `9`, the file is loaded as a fixed weir.
+- If the header column count is `5` through `9`, the file is loaded as a fixed weir.
 - Other column counts are rejected with a warning.
 
 ### Import: Bridge (`.pliz` with 4 columns)
