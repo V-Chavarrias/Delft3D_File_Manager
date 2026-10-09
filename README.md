@@ -78,12 +78,15 @@ Use **Create Polyline from Mesh** with the intended 2D mesh layer active. Only t
 Workflow:
 1. Start **Create Polyline from Mesh**. The map tool builds the active mesh's edge graph and snapping index once for the capture.
 2. Left-click to select the nearest mesh corner, then click further corners. Each click snaps in displayed canvas coordinates and appends the shortest physical-distance route along cell edges, including every intermediate mesh corner.
+   After the first click, moving the mouse shows the proposed route in yellow; clicked routes remain blue. Left-click to accept the proposed endpoint.
 3. Right-click to finish and create one temporary line feature in the mesh CRS. Use the existing **Export** action to save it to a supported line format.
 
 Controls and behavior:
 - Backspace removes the complete route added by the last accepted click; undoing the first click clears the start.
 - Esc cancels without creating a layer. Changing map tools, removing the source mesh, or unloading the plugin also cancels and cleans up the draft.
 - Clicking the current endpoint does nothing. An unreachable corner produces a warning and leaves the current route and undo history unchanged.
+- The hover preview never changes the saved route or undo history; right-click saves only clicked segments. Hovering an unreachable corner clears the preview and warns once until the hovered corner changes.
+- Preview routes are recalculated only when the snapped corner or clicked endpoint changes. Long routes on very large meshes can still take time to calculate.
 - Snapping uses Euclidean distance in the canvas CRS (the displayed map coordinate space), with ties resolved by the lowest source mesh node ID. There is no snap-radius limit.
 - Edge routing uses metre-based ellipsoidal lengths, measured with the mesh CRS's declared ellipsoid; if that CRS declares none, the QGIS project ellipsoid is used. If neither is available, capture does not start. QGIS supplies ellipsoidal measurements in metres directly; project display units do not affect routing.
 - The output layer is temporary and contains one feature. All intermediate cell-edge vertices are retained for export.

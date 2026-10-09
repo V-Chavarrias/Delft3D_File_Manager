@@ -1324,7 +1324,8 @@ class Delft3DFileManager:
                 raise
             self.iface.messageBar().pushInfo(
                 "Delft3D File Manager",
-                "Click mesh corners to route along cell edges. Right-click finishes; "
+                "Click mesh corners to route along cell edges; move the mouse to preview. "
+                "Right-click finishes; "
                 "Backspace undoes the last clicked segment; Esc cancels.",
             )
             return tool

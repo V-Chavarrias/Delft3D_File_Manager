@@ -4,6 +4,7 @@ import math
 import sys
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.core import QgsPointXY, QgsRectangle, QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
 
@@ -44,6 +45,14 @@ class MeshPolylineCaptureTool(QgsMapTool):
         self.on_warning = on_warning
         self.line_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
         self.corner_band = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
+        self.preview_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
+        self.line_band.setColor(QColor(38, 139, 210, 230))
+        self.line_band.setWidth(3)
+        self.corner_band.setColor(QColor(38, 139, 210, 230))
+        self.corner_band.setWidth(6)
+        self.preview_band.setColor(QColor(255, 193, 7, 230))
+        self.preview_band.setWidth(3)
+        self._preview_key = None
         self._cleaning = False
 
         from qgis.core import QgsProject
@@ -59,22 +68,51 @@ class MeshPolylineCaptureTool(QgsMapTool):
         if button != _qt_enum(Qt, "MouseButton", "LeftButton"):
             return
         try:
-            event_position = getattr(event, "position", None)
-            event_position = event_position() if callable(event_position) else None
-            if event_position is None:
-                event_position = event.pos()
-            else:
-                to_point = getattr(event_position, "toPoint", None)
-                if callable(to_point):
-                    event_position = to_point()
-            map_point = self.canvas.toMapCoordinates(event_position)
+            map_point = self._map_point(event)
             node = self._nearest_corner(map_point)
             self.draft.append_corner(node)
+            self._clear_preview()
             self._redraw()
         except UnreachableCornerError as exc:
             self.on_warning(str(exc))
         except (AttributeError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
             self.on_warning(f"Could not snap to a mesh corner: {exc}")
+
+    def _map_point(self, event):
+        event_position = getattr(event, "position", None)
+        event_position = event_position() if callable(event_position) else None
+        if event_position is None:
+            event_position = event.pos()
+        else:
+            to_point = getattr(event_position, "toPoint", None)
+            if callable(to_point):
+                event_position = to_point()
+        transform = self.canvas.getCoordinateTransform()
+        return transform.toMapCoordinates(event_position.x(), event_position.y())
+
+    def canvasMoveEvent(self, event):
+        if not self.draft.nodes:
+            return
+        try:
+            node = self._nearest_corner(self._map_point(event))
+            key = (self.draft.nodes[-1], node)
+            if key == self._preview_key:
+                return
+            self._clear_preview()
+            self._preview_key = key
+            if key[0] == node:
+                return
+            route = self.graph.shortest_path(key[0], node)
+            self._draw_band(self.preview_band, QgsWkbTypes.LineGeometry, route)
+        except UnreachableCornerError as exc:
+            self.on_warning(str(exc))
+        except (AttributeError, OverflowError, RuntimeError, TypeError, ValueError) as exc:
+            self._clear_preview()
+            self.on_warning(f"Could not preview the mesh route: {exc}")
+
+    def _clear_preview(self):
+        self._preview_key = None
+        self.preview_band.reset(QgsWkbTypes.LineGeometry)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -82,6 +120,7 @@ class MeshPolylineCaptureTool(QgsMapTool):
             self.cancel()
         elif key == _qt_enum(Qt, "Key", "Key_Backspace"):
             self.draft.undo()
+            self._clear_preview()
             self._redraw()
 
     def deactivate(self):
@@ -129,14 +168,17 @@ class MeshPolylineCaptureTool(QgsMapTool):
         return min(distances, key=lambda item: (item[0], item[1]))[1]
 
     def _redraw(self):
-        self.line_band.reset(QgsWkbTypes.LineGeometry)
-        self.corner_band.reset(QgsWkbTypes.PointGeometry)
-        for node in self.draft.nodes:
-            point = self.display_coordinates[node]
-            self.line_band.addPoint(point, False)
-            self.corner_band.addPoint(point, False)
-        self.line_band.updatePosition()
-        self.corner_band.updatePosition()
+        self._draw_band(self.line_band, QgsWkbTypes.LineGeometry, self.draft.nodes)
+        self._draw_band(self.corner_band, QgsWkbTypes.PointGeometry, self.draft.nodes)
+
+    def _draw_band(self, band, geometry_type, nodes):
+        band.reset(geometry_type)
+        for node in nodes:
+            band.addPoint(self.display_coordinates[node], False)
+        if nodes:
+            band.updatePosition()
+            band.show()
+            band.update()
 
     def finish(self):
         if not self.draft.can_finish():
@@ -167,6 +209,7 @@ class MeshPolylineCaptureTool(QgsMapTool):
         self._cleaning = True
         try:
             self.project.layersWillBeRemoved.disconnect(self._layers_will_be_removed)
+            self._clear_preview()
             self.line_band.reset(QgsWkbTypes.LineGeometry)
             self.corner_band.reset(QgsWkbTypes.PointGeometry)
             if restore and self.canvas.mapTool() is self:
