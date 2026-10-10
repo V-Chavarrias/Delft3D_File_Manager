@@ -21,7 +21,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports external-forcing link files (`.ext`) as spatial boundary/lateral features and boundary-condition forcing files (`.bc`) as timeseries records linked to those features.
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
-- Detects morphodynamic NetCDF variables with extra dimensions and offers flattenable variables for side-car creation.
+- Detects morphodynamic NetCDF variables with extra dimensions and offers flattenable variables, including cumulative bed level change relative to the initial `mor_bl`, for side-car creation.
 - Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
 - Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
 - Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
@@ -406,7 +406,7 @@ All three columns must be numeric and whitespace-separated.
 Load UGRID-format NetCDF files containing 1D and/or 2D computational mesh components.
 The plugin automatically detects and creates separate layers for each component found.
 
-When a UGRID file contains morphodynamic variables with extra dimensions (for example sediment fraction or bed layer dimensions), the plugin prompts for which non-topology data variables to include. It then creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens extra dimensions into additional variables, and loads that flattened mesh file in QGIS.
+When a UGRID file contains morphodynamic variables with extra dimensions (for example sediment fraction or bed layer dimensions), the plugin prompts for which non-topology data variables to include. If `mor_bl` is available, **Cumulative bed level change** appears first and is selected by default; its `mesh2d_mor_bl_change` field contains each time-varying bed level minus the initial bed level at that mesh location. The plugin creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens extra dimensions into additional variables, and loads that flattened mesh file in QGIS. The same calculation is applied independently to each partition.
 
 For large datasets, the plugin now shows a live progress bar (plus status text) during analysis, flattening, and layer loading.
 

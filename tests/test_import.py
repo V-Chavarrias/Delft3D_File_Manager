@@ -25,6 +25,7 @@ CSD_01 = DATA_DIR / "csd.ini"
 GRID_01 = DATA_DIR / "grd_net.nc"
 DATA_1D2D = DATA_DIR / "1d2d.nc"
 MORPHO_01 = DATA_DIR / "morpho_small.nc"
+SUBSTRATE_FLATTEN_01 = DATA_DIR / "synthetic_substrate_flatten.nc"
 MIXED_1D2D_01 = DATA_DIR / "mixed_1d2d_small.nc"
 BRIDGES_01 = DATA_DIR / "bridges.pliz"
 MODEL_01_DIMR = DATA_DIR / "model_01" / "dimr_config.xml"
@@ -1329,6 +1330,27 @@ def test_load_ugrid_mesh_file_morphodynamic_prompt_only_shows_flattenable_variab
     assert "waterlevel" not in analysis["flattenable_names"]
 
 
+def test_cumulative_bed_level_change_is_first_flatten_option(plugin):
+    class DummyVar:
+        def __init__(self, dimensions, dtype="f8"):
+            self.dimensions = dimensions
+            self.dtype = dtype
+
+    class DummyDataset:
+        variables = {
+            "mesh2d_mor_bl": DummyVar(("time", "mesh2d_nFaces")),
+            "sedfrac": DummyVar(("time", "mesh2d_nFaces", "nSedTot")),
+        }
+
+    analysis = plugin._analyze_ugrid_data_variables(DummyDataset())
+
+    assert analysis["flattenable_names"] == [
+        "Cumulative bed level change",
+        "sedfrac",
+    ]
+    assert analysis["default_selected"][0] == "Cumulative bed level change"
+
+
 def test_analyze_ugrid_data_variables_ignores_non_sediment_extra_dimensions(plugin):
     class DummyVar:
         def __init__(self, dimensions, dtype="f4"):
@@ -1885,11 +1907,8 @@ def test_substrate_variables_preserve_raw_variable_name(plugin, tmp_path):
 
 
 def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
-    source_path = tmp_path / "map.nc"
-    shutil.copyfile(
-        pathlib.Path(__file__).parent.parent / "data_tmp" / "blom_T9_map.nc",
-        source_path,
-    )
+    source_path = tmp_path / "synthetic_substrate_flatten.nc"
+    shutil.copyfile(SUBSTRATE_FLATTEN_01, source_path)
 
     sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
         str(source_path),
@@ -1898,6 +1917,7 @@ def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
 
     with Dataset(sidecar_path, "r") as sidecar:
         assert "mesh2d_mor_bl" in sidecar.variables
+        assert sidecar.variables["mesh2d_mor_bl"][:].tolist() == [[10.0, 11.0]]
         assert any(
             name.startswith("mesh2d_lyrfrac_")
             for name in sidecar.variables
@@ -1906,6 +1926,41 @@ def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
             name.startswith("mesh2d_hidexp_")
             for name in sidecar.variables
         )
+
+
+def test_flatten_sidecars_calculate_cumulative_bed_level_change_for_partitions(plugin, tmp_path):
+    sources = (
+        ("partition_0000.nc", [[10.0, 12.0, 13.0], [20.0, 19.0, 22.0]]),
+        ("partition_0001.nc", [[100.0, 101.0, 105.0], [50.0, 52.0, 49.0]]),
+    )
+    expected = (
+        [[0.0, 2.0, 3.0], [0.0, -1.0, 2.0]],
+        [[0.0, 1.0, 5.0], [0.0, 2.0, -1.0]],
+    )
+
+    for (filename, values), expected_values in zip(sources, expected):
+        source_path = tmp_path / filename
+        with Dataset(str(source_path), "w") as source:
+            source.createDimension("mesh2d_nFaces", 2)
+            source.createDimension("time", 3)
+            bed_level = source.createVariable(
+                "mesh2d_mor_bl",
+                "f8",
+                ("mesh2d_nFaces", "time"),
+            )
+            bed_level.units = "m"
+            bed_level[:] = values
+
+        sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+            str(source_path),
+            ["Cumulative bed level change"],
+        )
+
+        with Dataset(sidecar_path, "r") as sidecar:
+            change = sidecar.variables["mesh2d_mor_bl_change"]
+            assert change[:].tolist() == expected_values
+            assert change.units == "m"
+            assert change.long_name == "Cumulative bed level change from initial bed level"
 
 
 def test_first_loaded_sediment_table_is_used(plugin):

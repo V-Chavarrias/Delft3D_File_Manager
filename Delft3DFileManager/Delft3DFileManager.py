@@ -60,6 +60,8 @@ except ImportError:
 
 
 _IMPORT_PROGRESS_DIALOG_OBJECT_NAME = "Delft3DFileManagerImportProgressDialog"
+_CUMULATIVE_BED_LEVEL_CHANGE_OPTION = "Cumulative bed level change"
+_CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE = "mesh2d_mor_bl_change"
 
 
 def _qt_major_version():
@@ -8850,12 +8852,31 @@ class Delft3DFileManager:
                 has_morphodynamic = True
                 flattenable_names.append(name)
 
+        bed_level_name = self._find_morphodynamic_bed_level_variable(nc_dataset)
+        has_bed_level = bool(
+            bed_level_name
+            and self._is_numeric_netcdf_variable(nc_dataset.variables[bed_level_name])
+        )
+        if has_bed_level:
+            has_morphodynamic = True
+
+        flattenable_names = sorted(flattenable_names)
+        if has_bed_level:
+            flattenable_names.insert(0, _CUMULATIVE_BED_LEVEL_CHANGE_OPTION)
+
         return {
             "candidate_names": sorted(candidate_names),
-            "flattenable_names": sorted(flattenable_names),
-            "default_selected": sorted(flattenable_names),
+            "flattenable_names": flattenable_names,
+            "default_selected": list(flattenable_names),
             "has_morphodynamic": has_morphodynamic,
         }
+
+    def _find_morphodynamic_bed_level_variable(self, nc_dataset):
+        """Return the actual variable name for morphodynamic bed level, if present."""
+        return (
+            self._find_variable_name(nc_dataset, "mesh2d_mor_bl")
+            or self._find_variable_name(nc_dataset, "mor_bl")
+        )
 
     def _is_topology_or_metadata_variable(self, name, variable):
         """Return True when the variable belongs to topology, geometry, or metadata."""
@@ -9028,7 +9049,7 @@ class Delft3DFileManager:
         source_path = os.path.abspath(source_path)
         sidecar_path = os.path.abspath(self._sidecar_flattened_path(source_path))
         source_mtime = str(int(os.path.getmtime(source_path)))
-        signature = "v5|" + "|".join(sorted(selected_variables))
+        signature = "v6|" + "|".join(sorted(selected_variables))
 
         if os.path.exists(sidecar_path):
             try:
@@ -9132,6 +9153,18 @@ class Delft3DFileManager:
                     pass
 
             for selected_name in selected_variables:
+                if selected_name == _CUMULATIVE_BED_LEVEL_CHANGE_OPTION:
+                    bed_level_name = self._find_morphodynamic_bed_level_variable(source_ds)
+                    if bed_level_name is None:
+                        raise RuntimeError(
+                            "Cumulative bed level change was selected, but no mor_bl variable was found."
+                        )
+                    required_variable_names.add(bed_level_name)
+                    required_variable_names.update(
+                        _referenced_variable_tokens(source_ds.variables[bed_level_name])
+                    )
+                    continue
+
                 selected_var = source_ds.variables.get(selected_name)
                 if selected_var is None:
                     continue
@@ -9192,6 +9225,57 @@ class Delft3DFileManager:
             for variable_index, variable_name in enumerate(selected_variables, start=1):
                 if progress_callback is not None:
                     progress_callback(variable_index, total_variables, variable_name)
+
+                if variable_name == _CUMULATIVE_BED_LEVEL_CHANGE_OPTION:
+                    bed_level_name = self._find_morphodynamic_bed_level_variable(source_ds)
+                    if bed_level_name is None:
+                        raise RuntimeError(
+                            "Cumulative bed level change was selected, but no mor_bl variable was found."
+                        )
+
+                    bed_variable = source_ds.variables[bed_level_name]
+                    _ensure_dimensions(bed_variable.dimensions)
+                    fill_value = getattr(bed_variable, "_FillValue", None)
+                    output_dtype = np.result_type(np.dtype(bed_variable.dtype), np.float32)
+                    if fill_value is None:
+                        change_variable = sidecar_ds.createVariable(
+                            _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE,
+                            output_dtype,
+                            bed_variable.dimensions,
+                        )
+                    else:
+                        change_variable = sidecar_ds.createVariable(
+                            _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE,
+                            output_dtype,
+                            bed_variable.dimensions,
+                            fill_value=fill_value,
+                        )
+
+                    for attr_name in bed_variable.ncattrs():
+                        if attr_name in ("_FillValue", "long_name", "standard_name"):
+                            continue
+                        change_variable.setncattr(attr_name, getattr(bed_variable, attr_name))
+                    change_variable.setncattr(
+                        "long_name",
+                        "Cumulative bed level change from initial bed level",
+                    )
+
+                    bed_data = bed_variable[:]
+                    time_axis = next(
+                        (
+                            axis for axis, dim_name in enumerate(bed_variable.dimensions)
+                            if self._is_time_dimension(dim_name)
+                        ),
+                        None,
+                    )
+                    if time_axis is None:
+                        change_data = bed_data - bed_data
+                    else:
+                        initial_bed = np.take(bed_data, 0, axis=time_axis)
+                        change_data = bed_data - np.expand_dims(initial_bed, axis=time_axis)
+                    change_variable[:] = change_data
+                    generated_names.append(_CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE)
+                    continue
 
                 if variable_name not in source_ds.variables:
                     continue

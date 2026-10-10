@@ -12,6 +12,7 @@ Requirements:
 - Update README.md for any user-facing behavior change.
 - Update Delft3DFileManager/metadata.txt changelog and bump version when appropriate.
 - Add or update tests in tests/ that cover new behavior and regressions.
+- Keep reusable test fixtures in `data/` and generated test files in `tmp_path`; never put test data in or depend on `data_tmp/`.
 - Run full testbench with pytest tests/ -v and fix failures.
 
 Return format:
