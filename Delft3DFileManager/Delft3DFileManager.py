@@ -479,6 +479,7 @@ class Delft3DFileManager:
         self.mesh_properties_action = None
         self.stream_function_action = None
         self.froude_action = None
+        self.mesh_difference_action = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -746,6 +747,17 @@ class Delft3DFileManager:
         self.compute_2d_variables_menu.addAction(self.stream_function_action)
         self.compute_2d_variables_menu.addAction(self.mesh_properties_action)
 
+        self.mesh_difference_action = QAction(
+            QIcon(os.path.join(icon_directory, "icon-mesh-difference.svg")),
+            "Mesh Difference", self.iface.mainWindow()
+        )
+        self.mesh_difference_action.setStatusTip(
+            "Subtract matching datasets in two selected mesh layers (A - B)"
+        )
+        self.mesh_difference_action.triggered.connect(self.compute_mesh_difference)
+        self.compute_2d_variables_menu.addAction(self.mesh_difference_action)
+        self.iface.addToolBarIcon(self.mesh_difference_action)
+
         self._connect_canvas_double_click()
 
     def unload(self):
@@ -766,6 +778,8 @@ class Delft3DFileManager:
             self.iface.removeToolBarIcon(self.mesh_profile_action)
         if self.profile_chart_action:
             self.iface.removeToolBarIcon(self.profile_chart_action)
+        if self.mesh_difference_action:
+            self.iface.removeToolBarIcon(self.mesh_difference_action)
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
@@ -953,6 +967,71 @@ class Delft3DFileManager:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
                 f"Could not compute Froude number: {exc}",
+            )
+            return None
+
+    def compute_mesh_difference(self):
+        """Compare all matching datasets in two selected native 2D meshes."""
+        selected = list(self.iface.layerTreeView().selectedLayers())
+        if len(selected) != 2 or any(
+            not self._is_mesh_layer(layer) or not layer.isValid() for layer in selected
+        ):
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Select exactly two valid 2D mesh layers in the Layers panel.",
+            )
+            return None
+        labels = [f"{index + 1}: {layer.name()}" for index, layer in enumerate(selected)]
+        choice, accepted = QInputDialog.getItem(
+            self.iface.mainWindow(), "Mesh Difference",
+            "Choose layer A. The other layer is B. Output = A - B.",
+            labels, 0, False,
+        )
+        if not accepted:
+            return None
+        left, right = selected if choice == labels[0] else selected[::-1]
+        try:
+            from .mesh_difference import prepare_groups, validate_topology, write_difference
+
+            if not left.crs().isValid() or not right.crs().isValid() or left.crs() != right.crs():
+                raise ValueError("Both meshes must have the same valid CRS.")
+            vertices, faces = self._mesh_vertices_faces(self._native_mesh(left))
+            right_vertices, right_faces = self._mesh_vertices_faces(self._native_mesh(right))
+            validate_topology(vertices, faces, right_vertices, right_faces)
+            groups, skipped = prepare_groups(left, right)
+            output_path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(), "Save Mesh Difference (A - B)",
+                "", "NetCDF mesh (*.nc)",
+            )
+            if not output_path:
+                return None
+            if not output_path.lower().endswith(".nc"):
+                output_path += ".nc"
+            write_difference(output_path, left, right, vertices, faces, groups)
+            derived = QgsMeshLayer(
+                f'Ugrid:"{os.path.abspath(output_path)}":mesh2d',
+                f"{left.name()} - {right.name()}", "mdal",
+            )
+            if not derived.isValid() or derived.dataProvider().datasetGroupCount() <= 0:
+                raise RuntimeError(
+                    f"The difference was saved to {output_path}, but QGIS could not load its datasets."
+                )
+            derived.setCrs(left.crs())
+            derived.setCustomProperty("delft3d_mesh_source", os.path.abspath(output_path))
+            QgsProject.instance().addMapLayer(derived)
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Created {left.name()} - {right.name()} with {len(groups)} dataset groups.",
+            )
+            if skipped:
+                QMessageBox.warning(
+                    self.iface.mainWindow(), "Mesh Difference: skipped datasets",
+                    "\n".join(skipped),
+                )
+            return derived
+        except (ImportError, OSError, RuntimeError, ValueError, AttributeError, TypeError) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager", f"Could not compute mesh difference: {exc}"
             )
             return None
 

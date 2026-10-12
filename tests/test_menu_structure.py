@@ -53,10 +53,12 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         "Froude Number",
         "Streamfunction",
         "Mesh Properties",
+        "Mesh Difference",
     ]
     assert plugin.profile_chart_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.create_mesh_polyline_action.triggered.callback == plugin.create_polyline_from_mesh
+    assert plugin.mesh_difference_action.triggered.callback == plugin.compute_mesh_difference
 
     registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
     assert registered[:4] == [
@@ -88,6 +90,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         plugin.one_d_results_action,
         plugin.mesh_profile_action,
         plugin.his_timeseries_action,
+        plugin.mesh_difference_action,
     ]
 
     plugin.unload()
@@ -97,3 +100,4 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.open_guide_action in removed
     assert plugin.create_mesh_polyline_action in removed
     assert plugin.boundary_conditions_action not in removed
+    iface.removeToolBarIcon.assert_any_call(plugin.mesh_difference_action)

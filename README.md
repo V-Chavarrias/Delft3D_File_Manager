@@ -31,6 +31,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Draws scalar dataset slices across 2D mesh edges for imported mesh results.
 - Computes a time-dependent node streamfunction from `q1` discharge.
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
+- Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
 - Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
 - Exports line, bridge point, and fixed-weir point layers with the main `Export` action.
 - Exports generic point layers to ASCII `.xyn` files.
@@ -56,6 +57,7 @@ The plugin menu contains these actions in order. The links point to the correspo
 	- [Froude Number](#froude-number)
 	- [Streamfunction](#streamfunction)
 	- [Mesh Properties](#mesh-properties)
+	- [Mesh Difference](#mesh-difference)
 5. [Import](#file-import)
 6. [Export](#export)
 7. [Write Bed Level to Mesh](#bed-level-to-mesh)
@@ -169,7 +171,28 @@ chainage/elevation patch.
 
 ## Compute 2D Variables
 
-These actions operate on the active imported 2D mesh layer and create derived mesh layers backed by NetCDF sidecars.
+These actions operate on the active imported 2D mesh layer, except **Mesh Difference**, which uses two selected layers. Derived mesh results are backed by NetCDF files.
+
+### Mesh Difference
+
+1. Select exactly two valid 2D mesh layers in the **Layers** panel (Ctrl-click to select both).
+2. Click the **Mesh Difference** toolbar button, or choose **Compute 2D Variables -> Mesh Difference**.
+3. Choose layer **A** in the order prompt. The other selected layer is **B**; every result is **A - B**.
+4. Choose a new `.nc` output filename. The plugin writes a persistent UGRID mesh and adds a layer named `<A> - <B>` to the project. Existing output files are not overwritten.
+
+The layers must have the same valid CRS, identical node X/Y coordinates and node ordering, and identical face connectivity and face ordering. No spatial interpolation, node remapping, or partition merging is performed. The original layers and source files are unchanged.
+
+All dataset groups with exactly matching names are compared when they have the same data location, scalar/vector type, and declared units. Both face-centered and node-centered datasets are supported; vectors are subtracted component by component, not by magnitude. Unmatched names, duplicate names, incompatible units/types, edge data, and 3D volume data are skipped with an explicit summary. If no compatible groups remain, a warning explains why no output can be created.
+
+- Two static scalar datasets produce a static difference.
+- A static dataset and a temporal dataset produce a difference at every time of the temporal dataset.
+- Two temporal datasets are compared only at common timestamps, taking their reference dates into account. Timestamps are matched at QGIS's millisecond precision; there is no temporal interpolation. Datasets reported as temporal by QGIS retain a time axis in the saved file, even if only one timestamp matches.
+- If neither temporal dataset has a reference date (including the layer's fallback reference date), their relative elapsed times are matched. Absolute and relative time axes cannot be compared or combined in one output.
+- Different groups can have different common times. The output uses their union as its time axis; a group has NoData at times outside its own intersection. Static scalar groups remain static.
+- QGIS/MDAL's time-independent NetCDF vector reader can duplicate X values into Y. To preserve both components on reopening, static vector differences are stored as constant values at every output time, or at one elapsed-time-zero step if the result has no temporal datasets. The file records whether each source pair was temporal.
+- Missing and non-finite values remain NoData. Inactive faces are masked for face datasets; node datasets mask nodes with no adjacent active face.
+
+The output stores the subtraction order and source-layer URIs as metadata, retains the source CRS, and can be reopened as a native mesh. Keep the saved NetCDF with the QGIS project. Large meshes or many time steps can take time to process; datasets are written one time step at a time.
 
 ### Froude Number
 
