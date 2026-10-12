@@ -59,6 +59,8 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.create_mesh_polyline_action.triggered.callback == plugin.create_polyline_from_mesh
     assert plugin.mesh_difference_action.triggered.callback == plugin.compute_mesh_difference
+    assert plugin.export_action.triggered.callback == plugin.export_active_layer
+    assert ".xyn" in plugin.export_action.status_tip
 
     registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
     assert registered[:4] == [
@@ -78,8 +80,8 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         plugin.create_mesh_polyline_action,
         plugin.update_trachytopes_action,
         plugin.export_trachytopes_action,
-        plugin.export_pointcloud_action,
     ]
+    assert not hasattr(plugin, "export_pointcloud_action")
     toolbar_actions = [
         entry.args[0] for entry in iface.addToolBarIcon.call_args_list
     ]
@@ -100,4 +102,5 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.open_guide_action in removed
     assert plugin.create_mesh_polyline_action in removed
     assert plugin.boundary_conditions_action not in removed
+    assert plugin.export_action in removed
     iface.removeToolBarIcon.assert_any_call(plugin.mesh_difference_action)

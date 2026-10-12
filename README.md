@@ -33,8 +33,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
 - Checks properties for the active 2D mesh and creates quality, connectivity, center, and dual-link layers.
-- Exports line, bridge point, and fixed-weir point layers with the main `Export` action.
-- Exports generic point layers to ASCII `.xyn` files.
+- Exports line, bridge point, fixed-weir point, and generic point layers with the main `Export` action; generic points (including observation stations) are written to ASCII `.xyn` files.
 - Writes bed level data into UGRID mesh NetCDF files using NetCDF, raster, or vector point sources.
 - Creates trachytope point layers from UGRID mesh edge coordinates, updates values inside polygons, and exports `.arl` files.
 - Creates bridge and fixed-weir point layers from polyline vertices with editable default attributes.
@@ -68,11 +67,10 @@ The plugin menu contains these actions in order. The links point to the correspo
 12. [Create Polyline from Mesh](#create-polyline-from-mesh)
 13. [Set Trachytopes in Polygons](#set-trachytopes-in-polygons)
 14. [Export Trachytopes (.arl)](#export-trachytopes-arl)
-15. [Export Point Cloud (.xyn)](#point-cloud-export-xyn)
 
 The **Open Guide** action displays this README in a Qt window. The build packages a copy of this file with the plugin so the guide is available offline.
 
-The existing actions outside the two submenus remain top-level actions and keep their existing behavior.
+The actions outside the two submenus remain top-level actions. In version 11.0.0, point-cloud export is part of **Export**; the separate **Export Point Cloud (.xyn)** menu action has been removed.
 
 ## Create Polyline from Mesh
 
@@ -609,9 +607,13 @@ Use the main `Export` action to export the active layer to the appropriate Delft
 ### Dispatch Rules
 - Active line layer: exported to the Delft3D-style polyline text format.
 - If multiple line layers are selected in the QGIS layer tree, they are exported together into one file for polyline (`.pli`, `.ldb`, `.spl`, `.pol`) and `.xy` output.
-- Active point layer with bridge fields (`bridge_name`, `width`, `drag_cd`): exported to bridge `.pliz`.
-- Active point layer with the fixed-weir fields: exported to `.pliz`.
-- Other point layers: use `Export Point Cloud (.xyn)` instead.
+- Active point layer with all fixed-weir fields: exported to fixed-weir `.pliz`.
+- Otherwise, an active point layer with all bridge fields (`bridge_name`, `width`, `drag_cd`): exported to bridge `.pliz`.
+- Other point layers (including observation stations): exported to ASCII `.xyn` through the same `Export` action. See [Point Cloud Export](#point-cloud-export-xyn).
+
+Required bridge and fixed-weir field names are matched case-insensitively. Fixed-weir export takes precedence if both complete schemas are present. Invalid values in a recognized bridge/fixed-weir layer produce a warning; they do not trigger an XYN fallback. Layers missing required schema fields are treated as generic points.
+
+XYN is not a full attribute-table export: it writes only geometry coordinates and a name, omitting other attributes (including elevation). The XYN save dialog and success message identify this output explicitly. Use the separate trachytope export for `.arl` data.
 
 ### Export: Polyline
 
@@ -937,26 +939,30 @@ Typical workflow:
 
 ## Point Cloud Export (`.xyn`)
 
-Export a selected QGIS point layer to ASCII `.xyn` format.
+Use the main **Export** menu action or toolbar button to export a generic QGIS point layer to ASCII `.xyn` format. No separate point-cloud menu action is needed.
 
 ### Input Requirements
 - Active layer must be a vector point layer.
+- Layers with a complete fixed-weir or bridge schema use their specialized `.pliz` exporter instead.
 
 ### Output Format
 One row per point:
 - `x y name`
+- Coordinates come from the layer geometry, not its `x`/`y` attribute columns, and are written to six decimal places in the layer CRS without reprojection.
+- Only coordinates and names are written; other attributes and Z values are omitted.
+- Multipart features produce one row per point, sharing the feature name when available. Empty geometries are skipped.
 
 ### Name Handling
 - The plugin tries to use a name-like field with priority:
 	`weir_name`, `name`, `naam`, `id`, then first available field.
-- If a name is missing or empty, fallback name `obs_%d` is used in export order.
+- If a name is missing, empty, or non-ASCII, a fallback name such as `obs_1` is used; the counter increments for each generated name.
+- Existing names are not deduplicated.
 
 ### Typical Workflow
 1. Select the point layer to export.
-2. Open `Export Point Cloud (.xyn)` from the plugin menu.
-3. Choose output `.xyn` path.
-4. The plugin writes one line per valid point feature.
-5. Use this action for generic point layers that are not fixed-weir `.fxw` layers.
+2. Open **Export** from the plugin menu or toolbar.
+3. The **Save Point Cloud XYN file (x y name only)** dialog appears. Choose the output path; `.xyn` is appended if needed.
+4. The plugin writes one line per valid point and reports XYN export in the success message.
 
 ## Plugin Installation
 1. Download the latest release ZIP from [Releases](../../releases).

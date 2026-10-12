@@ -457,7 +457,6 @@ class Delft3DFileManager:
         self.iface = iface
         self.import_action = None
         self.export_action = None
-        self.export_pointcloud_action = None
         self.bed_level_action = None
         self.create_trachytopes_action = None
         self.create_bridge_points_action = None
@@ -578,7 +577,7 @@ class Delft3DFileManager:
         self.export_action = QAction(
             QIcon(icon_paths["export"]), "Export", self.iface.mainWindow()
         )
-        self.export_action.setStatusTip("Export the active line or fixed-weir point layer to a Delft3D format")
+        self.export_action.setStatusTip("Export lines, bridge/fixed-weir points (.pliz), or generic points (.xyn)")
         self.export_action.triggered.connect(self.export_active_layer)
         self.iface.addToolBarIcon(self.export_action)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_action)
@@ -658,15 +657,6 @@ class Delft3DFileManager:
         )
         self.export_trachytopes_action.triggered.connect(self.export_trachytopes_arl)
         self.iface.addPluginToMenu("&Delft3D File Manager", self.export_trachytopes_action)
-
-        self.export_pointcloud_action = QAction(
-            QIcon(icon_path), "Export Point Cloud (.xyn)", self.iface.mainWindow()
-        )
-        self.export_pointcloud_action.setStatusTip(
-            "Export point layer to ASCII .xyn (x y name)"
-        )
-        self.export_pointcloud_action.triggered.connect(self.export_point_cloud_xyn)
-        self.iface.addPluginToMenu("&Delft3D File Manager", self.export_pointcloud_action)
 
         self.profile_chart_action = QAction(
             QIcon(icon_paths["cross_sections"]), "Cross-Section", self.iface.mainWindow()
@@ -798,8 +788,6 @@ class Delft3DFileManager:
             self.iface.removePluginMenu("&Delft3D File Manager", self.update_trachytopes_action)
         if self.export_trachytopes_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.export_trachytopes_action)
-        if self.export_pointcloud_action:
-            self.iface.removePluginMenu("&Delft3D File Manager", self.export_pointcloud_action)
         if self.install_deps_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.install_deps_action)
         if self.open_guide_action:
@@ -6525,15 +6513,12 @@ class Delft3DFileManager:
             elif self._is_bridge_point_layer(layer):
                 self.export_bridge_pliz(layer)
             else:
-                self.iface.messageBar().pushWarning(
-                    "Delft3D File Manager",
-                    "Point layers without bridge/fixed-weir fields should be exported with 'Export Point Cloud (.xyn)'",
-                )
+                self.export_point_cloud_xyn()
             return
 
         self.iface.messageBar().pushWarning(
             "Delft3D File Manager",
-            "Export supports line layers, bridge point layers, and fixed-weir point layers",
+            "Export supports vector line layers and point layers (.pliz for bridges/fixed weirs, otherwise .xyn)",
         )
 
     def export_bridge_pliz(self, layer):
@@ -6927,7 +6912,7 @@ class Delft3DFileManager:
 
         output_path, _ = QFileDialog.getSaveFileName(
             self.iface.mainWindow(),
-            "Save XYN file",
+            "Save Point Cloud XYN file (x y name only)",
             "",
             "XYN files (*.xyn);;All files (*)",
         )
@@ -6983,7 +6968,7 @@ class Delft3DFileManager:
 
         self.iface.messageBar().pushSuccess(
             "Delft3D File Manager",
-            f"Exported {exported_count} point feature(s) to {os.path.basename(output_path)}",
+            f"Exported {exported_count} point(s) as XYN (x y name only) to {os.path.basename(output_path)}",
         )
 
     def _get_name_field(self, layer):
