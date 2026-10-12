@@ -7251,6 +7251,11 @@ class Delft3DFileManager:
     def load_netcdf_file(self, filepath):
         """Route NetCDF files to HIS importer or existing UGRID mesh importer."""
         try:
+            from .m2d_cell_vector import is_m2d_cell_vector_file
+
+            if is_m2d_cell_vector_file(filepath):
+                self.load_m2d_cell_vector_file(filepath)
+                return
             if self._is_his_netcdf_file(filepath):
                 self.load_fm_his_file(filepath)
                 return
@@ -7268,6 +7273,120 @@ class Delft3DFileManager:
             )
 
         self.load_ugrid_mesh_file(filepath)
+
+    def load_m2d_cell_vector_file(self, filepath):
+        """Render a per-face M2D value array on the active 2D mesh."""
+        from .m2d_cell_vector import (
+            M2DCellVectorError,
+            create_m2d_cell_vector_sidecar,
+        )
+
+        active_layer = self.iface.activeLayer()
+        if not self._is_mesh_layer(active_layer) or not active_layer.isValid():
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "Activate a valid 2D mesh layer before importing M2D cell values.",
+            )
+            return None
+
+        try:
+            face_count = int(active_layer.meshFaceCount())
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not read the active mesh face count: {exc}",
+            )
+            return None
+        if face_count <= 0:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "The active mesh does not contain any 2D faces.",
+            )
+            return None
+
+        source = ""
+        try:
+            source = str(active_layer.customProperty("delft3d_mesh_source", ""))
+        except (RuntimeError, AttributeError):
+            pass
+        if not source:
+            source_method = getattr(active_layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        grid_path = _mesh_source_path(source)
+        if not grid_path or not os.path.isfile(grid_path):
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                "The active mesh does not have a readable NetCDF source file.",
+            )
+            return None
+
+        try:
+            import netCDF4 as nc
+
+            with nc.Dataset(grid_path, "r") as grid_dataset:
+                epsg = self._read_epsg_from_nc(grid_dataset) or 28992
+
+            output_path = create_m2d_cell_vector_sidecar(
+                filepath,
+                grid_path,
+                expected_face_count=face_count,
+            )
+            output_base = os.path.splitext(os.path.basename(filepath))[0]
+            topology_names = []
+            with nc.Dataset(output_path, "r") as output_dataset:
+                topology_names = self._find_mesh2d_topology_names(output_dataset)
+            if not topology_names:
+                raise M2DCellVectorError(
+                    "Could not identify the 2D topology in the generated mesh dataset"
+                )
+
+            layer_name = f"{output_base} on {active_layer.name()}"
+            result_layer = self._load_mesh2d_layer(
+                output_path,
+                output_base,
+                epsg,
+                layer_name,
+                topology_names=topology_names,
+                expect_data_variables=True,
+            )
+            grid_crs = active_layer.crs()
+            if grid_crs.isValid():
+                result_layer.setCrs(grid_crs)
+            provider = result_layer.dataProvider()
+            group_count = int(provider.datasetGroupCount())
+            if group_count < 1:
+                raise M2DCellVectorError(
+                    "QGIS did not recognize the imported cell values as a mesh dataset"
+                )
+            renderer_settings = result_layer.rendererSettings()
+            renderer_settings.setActiveScalarDatasetGroup(0)
+            result_layer.setRendererSettings(renderer_settings)
+            result_layer.triggerRepaint()
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"M2D cell values plotted on {active_layer.name()}: {output_base}",
+            )
+            return result_layer
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS.",
+            )
+        except (
+            M2DCellVectorError,
+            AttributeError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+        ) as exc:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not plot M2D cell values: {exc}",
+            )
+        return None
 
     def _is_his_netcdf_file(self, filepath):
         """Return True when file appears to be a Delft3D FM HIS NetCDF output."""

@@ -21,6 +21,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports external-forcing link files (`.ext`) as spatial boundary/lateral features and boundary-condition forcing files (`.bc`) as timeseries records linked to those features.
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
+- Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
 - Detects morphodynamic NetCDF variables with extra dimensions and offers flattenable variables, including cumulative bed level change relative to the initial `mor_bl`, for side-car creation.
 - Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
 - Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
@@ -234,7 +235,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.mdu`** — Delft3D FM model definition file (creates a summary table and loads linked files)
 - **`.ext`** — Delft3D FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
 - **`.bc`** — Delft3D FM boundary-condition forcing file (creates forcing/timeseries records)
-- **`.nc`** — UGRID mesh NetCDF or Delft3D FM HIS NetCDF (auto-detected)
+- **`.nc`** — M2D cell values, UGRID mesh NetCDF, or Delft3D FM HIS NetCDF (auto-detected)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 - **`.csl`, `.csd`** — Delft3D FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
@@ -406,7 +407,11 @@ All three columns must be numeric and whitespace-separated.
 Load UGRID-format NetCDF files containing 1D and/or 2D computational mesh components.
 The plugin automatically detects and creates separate layers for each component found.
 
+NetCDF files whose global `description` is exactly `gdm_write_M2D_netcdf; v1.0` are treated as per-cell scalar values instead. Activate the matching 2D mesh layer before importing; the file's one-dimensional `data` array must have exactly one value per face. The plugin combines those values with the active mesh topology in a temporary UGRID NetCDF and loads it as a native mesh layer with scalar rendering enabled. This avoids creating a separate polygon feature for each cell. The original input and grid files are not changed. The temporary companion is intended for the current QGIS session and may not be available when reopening a saved project.
+
 When a UGRID file contains morphodynamic variables with extra dimensions (for example sediment fraction or bed layer dimensions), the plugin prompts for which non-topology data variables to include. If `mor_bl` is available, **Cumulative bed level change** appears first and is selected by default; its `mesh2d_mor_bl_change` field contains each time-varying bed level minus the initial bed level at that mesh location. The plugin creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens extra dimensions into additional variables, and loads that flattened mesh file in QGIS. The same calculation is applied independently to each partition.
+
+If there is no valid active 2D mesh, the active mesh has no readable NetCDF source, the cell array is not one-dimensional numeric data, or the number of values differs from the mesh face count, the importer reports a warning and does not create a plotted layer.
 
 For large datasets, the plugin now shows a live progress bar (plus status text) during analysis, flattening, and layer loading.
 

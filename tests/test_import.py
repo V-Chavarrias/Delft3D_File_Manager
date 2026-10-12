@@ -260,23 +260,49 @@ def test_route_nc_uses_netcdf_router(plugin):
 
 
 def test_load_netcdf_file_routes_his(plugin):
-    plugin._is_his_netcdf_file = MagicMock(return_value=True)
-    plugin.load_fm_his_file = MagicMock()
-    plugin.load_ugrid_mesh_file = MagicMock()
+    with patch(
+        "Delft3DFileManager.m2d_cell_vector.is_m2d_cell_vector_file",
+        return_value=False,
+    ):
+        plugin._is_his_netcdf_file = MagicMock(return_value=True)
+        plugin.load_fm_his_file = MagicMock()
+        plugin.load_ugrid_mesh_file = MagicMock()
 
-    plugin.load_netcdf_file("/fake/file.nc")
+        plugin.load_netcdf_file("/fake/file.nc")
 
+    plugin._is_his_netcdf_file.assert_called_once_with("/fake/file.nc")
     plugin.load_fm_his_file.assert_called_once_with("/fake/file.nc")
     plugin.load_ugrid_mesh_file.assert_not_called()
 
 
-def test_load_netcdf_file_routes_mesh_when_not_his(plugin):
-    plugin._is_his_netcdf_file = MagicMock(return_value=False)
-    plugin.load_fm_his_file = MagicMock()
+def test_load_netcdf_file_routes_m2d_cell_values_before_his(plugin):
+    plugin._is_his_netcdf_file = MagicMock()
+    plugin.load_m2d_cell_vector_file = MagicMock()
     plugin.load_ugrid_mesh_file = MagicMock()
 
-    plugin.load_netcdf_file("/fake/file.nc")
+    with patch(
+        "Delft3DFileManager.m2d_cell_vector.is_m2d_cell_vector_file",
+        return_value=True,
+    ):
+        plugin.load_netcdf_file("/fake/cell_values.nc")
 
+    plugin.load_m2d_cell_vector_file.assert_called_once_with("/fake/cell_values.nc")
+    plugin._is_his_netcdf_file.assert_not_called()
+    plugin.load_ugrid_mesh_file.assert_not_called()
+
+
+def test_load_netcdf_file_routes_mesh_when_not_his(plugin):
+    with patch(
+        "Delft3DFileManager.m2d_cell_vector.is_m2d_cell_vector_file",
+        return_value=False,
+    ):
+        plugin._is_his_netcdf_file = MagicMock(return_value=False)
+        plugin.load_fm_his_file = MagicMock()
+        plugin.load_ugrid_mesh_file = MagicMock()
+
+        plugin.load_netcdf_file("/fake/file.nc")
+
+    plugin._is_his_netcdf_file.assert_called_once_with("/fake/file.nc")
     plugin.load_fm_his_file.assert_not_called()
     plugin.load_ugrid_mesh_file.assert_called_once_with("/fake/file.nc")
 
