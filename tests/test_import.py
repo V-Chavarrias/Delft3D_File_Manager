@@ -2,7 +2,7 @@ import sys
 import pathlib
 import shutil
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from types import SimpleNamespace
 
 import pytest
@@ -1356,7 +1356,7 @@ def test_load_ugrid_mesh_file_morphodynamic_prompt_only_shows_flattenable_variab
     assert "waterlevel" not in analysis["flattenable_names"]
 
 
-def test_cumulative_bed_level_change_is_first_flatten_option(plugin):
+def test_regular_bed_level_is_not_flattened_but_cumulative_change_is_offered(plugin):
     class DummyVar:
         def __init__(self, dimensions, dtype="f8"):
             self.dimensions = dimensions
@@ -1374,6 +1374,8 @@ def test_cumulative_bed_level_change_is_first_flatten_option(plugin):
         "Cumulative bed level change",
         "sedfrac",
     ]
+    assert "mesh2d_mor_bl" in analysis["candidate_names"]
+    assert "mesh2d_mor_bl" not in analysis["flattenable_names"]
     assert analysis["default_selected"][0] == "Cumulative bed level change"
 
 
@@ -1879,7 +1881,23 @@ def test_substrate_requires_multiple_fractions_and_layer_variables(plugin, tmp_p
             assert not plugin._has_substrate_data(source_ds, "mesh2d_lyrfrac")
 
 
-def test_substrate_variables_preserve_raw_variable_name(plugin, tmp_path):
+def test_substrate_patch_grid_matches_pcolormesh_cell_dimensions(plugin):
+    import numpy as np
+
+    samples = [
+        (0.0, np.array([10.0, 9.0]), np.array([9.0, 7.0]), np.array([0.2, 0.8])),
+        (1.0, np.array([10.5, 9.5]), np.array([9.5, 7.5]), np.array([0.3, 0.7])),
+        (2.0, np.array([11.0, 10.0]), np.array([10.0, 8.0]), np.array([0.4, 0.6])),
+    ]
+
+    x_edges, elevations, values = plugin._substrate_patch_grid(samples)
+
+    assert x_edges.shape == (4,)
+    assert elevations.shape == (3, 4)
+    assert values.shape == (2, 3)
+
+
+def test_substrate_variables_are_not_expanded_during_flattening(plugin, tmp_path):
     source_path = tmp_path / "substrate.nc"
     sidecar_path = tmp_path / "substrate_flat.nc"
     with Dataset(str(source_path), "w") as source_ds:
@@ -1904,32 +1922,17 @@ def test_substrate_variables_preserve_raw_variable_name(plugin, tmp_path):
         bedlevel[:] = [[10.0]]
         fraction_names[:] = [[*"Sediment1", *(["\x00"] * 7)], [*"Sediment2", *(["\x00"] * 7)]]
 
-    with Dataset(str(source_path), "r") as source_ds, Dataset(str(sidecar_path), "w") as sidecar_ds:
-        sidecar_ds.createDimension("time", 1)
-        sidecar_ds.createDimension("mesh2d_nFaces", 1)
-        generated = plugin._create_substrate_fraction_variables(
-            source_ds,
-            sidecar_ds,
-            "mesh2d_lyrfrac",
-            set(),
-        )
-        assert len(generated) == 4
-        assert sidecar_ds.variables[generated[0]][:].tolist() == [[0.25]]
-        assert sidecar_ds.variables[generated[1]][:].tolist() == [[0.75]]
-        assert sidecar_ds.variables[generated[2]][:].tolist() == [[0.75]]
-        assert sidecar_ds.variables[generated[3]][:].tolist() == [[0.25]]
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        ["mesh2d_lyrfrac"],
+    )
 
-        assert generated == [
-            "mesh2d_lyrfrac_Sediment1_1",
-            "mesh2d_lyrfrac_Sediment2_1",
-            "mesh2d_lyrfrac_Sediment1_2",
-            "mesh2d_lyrfrac_Sediment2_2",
+    with Dataset(sidecar_path, "r") as sidecar:
+        assert "mesh2d_lyrfrac" in sidecar.variables
+        assert sidecar.variables["mesh2d_lyrfrac"][:].tolist() == [
+            [[[0.25, 0.75], [0.75, 0.25]]]
         ]
-        assert sidecar_ds.variables[generated[0]].long_name == (
-            "Original layered fraction content "
-            "(substrate fraction Sediment1, layer 1)"
-        )
-        assert sidecar_ds.variables[generated[0]].substrate_source_variable == "mesh2d_lyrfrac"
+        assert not any(name.startswith("mesh2d_lyrfrac_") for name in sidecar.variables)
 
 
 def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
@@ -1944,10 +1947,8 @@ def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
     with Dataset(sidecar_path, "r") as sidecar:
         assert "mesh2d_mor_bl" in sidecar.variables
         assert sidecar.variables["mesh2d_mor_bl"][:].tolist() == [[10.0, 11.0]]
-        assert any(
-            name.startswith("mesh2d_lyrfrac_")
-            for name in sidecar.variables
-        )
+        assert "mesh2d_lyrfrac" in sidecar.variables
+        assert not any(name.startswith("mesh2d_lyrfrac_") for name in sidecar.variables)
         assert any(
             name.startswith("mesh2d_hidexp_")
             for name in sidecar.variables
@@ -2930,6 +2931,38 @@ def test_load_ini_field_spatial_file_accepts_mixed_case_datafile_key(plugin, tmp
     plugin.load_ini_field_spatial_file(str(ini_field), grid_path="/fake/grid.nc")
 
     plugin.load_1d_field_spatial_file.assert_called_once_with(str(data_file.resolve()), grid_path="/fake/grid.nc")
+
+
+def test_load_ini_field_spatial_file_loads_all_parameter_data_files(plugin, tmp_path):
+    ini_field = tmp_path / "initialFields.ini"
+    data_files = [
+        tmp_path / "friction_zone_1.pol",
+        tmp_path / "friction_zone_2.pol",
+    ]
+    ini_field.write_text(
+        "[General]\n"
+        "fileType = iniField\n"
+        "[Parameter]\n"
+        "quantity = frictioncoefficient\n"
+        "dataFile = friction_zone_1.pol\n"
+        "dataFileType = polygon\n"
+        "[Parameter]\n"
+        "quantity = frictioncoefficient\n"
+        "dataFile = friction_zone_2.pol\n"
+        "dataFileType = polygon\n",
+        encoding="utf-8",
+    )
+    for data_file in data_files:
+        data_file.write_text("", encoding="utf-8")
+
+    plugin.load_file_by_extension = MagicMock()
+
+    plugin.load_ini_field_spatial_file(str(ini_field), grid_path="/fake/grid.nc")
+
+    assert plugin.load_file_by_extension.call_args_list == [
+        call(str(data_file.resolve()), spatial_grid_path="/fake/grid.nc")
+        for data_file in data_files
+    ]
 
 
 def test_load_1d_field_spatial_file_accepts_mixed_case_keys(plugin, tmp_path):

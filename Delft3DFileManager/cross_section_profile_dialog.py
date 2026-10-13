@@ -382,10 +382,8 @@ class CrossSectionProfileDialog(QDialog):
         self._selected_lines_button.clicked.connect(self._add_selected_lines)
         self._substrate_patch_button = QPushButton("Draw Substrate Patch")
         self._substrate_patch_button.clicked.connect(self._draw_substrate_patch)
-        self._substrate_mode_combo = QComboBox()
-        self._substrate_mode_combo.addItem("Volume fraction", "volume")
-        self._substrate_mode_combo.addItem("Arithmetic mean grain size", "arithmetic")
-        self._substrate_mode_combo.addItem("Geometric mean grain size", "geometric")
+        self._substrate_fraction_combo = QComboBox()
+        self._substrate_fraction_combo.setToolTip("Substrate value used for the patch")
 
         control_layout = QHBoxLayout()
         control_layout.addWidget(QLabel("Vertical exaggeration:"))
@@ -397,7 +395,7 @@ class CrossSectionProfileDialog(QDialog):
             control_layout.addWidget(self._clear_button)
             control_layout.addWidget(self._draw_button)
             control_layout.addWidget(self._selected_lines_button)
-            control_layout.addWidget(self._substrate_mode_combo)
+            control_layout.addWidget(self._substrate_fraction_combo)
             control_layout.addWidget(self._substrate_patch_button)
 
         layout = QVBoxLayout(self)
@@ -427,12 +425,39 @@ class CrossSectionProfileDialog(QDialog):
 
     def _draw_substrate_patch(self):
         if callable(self._on_substrate_patch_requested):
-            self._on_substrate_patch_requested(self.substrate_patch_mode())
+            self._on_substrate_patch_requested(
+                self.substrate_patch_mode(),
+                self.substrate_fraction(),
+            )
 
     def substrate_patch_mode(self):
         """Return the selected substrate patch mode."""
-        data = self._substrate_mode_combo.currentData()
-        return str(data or "volume")
+        data = self._substrate_fraction_combo.currentData()
+        if isinstance(data, (tuple, list)) and data:
+            return str(data[0] or "volume")
+        return "volume"
+
+    def set_substrate_fractions(self, labels):
+        """Set the substrate operations and raw fraction choices for patch capture."""
+        self._substrate_fraction_combo.clear()
+        self._substrate_fraction_combo.addItem(
+            "Arithmetic mean grain size",
+            ("arithmetic", ""),
+        )
+        self._substrate_fraction_combo.addItem(
+            "Geometric mean grain size",
+            ("geometric", ""),
+        )
+        for label in labels or []:
+            label = str(label)
+            self._substrate_fraction_combo.addItem(label, ("volume", label))
+
+    def substrate_fraction(self):
+        """Return the selected raw substrate fraction label."""
+        data = self._substrate_fraction_combo.currentData()
+        if isinstance(data, (tuple, list)) and len(data) > 1:
+            return str(data[1] or "")
+        return ""
 
     def set_status_message(self, message):
         """Update the non-modal status text without changing the chart."""

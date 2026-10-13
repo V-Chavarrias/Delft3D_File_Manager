@@ -22,7 +22,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
 - Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
-- Detects morphodynamic NetCDF variables with extra dimensions and offers flattenable variables, including cumulative bed level change relative to the initial `mor_bl`, for side-car creation.
+- Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change for side-car flattening.
 - Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
 - Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
 - Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
@@ -146,15 +146,14 @@ Workflow:
 The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
 
 
-For morphodynamic outputs with more than one sediment fraction, first import the
-selection dialog, select `mesh2d_lyrfrac`; the flattened mesh then includes
-one `substrate: fraction ...` dataset for each fraction/layer combination.
-Importing the map does not require a sediment file and does not create mean
-grain-size datasets. To request a substrate patch, import the sediment `.sed`
-file first; the first sediment table loaded is used for grain sizes. Choose
-**Volume fraction**, **Arithmetic mean grain size**, or **Geometric mean grain
-size** and click **Draw Substrate Patch** to render the selected profile as a
-chainage/elevation patch.
+For morphodynamic outputs with sediment fractions, select `mesh2d_lyrfrac` when
+importing the map to keep the raw substrate data available for on-demand
+reconstruction. The data is not expanded into per-layer/per-fraction sidecar
+variables. In **2D Slice**, choose one entry from the substrate menu:
+**Arithmetic mean grain size**, **Geometric mean grain size**, or one of the
+available sediment fractions. Volume fraction patches do not require a
+sediment table; the grain-size modes use the first loaded `.sed` table or a
+compatible sediment table already present in the QGIS project.
 
 ### Profile Chart Window
 
@@ -309,7 +308,7 @@ When INI `fileType` is one of `structure`, `inifield`, `1dfield`, or `roughness`
 	- Keeps unresolved non-compound records in the spatial layer with `resolve_status` and `resolve_note`.
 	- Adds dynamic parameter fields from keys present in the file (for example `crestWidth`), so only existing parameters appear as columns.
 	- Supports per-type viewing by filtering the `type` field (for example `"type" = 'weir'` or `"type" = 'gate'`).
-- `inifield`: resolves referenced `dataFile` and imports the linked 1d field spatially.
+- `inifield`: imports `[Initial]` data files as spatial 1D fields and loads every referenced `[Parameter]` data file (such as polygon files) by file extension.
 - `1dfield`: places branch value points from `chainage`/`values` arrays.
 - `roughness`: places branch roughness points from `chainage`/`frictionValues` arrays.
 
@@ -430,7 +429,7 @@ The plugin automatically detects and creates separate layers for each component 
 
 NetCDF files whose global `description` is exactly `gdm_write_M2D_netcdf; v1.0` are treated as per-cell scalar values instead. Activate the matching 2D mesh layer before importing; the file's one-dimensional `data` array must have exactly one value per face. The plugin combines those values with the active mesh topology in a temporary UGRID NetCDF and loads it as a native mesh layer with scalar rendering enabled. This avoids creating a separate polygon feature for each cell. The original input and grid files are not changed. The temporary companion is intended for the current QGIS session and may not be available when reopening a saved project.
 
-When a UGRID file contains morphodynamic variables with extra dimensions (for example sediment fraction or bed layer dimensions), the plugin prompts for which non-topology data variables to include. If `mor_bl` is available, **Cumulative bed level change** appears first and is selected by default; its `mesh2d_mor_bl_change` field contains each time-varying bed level minus the initial bed level at that mesh location. The plugin creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens extra dimensions into additional variables, and loads that flattened mesh file in QGIS. The same calculation is applied independently to each partition.
+When a UGRID file contains variables with extra dimensions beyond time and mesh space (for example sediment fraction or bed layer dimensions), and those variables are not handled by the regular loader, the plugin prompts for which non-topology data variables to include. Regular flow-element-center variables such as `mesh2d_mor_bl` are not offered again, but **Cumulative bed level change** remains available as a derived option. The plugin creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens the selected variables into additional variables, and loads that flattened mesh file in QGIS.
 
 If there is no valid active 2D mesh, the active mesh has no readable NetCDF source, the cell array is not one-dimensional numeric data, or the number of values differs from the mesh face count, the importer reports a warning and does not create a plotted layer.
 
