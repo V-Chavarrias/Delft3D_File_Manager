@@ -1,0 +1,11 @@
+[forcing]
+name              = Upstream_0001
+function          = timeseries
+timeInterpolation = linear
+quantity          = time
+unit              = seconds since 1995-01-01 00:00:00
+quantity          = dischargebnd
+unit              = m3/s
+0        6777
+2592000  6777
+

@@ -1,0 +1,14 @@
+[General]
+fileVersion=2.02
+fileType=extForce
+
+[Boundary]
+quantity=dischargebnd
+locationFile=Upstream.pli
+forcingFile=Discharge.bc
+
+[Boundary]
+quantity=waterlevelbnd
+locationFile=Downstream.pli
+forcingFile=WaterLevel.bc
+

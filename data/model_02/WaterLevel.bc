@@ -1,0 +1,11 @@
+[forcing]
+name              = Downstream_0001
+function          = timeseries
+timeInterpolation = linear
+quantity          = time
+unit              = seconds since 1995-01-01 00:00:00
+quantity          = waterlevelbnd
+unit              = m
+0        7
+2592000  7
+
