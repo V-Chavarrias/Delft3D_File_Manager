@@ -12,6 +12,7 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -227,6 +228,12 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._vertical_exaggeration = 1.0
         self._x_axis_label = "y [m]"
         self._y_axis_label = "z [m]"
+        self._colorbar = None
+        self._patch_mesh = None
+        self._y_limits = (None, None)
+        self._color_limits = (None, None)
+        self._auto_y_limits = None
+        self._auto_color_limits = None
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
@@ -277,7 +284,46 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._figure.savefig(filename, format="png", dpi=300)
         return True
 
+    def set_y_limits(self, lower, upper):
+        """Apply y-axis limits to the displayed plot; None keeps the automatic limit."""
+        self._y_limits = (lower, upper)
+        self._apply_y_limits()
+        self.draw_idle()
+
+    def set_color_limits(self, lower, upper):
+        """Apply color limits to the displayed patch; None keeps the automatic limit."""
+        self._color_limits = (lower, upper)
+        self._apply_color_limits()
+        self.draw_idle()
+
+    def _apply_y_limits(self):
+        if self._auto_y_limits is None:
+            return
+        lower, upper = self._y_limits
+        self._axes.set_ylim(
+            self._auto_y_limits[0] if lower is None else lower,
+            self._auto_y_limits[1] if upper is None else upper,
+        )
+
+    def _apply_color_limits(self):
+        if self._patch_mesh is None or self._auto_color_limits is None:
+            return
+        lower, upper = self._color_limits
+        self._patch_mesh.set_clim(
+            self._auto_color_limits[0] if lower is None else lower,
+            self._auto_color_limits[1] if upper is None else upper,
+        )
+
     def _redraw(self):
+        if self._colorbar is not None:
+            try:
+                self._colorbar.remove()
+            except (AttributeError, KeyError, ValueError):
+                pass
+            self._colorbar = None
+        self._patch_mesh = None
+        self._auto_y_limits = None
+        self._auto_color_limits = None
         self._axes.clear()
         self._axes.set_xlabel(self._x_axis_label)
         self._axes.set_ylabel(self._y_axis_label)
@@ -291,9 +337,15 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
                 values,
                 shading="auto",
             )
-            colorbar = self._figure.colorbar(mesh, ax=self._axes)
+            mesh.autoscale_None()
+            self._patch_mesh = mesh
+            self._auto_color_limits = mesh.get_clim()
+            self._auto_y_limits = self._axes.get_ylim()
+            self._colorbar = self._figure.colorbar(mesh, ax=self._axes)
             if colorbar_label:
-                colorbar.set_label(colorbar_label)
+                self._colorbar.set_label(colorbar_label)
+            self._apply_color_limits()
+            self._apply_y_limits()
             self.draw_idle()
             return
 
@@ -327,6 +379,8 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
             self._axes.legend()
         self._axes.relim()
         self._axes.autoscale_view()
+        self._auto_y_limits = self._axes.get_ylim()
+        self._apply_y_limits()
         self.draw_idle()
 
 
@@ -380,10 +434,20 @@ class CrossSectionProfileDialog(QDialog):
         self._draw_button.clicked.connect(self._draw_profile)
         self._selected_lines_button = QPushButton("Add Selected Line Slices")
         self._selected_lines_button.clicked.connect(self._add_selected_lines)
-        self._substrate_patch_button = QPushButton("Draw Substrate Patch")
-        self._substrate_patch_button.clicked.connect(self._draw_substrate_patch)
         self._substrate_fraction_combo = QComboBox()
-        self._substrate_fraction_combo.setToolTip("Substrate value used for the patch")
+        self._substrate_fraction_combo.setToolTip(
+            "Choose a substrate value to draw a substrate patch instead of a dataset slice"
+        )
+        self._substrate_fraction_combo.addItem("Dataset slice", ("", ""))
+        self._substrate_fraction_combo.currentIndexChanged.connect(self._substrate_selection_changed)
+
+        self._limit_edits = {}
+        for key in ("y_min", "y_max", "c_min", "c_max"):
+            edit = QLineEdit()
+            edit.setPlaceholderText("auto")
+            edit.setMaximumWidth(70)
+            edit.editingFinished.connect(self._apply_limits)
+            self._limit_edits[key] = edit
 
         control_layout = QHBoxLayout()
         control_layout.addWidget(QLabel("Vertical exaggeration:"))
@@ -396,13 +460,34 @@ class CrossSectionProfileDialog(QDialog):
             control_layout.addWidget(self._draw_button)
             control_layout.addWidget(self._selected_lines_button)
             control_layout.addWidget(self._substrate_fraction_combo)
-            control_layout.addWidget(self._substrate_patch_button)
+
+        limits_layout = QHBoxLayout()
+        limits_layout.addWidget(QLabel("y limits:"))
+        limits_layout.addWidget(self._limit_edits["y_min"])
+        limits_layout.addWidget(self._limit_edits["y_max"])
+        if self._mesh_mode:
+            limits_layout.addWidget(QLabel("color limits:"))
+            limits_layout.addWidget(self._limit_edits["c_min"])
+            limits_layout.addWidget(self._limit_edits["c_max"])
+        limits_layout.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._meta_label)
         layout.addLayout(control_layout)
+        layout.addLayout(limits_layout)
         layout.addWidget(self._chart_widget)
         layout.addWidget(self._message_label)
+
+        # Enter in a limit field must apply it, not trigger a dialog default button.
+        for button in (
+            self._reset_button,
+            self._print_button,
+            self._clear_button,
+            self._draw_button,
+            self._selected_lines_button,
+        ):
+            button.setAutoDefault(False)
+            button.setDefault(False)
 
     def set_mesh_handlers(
         self,
@@ -423,34 +508,66 @@ class CrossSectionProfileDialog(QDialog):
         if callable(self._on_selected_lines_requested):
             self._on_selected_lines_requested()
 
-    def _draw_substrate_patch(self):
+    def _substrate_selection_changed(self, _index=None):
         if callable(self._on_substrate_patch_requested):
             self._on_substrate_patch_requested(
                 self.substrate_patch_mode(),
                 self.substrate_fraction(),
             )
 
+    @staticmethod
+    def _parse_limit(text):
+        text = str(text or "").strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if math.isfinite(value) else None
+
+    def _apply_limits(self):
+        values = {key: self._parse_limit(edit.text()) for key, edit in self._limit_edits.items()}
+        if hasattr(self._chart_widget, "set_y_limits"):
+            self._chart_widget.set_y_limits(values["y_min"], values["y_max"])
+        if hasattr(self._chart_widget, "set_color_limits"):
+            self._chart_widget.set_color_limits(values["c_min"], values["c_max"])
+
     def substrate_patch_mode(self):
-        """Return the selected substrate patch mode."""
+        """Return the selected substrate patch mode, or an empty string for a dataset slice."""
         data = self._substrate_fraction_combo.currentData()
         if isinstance(data, (tuple, list)) and data:
-            return str(data[0] or "volume")
-        return "volume"
+            return str(data[0] or "")
+        return ""
 
     def set_substrate_fractions(self, labels):
         """Set the substrate operations and raw fraction choices for patch capture."""
-        self._substrate_fraction_combo.clear()
-        self._substrate_fraction_combo.addItem(
-            "Arithmetic mean grain size",
-            ("arithmetic", ""),
-        )
-        self._substrate_fraction_combo.addItem(
-            "Geometric mean grain size",
-            ("geometric", ""),
-        )
-        for label in labels or []:
-            label = str(label)
-            self._substrate_fraction_combo.addItem(label, ("volume", label))
+        current = self._substrate_fraction_combo.currentData()
+        self._substrate_fraction_combo.blockSignals(True)
+        try:
+            self._substrate_fraction_combo.clear()
+            self._substrate_fraction_combo.addItem("Dataset slice", ("", ""))
+            self._substrate_fraction_combo.addItem(
+                "Arithmetic mean grain size",
+                ("arithmetic", ""),
+            )
+            self._substrate_fraction_combo.addItem(
+                "Geometric mean grain size",
+                ("geometric", ""),
+            )
+            for label in labels or []:
+                label = str(label)
+                self._substrate_fraction_combo.addItem(label, ("volume", label))
+            index = next(
+                (
+                    row for row in range(self._substrate_fraction_combo.count())
+                    if self._substrate_fraction_combo.itemData(row) == current
+                ),
+                0,
+            )
+            self._substrate_fraction_combo.setCurrentIndex(index)
+        finally:
+            self._substrate_fraction_combo.blockSignals(False)
 
     def substrate_fraction(self):
         """Return the selected raw substrate fraction label."""
@@ -465,6 +582,9 @@ class CrossSectionProfileDialog(QDialog):
 
     def _on_reset(self):
         self._ve_spin.setValue(1.0)
+        for edit in self._limit_edits.values():
+            edit.clear()
+        self._apply_limits()
         self._chart_widget.reset_view()
 
     def set_profile(self, points, title, metadata, message=""):

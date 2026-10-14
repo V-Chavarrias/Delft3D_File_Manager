@@ -1897,9 +1897,7 @@ def test_substrate_patch_grid_matches_pcolormesh_cell_dimensions(plugin):
     assert values.shape == (2, 3)
 
 
-def test_substrate_variables_are_not_expanded_during_flattening(plugin, tmp_path):
-    source_path = tmp_path / "substrate.nc"
-    sidecar_path = tmp_path / "substrate_flat.nc"
+def _write_substrate_source(source_path):
     with Dataset(str(source_path), "w") as source_ds:
         source_ds.createDimension("time", 1)
         source_ds.createDimension("mesh2d_nFaces", 1)
@@ -1922,26 +1920,74 @@ def test_substrate_variables_are_not_expanded_during_flattening(plugin, tmp_path
         bedlevel[:] = [[10.0]]
         fraction_names[:] = [[*"Sediment1", *(["\x00"] * 7)], [*"Sediment2", *(["\x00"] * 7)]]
 
+
+def test_selected_thickness_and_fraction_are_both_flattened(plugin, tmp_path):
+    source_path = tmp_path / "substrate.nc"
+    _write_substrate_source(source_path)
+
     sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
         str(source_path),
-        ["mesh2d_lyrfrac"],
+        ["mesh2d_lyrfrac", "mesh2d_thlyr"],
     )
 
     with Dataset(sidecar_path, "r") as sidecar:
-        assert "mesh2d_lyrfrac" in sidecar.variables
+        generated = str(sidecar.qgis_flatten_generated).split("|")
+        fraction_names = [name for name in generated if name.startswith("mesh2d_lyrfrac_")]
+        thickness_names = [name for name in generated if name.startswith("mesh2d_thlyr_")]
+        assert len(fraction_names) == 4
+        assert len(thickness_names) == 2
+        values = sorted(
+            float(sidecar.variables[name][:].ravel()[0]) for name in fraction_names
+        )
+        assert values == [0.25, 0.25, 0.75, 0.75]
+        for name in fraction_names:
+            assert sidecar.variables[name].dimensions == ("time", "mesh2d_nFaces")
+
+
+def test_substrate_option_copies_raw_substrate_variables(plugin, tmp_path):
+    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
+
+    source_path = tmp_path / "substrate.nc"
+    _write_substrate_source(source_path)
+
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        [_SUBSTRATE_OPTION],
+    )
+
+    with Dataset(sidecar_path, "r") as sidecar:
+        for name in ("mesh2d_lyrfrac", "mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name"):
+            assert name in sidecar.variables
         assert sidecar.variables["mesh2d_lyrfrac"][:].tolist() == [
             [[[0.25, 0.75], [0.75, 0.25]]]
         ]
         assert not any(name.startswith("mesh2d_lyrfrac_") for name in sidecar.variables)
+        assert not any(name.startswith("mesh2d_thlyr_") for name in sidecar.variables)
+
+
+def test_substrate_option_offered_when_substrate_data_exists(plugin, tmp_path):
+    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
+
+    source_path = tmp_path / "substrate.nc"
+    _write_substrate_source(source_path)
+
+    with Dataset(str(source_path), "r") as source_ds:
+        analysis = plugin._analyze_ugrid_data_variables(source_ds)
+
+    assert _SUBSTRATE_OPTION in analysis["flattenable_names"]
+    assert "mesh2d_lyrfrac" in analysis["flattenable_names"]
+    assert "mesh2d_thlyr" in analysis["flattenable_names"]
 
 
 def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
+    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
+
     source_path = tmp_path / "synthetic_substrate_flatten.nc"
     shutil.copyfile(SUBSTRATE_FLATTEN_01, source_path)
 
     sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
         str(source_path),
-        ["mesh2d_lyrfrac", "mesh2d_hidexp"],
+        [_SUBSTRATE_OPTION, "mesh2d_hidexp"],
     )
 
     with Dataset(sidecar_path, "r") as sidecar:

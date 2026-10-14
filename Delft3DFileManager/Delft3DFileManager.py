@@ -62,6 +62,8 @@ except ImportError:
 _IMPORT_PROGRESS_DIALOG_OBJECT_NAME = "Delft3DFileManagerImportProgressDialog"
 _CUMULATIVE_BED_LEVEL_CHANGE_OPTION = "Cumulative bed level change"
 _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE = "mesh2d_mor_bl_change"
+_SUBSTRATE_OPTION = "Substrate"
+_SUBSTRATE_RAW_VARIABLES = ("mesh2d_lyrfrac", "mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name")
 
 
 def _qt_major_version():
@@ -487,6 +489,8 @@ class Delft3DFileManager:
         self._mesh_profile_source_layers = []
         self._substrate_patch_requested = False
         self._substrate_patch_mode = "volume"
+        self._substrate_fraction_label = ""
+        self._mesh_profile_last_line = None
         self._his_dialog = None
         self._one_d_results_dialog = None
         self._one_d_results_state = None
@@ -2260,9 +2264,9 @@ class Delft3DFileManager:
 
         dialog = CrossSectionProfileDialog(self.iface.mainWindow(), mesh_mode=True)
         dialog.set_mesh_handlers(
-            on_draw_requested=self._start_mesh_profile_capture,
+            on_draw_requested=self._on_mesh_draw_requested,
             on_selected_lines_requested=self._add_selected_mesh_profiles,
-            on_substrate_patch_requested=self._start_substrate_patch_capture,
+            on_substrate_patch_requested=self._on_substrate_selection_changed,
         )
         return dialog
 
@@ -2705,7 +2709,32 @@ class Delft3DFileManager:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        self._start_mesh_profile_capture()
+        self._on_mesh_draw_requested()
+
+    def _on_mesh_draw_requested(self):
+        """Start a dataset slice or substrate patch capture according to the dialog selection."""
+        dialog = self._ensure_mesh_profile_dialog()
+        substrate_mode = dialog.substrate_patch_mode()
+        if substrate_mode:
+            self._start_substrate_patch_capture(substrate_mode, dialog.substrate_fraction())
+        else:
+            self._start_mesh_profile_capture()
+
+    def _on_substrate_selection_changed(self, substrate_mode, fraction_label):
+        """Draw a substrate patch for the dropdown selection along the active or last line."""
+        canvas = self.iface.mapCanvas()
+        active_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        if self._mesh_profile_map_tool is not None and active_tool is self._mesh_profile_map_tool:
+            self._substrate_patch_requested = bool(substrate_mode)
+            self._substrate_patch_mode = str(substrate_mode or "volume")
+            self._substrate_fraction_label = str(fraction_label or "")
+            return
+        if not substrate_mode:
+            return
+        if self._mesh_profile_last_line:
+            self._append_substrate_profile(self._mesh_profile_last_line, substrate_mode, fraction_label)
+        else:
+            self._start_substrate_patch_capture(substrate_mode, fraction_label)
 
     def _start_mesh_profile_capture(
         self,
@@ -2721,6 +2750,8 @@ class Delft3DFileManager:
 
         canvas = self.iface.mapCanvas()
         previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        if previous_tool is not None and previous_tool is self._mesh_profile_map_tool:
+            previous_tool = self._mesh_profile_previous_map_tool
         manager = self
         dialog = self._ensure_mesh_profile_dialog()
 
@@ -2830,14 +2861,29 @@ class Delft3DFileManager:
             self._show_mesh_profile_message("Select one or more line features first.")
             return
 
-        count = 0
-        for feature in features:
-            for points in self._extract_polylines(feature.geometry()):
-                if len(points) >= 2:
-                    self._append_mesh_profile(points, label=f"Feature {feature.id()}")
-                    count += 1
-        if not count:
+        dialog = self._ensure_mesh_profile_dialog()
+        substrate_mode = dialog.substrate_patch_mode()
+        lines = [
+            (feature, points)
+            for feature in features
+            for points in self._extract_polylines(feature.geometry())
+            if len(points) >= 2
+        ]
+        if not lines:
             self._show_mesh_profile_message("The selected features contain no usable line geometry.")
+            return
+
+        if substrate_mode:
+            self._append_substrate_profile(lines[0][1], substrate_mode, dialog.substrate_fraction())
+            if len(lines) > 1:
+                dialog.set_status_message(
+                    f"A substrate patch shows one line; used feature {lines[0][0].id()} "
+                    f"of {len(lines)} selected lines."
+                )
+            return
+
+        for feature, points in lines:
+            self._append_mesh_profile(points, label=f"Feature {feature.id()}")
 
     def _append_mesh_profile(self, qgis_points, label="Drawn profile"):
         """Sample one line using the displayed dataset and append its curve."""
@@ -2858,6 +2904,7 @@ class Delft3DFileManager:
 
         self._prepare_mesh_profile_layers(layers)
         points = [(point.x(), point.y()) for point in qgis_points]
+        self._mesh_profile_last_line = list(points)
         crossings = self._mesh_profile_edge_crossings(layers, points)
         if not crossings:
             self._show_mesh_profile_message(
@@ -2927,6 +2974,11 @@ class Delft3DFileManager:
         if substrate_mode not in ("volume", "arithmetic", "geometric"):
             substrate_mode = "volume"
         fraction_label = str(fraction_label or "").strip()
+        line_points = [
+            (float(point[0]), float(point[1])) if isinstance(point, (tuple, list)) else (point.x(), point.y())
+            for point in qgis_points
+        ]
+        self._mesh_profile_last_line = list(line_points)
         self._log_substrate_debug(
             f"start mode={substrate_mode}, fraction={fraction_label!r}, "
             f"sediment_records={len(self._sediment_records)}"
@@ -2937,6 +2989,15 @@ class Delft3DFileManager:
         if not layers:
             self._show_mesh_profile_message("Activate an imported mesh layer before capturing a substrate patch.")
             return
+
+        sediment_records = []
+        if substrate_mode != "volume":
+            sediment_records = self._sediment_records or self._sediment_records_from_layers()
+            if not sediment_records:
+                self._show_mesh_profile_message(
+                    "Mean grain size requires sediment sizes. Import the sediment (.sed) file of this model first."
+                )
+                return
 
         if substrate_mode == "volume" and not fraction_label:
             available_fractions = self._substrate_fraction_labels(layers)
@@ -2949,13 +3010,13 @@ class Delft3DFileManager:
                 return
             else:
                 self._show_mesh_profile_message(
-                    "No sediment fractions were found. Select a mesh containing mesh2d_lyrfrac first."
+                    "No sediment fractions were found. Import the map with the 'Substrate' option selected first."
                 )
                 return
 
         dataset_index = self._mesh_profile_dataset_index(layers[0])
         self._log_substrate_debug(f"dataset_index={dataset_index!r}")
-        if dataset_index is None and not fraction_label:
+        if dataset_index is None and substrate_mode == "volume" and not fraction_label:
             self._show_mesh_profile_message("Select a substrate fraction dataset in the mesh renderer first.")
             return
 
@@ -2964,7 +3025,7 @@ class Delft3DFileManager:
             group_index = int(layers[0].rendererSettings().activeScalarDatasetGroup())
         except (RuntimeError, TypeError, ValueError, AttributeError):
             pass
-        if group_index is None and not fraction_label:
+        if group_index is None and substrate_mode == "volume" and not fraction_label:
             self._show_mesh_profile_message("Select a substrate fraction dataset in the mesh renderer first.")
             return
 
@@ -2983,7 +3044,10 @@ class Delft3DFileManager:
                 return ""
 
         group_name = f"Substrate fraction {fraction_label}" if fraction_label else ""
-        if fraction_label:
+        if substrate_mode != "volume":
+            group_name = f"{substrate_mode.capitalize()} mean grain size"
+            fraction_match = True
+        elif fraction_label:
             fraction_match = True
         else:
             group_name = _group_name(dataset_index)
@@ -3032,20 +3096,11 @@ class Delft3DFileManager:
             self._log_substrate_debug("fraction metadata did not match substrate patterns")
             self._show_mesh_profile_message("Select a substrate: fraction dataset first.")
             return
-        if not fraction_label:
+        if not fraction_label and substrate_mode == "volume":
             fraction_label = fraction_match.group(1).strip()
         self._log_substrate_debug(f"fraction_label={fraction_label!r}")
 
-        sediment_records = []
-        if substrate_mode != "volume":
-            sediment_records = self._sediment_records or self._sediment_records_from_layers()
-        if substrate_mode != "volume" and not sediment_records:
-            self._show_mesh_profile_message(
-                "Import or select a sediment table before requesting grain-size substrate values."
-            )
-            return
-
-        crossings = self._mesh_profile_edge_crossings(layers, qgis_points)
+        crossings = self._mesh_profile_edge_crossings(layers, line_points)
         self._log_substrate_debug(f"mesh_crossings={len(crossings)}")
         if not crossings:
             self._show_mesh_profile_message("The drawn line does not cross any mesh edge in the imported partition topology.")
@@ -3153,17 +3208,17 @@ class Delft3DFileManager:
                     if fraction_dimension is None:
                         continue
                     fraction_labels = self._dimension_labels(dataset, fraction_dimension)
-                    fraction_index = next(
-                        (
-                            index for index, label in enumerate(fraction_labels)
-                            if str(label).strip().strip("#").casefold() == fraction_label.strip().strip("#").casefold()
-                        ),
-                        None,
-                    )
-                    if fraction_index is None:
-                        continue
                     fraction_axis = fraction_dimensions.index(fraction_dimension)
                     if substrate_mode == "volume":
+                        fraction_index = next(
+                            (
+                                index for index, label in enumerate(fraction_labels)
+                                if str(label).strip().strip("#").casefold() == fraction_label.strip().strip("#").casefold()
+                            ),
+                            None,
+                        )
+                        if fraction_index is None:
+                            continue
                         sample_values = np.take(
                             fraction_data,
                             fraction_index,
@@ -9175,6 +9230,13 @@ class Delft3DFileManager:
             and self._is_numeric_netcdf_variable(nc_dataset.variables[bed_level_name])
         )
         flattenable_names = sorted(flattenable_names)
+        fraction_name = self._find_variable_name(nc_dataset, "mesh2d_lyrfrac")
+        if (
+            has_bed_level
+            and fraction_name
+            and self._has_substrate_data(nc_dataset, fraction_name)
+        ):
+            flattenable_names.insert(0, _SUBSTRATE_OPTION)
         if has_bed_level:
             has_morphodynamic = True
             flattenable_names.insert(0, _CUMULATIVE_BED_LEVEL_CHANGE_OPTION)
@@ -9303,7 +9365,7 @@ class Delft3DFileManager:
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(
             "Select data variables to include in the flattened file. "
-            "Select mesh2d_lyrfrac to make raw substrate data available for on-demand patches."
+            f"Select '{_SUBSTRATE_OPTION}' to keep the raw substrate data needed for substrate patches."
         ))
 
         # Qt6 moved flag/state enums into sub-namespaces; fall back gracefully.
@@ -9364,7 +9426,7 @@ class Delft3DFileManager:
         source_path = os.path.abspath(source_path)
         sidecar_path = os.path.abspath(self._sidecar_flattened_path(source_path))
         source_mtime = str(int(os.path.getmtime(source_path)))
-        signature = "v6|" + "|".join(sorted(selected_variables))
+        signature = "v7|" + "|".join(sorted(selected_variables))
 
         if os.path.exists(sidecar_path):
             try:
@@ -9480,20 +9542,18 @@ class Delft3DFileManager:
                     )
                     continue
 
+                if selected_name == _SUBSTRATE_OPTION:
+                    for required_name in _SUBSTRATE_RAW_VARIABLES:
+                        actual_name = self._find_variable_name(source_ds, required_name)
+                        if actual_name:
+                            required_variable_names.add(actual_name)
+                    continue
+
                 selected_var = source_ds.variables.get(selected_name)
                 if selected_var is None:
                     continue
 
                 required_variable_names.update(_referenced_variable_tokens(selected_var))
-
-                if (
-                    self._is_substrate_fraction_variable(selected_name)
-                    and self._has_substrate_data(source_ds, selected_name)
-                ):
-                    for required_name in ("mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name"):
-                        actual_name = self._find_variable_name(source_ds, required_name)
-                        if actual_name:
-                            required_variable_names.add(actual_name)
 
                 for dim_name in selected_var.dimensions:
                     if dim_name in source_ds.variables:
@@ -9598,13 +9658,6 @@ class Delft3DFileManager:
                 if not self._is_numeric_netcdf_variable(variable):
                     continue
 
-                if (
-                    self._is_substrate_fraction_variable(variable_name)
-                    and self._has_substrate_data(source_ds, variable_name)
-                ):
-                    _copy_variable(variable_name)
-                    continue
-
                 extra_dims = [
                     dim_name
                     for dim_name in variable.dimensions
@@ -9686,10 +9739,6 @@ class Delft3DFileManager:
             progress_callback(len(selected_variables), len(selected_variables), "done")
 
         return sidecar_path
-
-    def _is_substrate_fraction_variable(self, variable_name):
-        """Return True for the layered substrate fraction variable."""
-        return str(variable_name).lower() == "mesh2d_lyrfrac"
 
     def _has_substrate_data(self, source_ds, fraction_name):
         """Return True when layered substrate data has multiple fractions."""

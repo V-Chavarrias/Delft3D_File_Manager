@@ -22,7 +22,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
 - Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
-- Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change for side-car flattening.
+- Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change and a **Substrate** option for side-car flattening.
 - Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
 - Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
 - Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
@@ -146,14 +146,26 @@ Workflow:
 The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
 
 
-For morphodynamic outputs with sediment fractions, select `mesh2d_lyrfrac` when
-importing the map to keep the raw substrate data available for on-demand
-reconstruction. The data is not expanded into per-layer/per-fraction sidecar
-variables. In **2D Slice**, choose one entry from the substrate menu:
+For morphodynamic outputs with sediment fractions, select **Substrate** when
+importing the map. This copies the raw `mesh2d_lyrfrac`, `mesh2d_thlyr`,
+`mesh2d_mor_bl`, and `sedfrac_name` variables into the sidecar for on-demand
+reconstruction, even if those variables are not selected individually.
+Selecting `mesh2d_lyrfrac` or `mesh2d_thlyr` themselves expands them into
+per-layer (and per-fraction) mesh datasets that can be viewed in QGIS. In
+**2D Slice**, the dropdown defaults to **Dataset slice**. Choosing
 **Arithmetic mean grain size**, **Geometric mean grain size**, or one of the
-available sediment fractions. Volume fraction patches do not require a
+available sediment fractions draws a substrate patch immediately along the
+last drawn or selected line; if there is no line yet, draw one on the map.
+While a substrate entry is selected, **Draw Dataset Slice** and
+**Add Selected Line Slices** draw substrate patches instead of dataset
+curves. A patch shows one line; with several selected lines, the first is used.
+Volume fraction patches do not require a
 sediment table; the grain-size modes use the first loaded `.sed` table or a
 compatible sediment table already present in the QGIS project.
+
+Use the **y limits** and **color limits** fields (empty = automatic) to change
+the axis and color range of the plot on display without resampling it. Press
+Enter to apply; **Reset View** restores automatic limits.
 
 ### Profile Chart Window
 
