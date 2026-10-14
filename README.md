@@ -29,6 +29,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Visualizes HIS station and cross-section timeseries in a dedicated explorer with variable selection and New Plot/Add To Plot modes.
 - Visualizes time-dependent mesh1d node and edge results in point and shortest-path track modes, including derived Froude values.
 - Draws scalar dataset slices across 2D mesh edges for imported mesh results.
+- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction.
 - Computes a time-dependent node streamfunction from `q1` discharge.
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
@@ -51,6 +52,7 @@ The plugin menu contains these actions in order. The links point to the correspo
 	- [HIS Time Series](#his-time-series-explorer)
 	- [1D MAP](#1d-map)
 	- [2D Slice](#2d-slice)
+	- [Large MAP Viewer](#large-map-viewer)
 	- [Boundary Conditions](#cross-section-and-boundary-conditions-viewer)
 4. [Compute 2D Variables](#compute-2d-variables)
 	- [Froude Number](#froude-number)
@@ -106,6 +108,7 @@ The Viewer actions are documented here:
 - [HIS Time Series](#his-time-series-explorer)
 - [1D MAP](#1d-map)
 - [2D Slice](#2d-slice)
+- [Large MAP Viewer](#large-map-viewer)
 
 ### Cross-section and Boundary Conditions Viewer
 
@@ -167,6 +170,46 @@ compatible sediment table already present in the QGIS project.
 Use the **y limits** and **color limits** fields (empty = automatic) to change
 the axis and color range of the plot on display without resampling it. Press
 Enter to apply; **Reset View** restores automatic limits.
+
+### Large MAP Viewer
+
+Use **Viewer -> Large MAP Viewer** (or its toolbar icon) for Delft3D FM MAP
+files that are too large to load as regular mesh layers. Only the grid is read
+once; each plot then reads just the selected variable, time, and index from the
+NetCDF file(s).
+
+Workflow:
+1. Click **Browse...** and select a `*_map.nc` file. For partitioned output
+   (`<name>_0000_map.nc`, `<name>_0001_map.nc`, ...) any partition can be
+   selected; all siblings are found automatically. The grid is loaded and shown
+   as soon as the file is selected, in a `<name> (Large MAP)` layer group with
+   one in-memory mesh layer per partition (ghost cells excluded).
+2. Select a **Variable**. All 2D face and node variables are listed, plus the
+   derived variables that can be computed from the file: Froude number,
+   velocity magnitude (when `ucmag` is absent), cumulative bed level change
+   (`mor_bl` relative to the first time), and the streamfunction (from `q1`,
+   computed across all partitions).
+3. Select the **Time**. For variables with additional dimensions (for example
+   sediment fraction or bed layer) one index selector per dimension is shown.
+4. Click **Plot**. The selected data replaces the plotted dataset on the
+   existing mesh layers. Select another variable/time/index and click **Plot**
+   again to update.
+
+The ◀ / ▶ buttons next to the time and index selectors plot the previous or
+next entry immediately.
+
+Colour scale: use the layer **Symbology** as usual. Editing one partition layer
+applies the same settings to all partitions. Stepping through time or indices
+keeps your colour settings and range; selecting another variable keeps the
+colour ramp and resets the range to the data range of all partitions.
+
+Limitations:
+- Edge variables and mesh1d variables are not listed.
+- The layers are in-memory: they are not restored from a saved project, and
+  saving the project stores the mesh in the project file (which can make it
+  large). Reselect the MAP file in the viewer to rebuild them.
+- The streamfunction graph is built the first time the streamfunction is
+  plotted, which takes a few seconds for large models.
 
 ### Profile Chart Window
 

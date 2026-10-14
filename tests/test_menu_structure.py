@@ -47,6 +47,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         "HIS Time Series",
         "1D MAP",
         "2D Slice",
+        "Large MAP Viewer",
         "Boundary Conditions",
     ]
     assert [action.label for action in plugin.compute_2d_variables_menu.actions] == [
@@ -59,6 +60,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.create_mesh_polyline_action.triggered.callback == plugin.create_polyline_from_mesh
     assert plugin.mesh_difference_action.triggered.callback == plugin.compute_mesh_difference
+    assert plugin.large_map_action.triggered.callback == plugin.open_large_map_viewer
     assert plugin.export_action.triggered.callback == plugin.export_active_layer
     assert ".xyn" in plugin.export_action.status_tip
 
@@ -92,6 +94,7 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
         plugin.one_d_results_action,
         plugin.mesh_profile_action,
         plugin.his_timeseries_action,
+        plugin.large_map_action,
         plugin.mesh_difference_action,
     ]
 
@@ -104,3 +107,4 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.boundary_conditions_action not in removed
     assert plugin.export_action in removed
     iface.removeToolBarIcon.assert_any_call(plugin.mesh_difference_action)
+    iface.removeToolBarIcon.assert_any_call(plugin.large_map_action)

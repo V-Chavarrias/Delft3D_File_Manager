@@ -479,6 +479,8 @@ class Delft3DFileManager:
         self.stream_function_action = None
         self.froude_action = None
         self.mesh_difference_action = None
+        self.large_map_action = None
+        self._large_map_viewer = None
         self._bed_level_dialog = None
         self._profile_dialog = None
         self._mesh_profile_dialog = None
@@ -535,6 +537,7 @@ class Delft3DFileManager:
             "2d_slice": os.path.join(icon_directory, "icon-2d-slice.svg"),
             "his_timeseries": os.path.join(icon_directory, "icon-his-timeseries.svg"),
             "cross_sections": os.path.join(icon_directory, "icon-cross-sections.svg"),
+            "large_map": os.path.join(icon_directory, "icon-large-map.svg"),
         }
         icon_path = os.path.join(icon_directory, "icon.svg")
         self.install_deps_action = QAction(
@@ -702,15 +705,25 @@ class Delft3DFileManager:
         )
         self.one_d_results_action.triggered.connect(self.open_one_d_results_window)
 
+        self.large_map_action = QAction(
+            QIcon(icon_paths["large_map"]), "Large MAP Viewer", self.iface.mainWindow()
+        )
+        self.large_map_action.setStatusTip(
+            "Plot variables of large (partitioned) MAP files by loading only the selected time/index"
+        )
+        self.large_map_action.triggered.connect(self.open_large_map_viewer)
+
         self.iface.addToolBarIcon(self.profile_chart_action)
         self.iface.addToolBarIcon(self.one_d_results_action)
         self.iface.addToolBarIcon(self.mesh_profile_action)
         self.iface.addToolBarIcon(self.his_timeseries_action)
+        self.iface.addToolBarIcon(self.large_map_action)
 
         self.viewer_menu.addAction(self.profile_chart_action)
         self.viewer_menu.addAction(self.his_timeseries_action)
         self.viewer_menu.addAction(self.one_d_results_action)
         self.viewer_menu.addAction(self.mesh_profile_action)
+        self.viewer_menu.addAction(self.large_map_action)
         self.viewer_menu.addAction(self.boundary_conditions_action)
 
         self.mesh_properties_action = QAction(
@@ -772,6 +785,11 @@ class Delft3DFileManager:
             self.iface.removeToolBarIcon(self.profile_chart_action)
         if self.mesh_difference_action:
             self.iface.removeToolBarIcon(self.mesh_difference_action)
+        if self.large_map_action:
+            self.iface.removeToolBarIcon(self.large_map_action)
+        if self._large_map_viewer is not None:
+            self._large_map_viewer.close()
+            self._large_map_viewer = None
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
@@ -3857,6 +3875,14 @@ class Delft3DFileManager:
         dialog.set_time_options(time_options)
         dialog.set_message("")
         return True
+
+    def open_large_map_viewer(self):
+        """Open/focus the Large MAP Viewer for large (partitioned) MAP files."""
+        if self._large_map_viewer is None:
+            from .large_map_viewer import LargeMapViewer
+
+            self._large_map_viewer = LargeMapViewer(self.iface, self)
+        self._large_map_viewer.open()
 
     def open_one_d_results_window(self):
         """Open/focus the 1D results visualizer."""
