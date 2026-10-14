@@ -22,7 +22,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
 - Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
-- Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change and a **Substrate** option for side-car flattening.
+- Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change for side-car flattening. Substrate patch data is read from the source MAP output on demand.
 - Writes flattened NetCDF side-cars and loads the original and flattened datasets as separate layers, with flattened layers tagged as `morpho`.
 - Imports partitioned mesh outputs with owner-masked or original ghost-cell rendering modes and synchronized layer groups.
 - Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
@@ -146,11 +146,12 @@ Workflow:
 The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
 
 
-For morphodynamic outputs with sediment fractions, select **Substrate** when
-importing the map. This copies the raw `mesh2d_lyrfrac`, `mesh2d_thlyr`,
-`mesh2d_mor_bl`, and `sedfrac_name` variables into the sidecar for on-demand
-reconstruction, even if those variables are not selected individually.
-Selecting `mesh2d_lyrfrac` or `mesh2d_thlyr` themselves expands them into
+For morphodynamic outputs with sediment fractions, **2D Slice** reads
+`mesh2d_lyrfrac`, `mesh2d_thlyr`, `mesh2d_mor_bl`, and `sedfrac_name` directly
+from the original MAP output when creating a substrate patch. This also works
+when the active mesh is a flattened or owner-filtered sidecar; the raw
+substrate arrays are not duplicated in the sidecar solely for patch capture.
+Selecting `mesh2d_lyrfrac` or `mesh2d_thlyr` themselves still expands them into
 per-layer (and per-fraction) mesh datasets that can be viewed in QGIS. In
 **2D Slice**, the dropdown defaults to **Dataset slice**. Choosing
 **Arithmetic mean grain size**, **Geometric mean grain size**, or one of the

@@ -1901,9 +1901,20 @@ def _write_substrate_source(source_path):
     with Dataset(str(source_path), "w") as source_ds:
         source_ds.createDimension("time", 1)
         source_ds.createDimension("mesh2d_nFaces", 1)
+        source_ds.createDimension("mesh2d_nNodes", 3)
+        source_ds.createDimension("nMax_face_nodes", 3)
         source_ds.createDimension("nBedLayers", 2)
         source_ds.createDimension("nSedTot", 2)
         source_ds.createDimension("nStringlen", 16)
+        node_x = source_ds.createVariable("mesh2d_node_x", "f8", ("mesh2d_nNodes",))
+        node_y = source_ds.createVariable("mesh2d_node_y", "f8", ("mesh2d_nNodes",))
+        face_nodes = source_ds.createVariable(
+            "mesh2d_face_nodes", "i4", ("mesh2d_nFaces", "nMax_face_nodes")
+        )
+        face_nodes.start_index = 0
+        node_x[:] = [0.0, 1.0, 0.0]
+        node_y[:] = [0.0, 0.0, 1.0]
+        face_nodes[:] = [[0, 1, 2]]
         fractions = source_ds.createVariable(
             "mesh2d_lyrfrac", "f8", ("time", "mesh2d_nFaces", "nBedLayers", "nSedTot")
         )
@@ -1915,10 +1926,14 @@ def _write_substrate_source(source_path):
         fraction_names = source_ds.createVariable(
             "sedfrac_name", "S1", ("nSedTot", "nStringlen")
         )
+        hidden_exposure = source_ds.createVariable(
+            "mesh2d_hidexp", "f8", ("time", "mesh2d_nFaces")
+        )
         fractions[:] = [[[[0.25, 0.75], [0.75, 0.25]]]]
         thickness[:] = [[[1.0, 3.0]]]
         bedlevel[:] = [[10.0]]
         fraction_names[:] = [[*"Sediment1", *(["\x00"] * 7)], [*"Sediment2", *(["\x00"] * 7)]]
+        hidden_exposure[:] = [[1.0]]
 
 
 def test_selected_thickness_and_fraction_are_both_flattened(plugin, tmp_path):
@@ -1944,61 +1959,202 @@ def test_selected_thickness_and_fraction_are_both_flattened(plugin, tmp_path):
             assert sidecar.variables[name].dimensions == ("time", "mesh2d_nFaces")
 
 
-def test_substrate_option_copies_raw_substrate_variables(plugin, tmp_path):
-    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
-
+def test_flatten_sidecar_tracks_original_map_without_substrate_payload(plugin, tmp_path):
     source_path = tmp_path / "substrate.nc"
     _write_substrate_source(source_path)
 
     sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
         str(source_path),
-        [_SUBSTRATE_OPTION],
+        ["mesh2d_hidexp"],
+    )
+
+    with Dataset(sidecar_path, "a") as sidecar:
+        sidecar.qgis_flatten_signature = "v7|mesh2d_hidexp"
+
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        ["mesh2d_hidexp"],
     )
 
     with Dataset(sidecar_path, "r") as sidecar:
+        assert str(sidecar.qgis_flatten_signature).startswith("v8|")
+        assert str(sidecar.qgis_substrate_source_path) == str(source_path.resolve())
+        assert "mesh2d_hidexp" in sidecar.variables
         for name in ("mesh2d_lyrfrac", "mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name"):
-            assert name in sidecar.variables
-        assert sidecar.variables["mesh2d_lyrfrac"][:].tolist() == [
-            [[[0.25, 0.75], [0.75, 0.25]]]
-        ]
-        assert not any(name.startswith("mesh2d_lyrfrac_") for name in sidecar.variables)
-        assert not any(name.startswith("mesh2d_thlyr_") for name in sidecar.variables)
+            assert name not in sidecar.variables
 
 
-def test_substrate_option_offered_when_substrate_data_exists(plugin, tmp_path):
-    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
-
+def test_substrate_patch_data_needs_no_virtual_import_option(plugin, tmp_path):
     source_path = tmp_path / "substrate.nc"
     _write_substrate_source(source_path)
 
     with Dataset(str(source_path), "r") as source_ds:
         analysis = plugin._analyze_ugrid_data_variables(source_ds)
 
-    assert _SUBSTRATE_OPTION in analysis["flattenable_names"]
+    assert "Substrate" not in analysis["flattenable_names"]
     assert "mesh2d_lyrfrac" in analysis["flattenable_names"]
     assert "mesh2d_thlyr" in analysis["flattenable_names"]
 
 
-def test_flatten_substrate_copies_morphodynamic_bed_level(plugin, tmp_path):
-    from Delft3DFileManager.Delft3DFileManager import _SUBSTRATE_OPTION
+def test_cumulative_bed_level_change_keeps_bed_level_without_substrate_option(plugin, tmp_path):
+    from Delft3DFileManager.Delft3DFileManager import _CUMULATIVE_BED_LEVEL_CHANGE_OPTION
 
     source_path = tmp_path / "synthetic_substrate_flatten.nc"
     shutil.copyfile(SUBSTRATE_FLATTEN_01, source_path)
 
     sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
         str(source_path),
-        [_SUBSTRATE_OPTION, "mesh2d_hidexp"],
+        [_CUMULATIVE_BED_LEVEL_CHANGE_OPTION, "mesh2d_hidexp"],
     )
 
     with Dataset(sidecar_path, "r") as sidecar:
         assert "mesh2d_mor_bl" in sidecar.variables
         assert sidecar.variables["mesh2d_mor_bl"][:].tolist() == [[10.0, 11.0]]
-        assert "mesh2d_lyrfrac" in sidecar.variables
+        assert "mesh2d_lyrfrac" not in sidecar.variables
+        assert "mesh2d_thlyr" not in sidecar.variables
+        assert "sedfrac_name" not in sidecar.variables
         assert not any(name.startswith("mesh2d_lyrfrac_") for name in sidecar.variables)
         assert any(
             name.startswith("mesh2d_hidexp_")
             for name in sidecar.variables
         )
+
+
+def _write_partitioned_substrate_source(source_path):
+    with Dataset(str(source_path), "w") as source_ds:
+        source_ds.createDimension("time", 1)
+        source_ds.createDimension("mesh2d_nFaces", 2)
+        source_ds.createDimension("mesh2d_nNodes", 6)
+        source_ds.createDimension("nMax_face_nodes", 3)
+        source_ds.createDimension("nBedLayers", 1)
+        source_ds.createDimension("nSedTot", 2)
+        source_ds.createDimension("nStringlen", 16)
+
+        node_x = source_ds.createVariable("mesh2d_node_x", "f8", ("mesh2d_nNodes",))
+        node_y = source_ds.createVariable("mesh2d_node_y", "f8", ("mesh2d_nNodes",))
+        face_nodes = source_ds.createVariable(
+            "mesh2d_face_nodes", "i4", ("mesh2d_nFaces", "nMax_face_nodes")
+        )
+        face_nodes.start_index = 0
+        node_x[:] = [0.0, 1.0, 0.0, 2.0, 3.0, 2.0]
+        node_y[:] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+        face_nodes[:] = [[0, 1, 2], [3, 4, 5]]
+
+        domain = source_ds.createVariable(
+            "mesh2d_flowelem_domain", "i4", ("mesh2d_nFaces",)
+        )
+        fractions = source_ds.createVariable(
+            "mesh2d_lyrfrac",
+            "f8",
+            ("time", "mesh2d_nFaces", "nBedLayers", "nSedTot"),
+        )
+        thickness = source_ds.createVariable(
+            "mesh2d_thlyr", "f8", ("time", "mesh2d_nFaces", "nBedLayers")
+        )
+        bedlevel = source_ds.createVariable(
+            "mesh2d_mor_bl", "f8", ("time", "mesh2d_nFaces")
+        )
+        fraction_names = source_ds.createVariable(
+            "sedfrac_name", "S1", ("nSedTot", "nStringlen")
+        )
+        hidden_exposure = source_ds.createVariable(
+            "mesh2d_hidexp", "f8", ("time", "mesh2d_nFaces")
+        )
+        domain[:] = [0, 1]
+        fractions[:] = [[[[0.4, 0.6]], [[0.8, 0.2]]]]
+        thickness[:] = [[[1.0], [2.0]]]
+        bedlevel[:] = [[10.0, 20.0]]
+        fraction_names[:] = [[*"Sediment1", *(["\x00"] * 7)], [*"Sediment2", *(["\x00"] * 7)]]
+        hidden_exposure[:] = [[1.0, 2.0]]
+
+
+def _substrate_test_layer(source_path):
+    layer = MagicMock()
+    layer.customProperty.side_effect = lambda name, default="": (
+        str(source_path) if name == "delft3d_mesh_source" else default
+    )
+    layer.rendererSettings.return_value.activeScalarDatasetGroup.return_value = -1
+    return layer
+
+
+def _configure_substrate_patch_test(plugin, layer, crossings):
+    dialog = MagicMock()
+    plugin._mesh_profile_source_layers = [layer]
+    plugin._mesh_profile_dataset_index = MagicMock(
+        return_value=SimpleNamespace(dataset=lambda: 0)
+    )
+    plugin._mesh_profile_edge_crossings = MagicMock(return_value=crossings)
+    plugin._ensure_mesh_profile_dialog = MagicMock(return_value=dialog)
+    plugin._show_mesh_profile_message = MagicMock()
+    plugin._log_substrate_debug = MagicMock()
+    return dialog
+
+
+def test_substrate_patch_reads_original_map_for_flattened_mesh(plugin, tmp_path):
+    import numpy as np
+
+    source_path = tmp_path / "substrate.nc"
+    _write_substrate_source(source_path)
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        ["mesh2d_hidexp"],
+    )
+    layer = _substrate_test_layer(sidecar_path)
+    dialog = _configure_substrate_patch_test(
+        plugin,
+        layer,
+        [(layer, 0.5, (0.25, 0.25))],
+    )
+
+    plugin._append_substrate_profile(
+        [(0.0, 0.0), (1.0, 1.0)],
+        "volume",
+        "Sediment2",
+    )
+
+    values = dialog.set_substrate_patch.call_args.args[2]
+    np.testing.assert_allclose(values[:, 0], [0.75, 0.25])
+    plugin._show_mesh_profile_message.assert_not_called()
+
+
+def test_substrate_patch_preserves_partition_owner_mask_from_sidecar(plugin, tmp_path):
+    import numpy as np
+
+    source_path = tmp_path / "run_0000_map.nc"
+    _write_partitioned_substrate_source(source_path)
+    flattened_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        ["mesh2d_hidexp"],
+    )
+    owner_path, status = plugin._prepare_partition_ghost_sidecar(flattened_path)
+
+    assert status == "ok"
+    with Dataset(owner_path, "r") as owner_sidecar:
+        assert str(owner_sidecar.qgis_substrate_source_path) == str(source_path.resolve())
+        assert int(owner_sidecar.qgis_partition_filter_partition) == 0
+        assert "mesh2d_lyrfrac" not in owner_sidecar.variables
+        assert "mesh2d_thlyr" not in owner_sidecar.variables
+
+    layer = _substrate_test_layer(owner_path)
+    dialog = _configure_substrate_patch_test(
+        plugin,
+        layer,
+        [
+            (layer, 0.5, (0.25, 0.25)),
+            (layer, 1.5, (2.25, 0.25)),
+        ],
+    )
+
+    plugin._append_substrate_profile(
+        [(0.0, 0.0), (2.0, 1.0)],
+        "volume",
+        "Sediment1",
+    )
+
+    values = dialog.set_substrate_patch.call_args.args[2]
+    assert values.shape == (1, 1)
+    np.testing.assert_allclose(values[0, 0], 0.4)
+    plugin._show_mesh_profile_message.assert_not_called()
 
 
 def test_flatten_sidecars_calculate_cumulative_bed_level_change_for_partitions(plugin, tmp_path):

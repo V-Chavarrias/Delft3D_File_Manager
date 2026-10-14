@@ -62,8 +62,6 @@ except ImportError:
 _IMPORT_PROGRESS_DIALOG_OBJECT_NAME = "Delft3DFileManagerImportProgressDialog"
 _CUMULATIVE_BED_LEVEL_CHANGE_OPTION = "Cumulative bed level change"
 _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE = "mesh2d_mor_bl_change"
-_SUBSTRATE_OPTION = "Substrate"
-_SUBSTRATE_RAW_VARIABLES = ("mesh2d_lyrfrac", "mesh2d_thlyr", "mesh2d_mor_bl", "sedfrac_name")
 
 
 def _qt_major_version():
@@ -2650,19 +2648,64 @@ class Delft3DFileManager:
                 continue
         return None
 
+    def _mesh_layer_source_path(self, layer):
+        """Resolve the NetCDF path backing an imported mesh layer."""
+        try:
+            source = str(layer.customProperty("delft3d_mesh_source", ""))
+        except (RuntimeError, AttributeError):
+            source = ""
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = source.split("|", 1)[0]
+        return _mesh_source_path(source) if source else ""
+
+    def _substrate_source_path_for_file(self, source_path):
+        """Resolve a sidecar's original MAP path, falling back to the file itself."""
+        import netCDF4 as nc
+
+        source_path = str(source_path or "").strip()
+        if not source_path:
+            return ""
+        source_path = _mesh_source_path(source_path)
+        try:
+            with nc.Dataset(source_path, "r") as dataset:
+                original_path = str(
+                    getattr(dataset, "qgis_substrate_source_path", "")
+                ).strip()
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            self._log_substrate_debug(
+                f"could not read source provenance from {source_path!r}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return source_path
+        return _mesh_source_path(original_path) if original_path else source_path
+
+    def _substrate_source_path(self, layer):
+        """Return the original MAP path associated with a mesh layer."""
+        try:
+            source = str(layer.customProperty("delft3d_substrate_source", "")).strip()
+        except (RuntimeError, AttributeError):
+            source = ""
+
+        if source:
+            resolved = _mesh_source_path(source)
+            if os.path.isfile(resolved):
+                return resolved
+            self._log_substrate_debug(
+                f"stored substrate source does not exist: {resolved!r}"
+            )
+
+        return self._substrate_source_path_for_file(
+            self._mesh_layer_source_path(layer)
+        )
+
     def _substrate_fraction_labels(self, layers):
-        """Read raw sediment fraction labels from the mesh source without writing a file."""
+        """Read raw sediment fraction labels from the original MAP output."""
         import netCDF4 as nc
 
         for layer in layers or []:
-            try:
-                source = str(layer.customProperty("delft3d_mesh_source", ""))
-            except (RuntimeError, AttributeError):
-                source = ""
-            if not source:
-                source_method = getattr(layer, "source", None)
-                source = str(source_method() if callable(source_method) else "")
-            source = _mesh_source_path(source.split("|", 1)[0])
+            source = self._substrate_source_path(layer)
             if not source:
                 continue
             try:
@@ -3010,7 +3053,7 @@ class Delft3DFileManager:
                 return
             else:
                 self._show_mesh_profile_message(
-                    "No sediment fractions were found. Import the map with the 'Substrate' option selected first."
+                    "No sediment fractions were found in the original MAP output."
                 )
                 return
 
@@ -3107,14 +3150,7 @@ class Delft3DFileManager:
             return
 
         def _source_path(layer):
-            try:
-                source = str(layer.customProperty("delft3d_mesh_source", ""))
-            except (RuntimeError, AttributeError):
-                source = ""
-            if not source:
-                source_method = getattr(layer, "source", None)
-                source = str(source_method() if callable(source_method) else "")
-            return _mesh_source_path(source.split("|", 1)[0])
+            return self._mesh_layer_source_path(layer)
 
         def _face_index(node_x, node_y, face_nodes, point):
             for face_index, face in enumerate(face_nodes):
@@ -3138,14 +3174,31 @@ class Delft3DFileManager:
             return None
 
         samples = []
+        partition_owner_cache = {}
         for layer, chainage, point in crossings:
-            source = _source_path(layer)
-            self._log_substrate_debug(f"sample chainage={chainage}, source={source!r}")
-            if not source:
+            mesh_source = _source_path(layer)
+            substrate_source = self._substrate_source_path(layer)
+            self._log_substrate_debug(
+                f"sample chainage={chainage}, mesh_source={mesh_source!r}, "
+                f"substrate_source={substrate_source!r}"
+            )
+            if not mesh_source or not substrate_source:
                 self._log_substrate_debug("skipping crossing without a source path")
                 continue
             try:
-                with nc.Dataset(source, "r") as dataset:
+                if mesh_source not in partition_owner_cache:
+                    with nc.Dataset(mesh_source, "r") as mesh_dataset:
+                        owner_partition = getattr(
+                            mesh_dataset,
+                            "qgis_partition_filter_partition",
+                            None,
+                        )
+                    partition_owner_cache[mesh_source] = (
+                        None if owner_partition is None else int(owner_partition)
+                    )
+                owner_partition = partition_owner_cache[mesh_source]
+
+                with nc.Dataset(substrate_source, "r") as dataset:
                     variables = {name.lower(): name for name in dataset.variables}
                     required = ["mesh2d_node_x", "mesh2d_node_y", "mesh2d_face_nodes", "mesh2d_mor_bl", "mesh2d_thlyr"]
                     if any(name not in variables for name in required):
@@ -3169,6 +3222,32 @@ class Delft3DFileManager:
                     self._log_substrate_debug(f"face_index={face_index}")
                     if face_index is None:
                         continue
+                    if owner_partition is not None:
+                        domain_name = variables.get("mesh2d_flowelem_domain")
+                        if domain_name is None:
+                            self._show_mesh_profile_message(
+                                "The owner-filtered mesh has no flow-element domain in its original MAP output."
+                            )
+                            continue
+                        domain_data = dataset.variables[domain_name][:]
+                        if isinstance(domain_data, np.ma.MaskedArray):
+                            domain_data = domain_data.filled(-999999)
+                        domain_values = np.asarray(domain_data).reshape(-1)
+                        if face_index >= domain_values.size:
+                            self._log_substrate_debug(
+                                "face index exceeds the original partition's domain array"
+                            )
+                            continue
+                        try:
+                            face_owner = int(domain_values[face_index])
+                        except (TypeError, ValueError, OverflowError):
+                            face_owner = None
+                        if face_owner != owner_partition:
+                            self._log_substrate_debug(
+                                f"skipping non-owner face {face_index} "
+                                f"for partition {owner_partition}"
+                            )
+                            continue
 
                     fraction_variable = dataset.variables[fraction_name]
                     layer_variable = dataset.variables[variables["mesh2d_thlyr"]]
@@ -8553,17 +8632,28 @@ class Delft3DFileManager:
 
         sidecar_path = os.path.abspath(self._partition_filtered_path(source_path))
         source_mtime = str(int(os.path.getmtime(source_path)))
-        signature = f"v1|partition={partition_id}|source={source_mtime}"
+        signature = f"v2|partition={partition_id}|source={source_mtime}"
 
         if os.path.exists(sidecar_path):
             try:
                 with nc.Dataset(sidecar_path, "r") as sidecar_ds:
-                    if str(getattr(sidecar_ds, "qgis_partition_filter_signature", "")) == signature:
+                    if (
+                        str(getattr(sidecar_ds, "qgis_partition_filter_signature", "")) == signature
+                        and str(getattr(sidecar_ds, "qgis_substrate_source_path", "")).strip()
+                    ):
                         return sidecar_path, "ok"
             except (OSError, RuntimeError):
                 pass
 
         with nc.Dataset(source_path, "r") as source_ds:
+            substrate_source_path = str(
+                getattr(source_ds, "qgis_substrate_source_path", "")
+            ).strip()
+            if not substrate_source_path:
+                substrate_source_path = source_path
+            else:
+                substrate_source_path = _mesh_source_path(substrate_source_path)
+
             domain_var_name = self._find_variable_name(source_ds, "mesh2d_flowelem_domain")
             if not domain_var_name:
                 return source_path, "missing mesh2d_flowelem_domain"
@@ -8585,6 +8675,10 @@ class Delft3DFileManager:
             with nc.Dataset(sidecar_path, "w", format="NETCDF4") as sidecar_ds:
                 for attr_name in source_ds.ncattrs():
                     sidecar_ds.setncattr(attr_name, getattr(source_ds, attr_name))
+                sidecar_ds.setncattr(
+                    "qgis_substrate_source_path",
+                    os.path.abspath(substrate_source_path),
+                )
 
                 for dim_name, dim in source_ds.dimensions.items():
                     if dim.isunlimited():
@@ -9230,13 +9324,6 @@ class Delft3DFileManager:
             and self._is_numeric_netcdf_variable(nc_dataset.variables[bed_level_name])
         )
         flattenable_names = sorted(flattenable_names)
-        fraction_name = self._find_variable_name(nc_dataset, "mesh2d_lyrfrac")
-        if (
-            has_bed_level
-            and fraction_name
-            and self._has_substrate_data(nc_dataset, fraction_name)
-        ):
-            flattenable_names.insert(0, _SUBSTRATE_OPTION)
         if has_bed_level:
             has_morphodynamic = True
             flattenable_names.insert(0, _CUMULATIVE_BED_LEVEL_CHANGE_OPTION)
@@ -9365,7 +9452,7 @@ class Delft3DFileManager:
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(
             "Select data variables to include in the flattened file. "
-            f"Select '{_SUBSTRATE_OPTION}' to keep the raw substrate data needed for substrate patches."
+            "Substrate patches read raw values from the original MAP output on demand."
         ))
 
         # Qt6 moved flag/state enums into sub-namespaces; fall back gracefully.
@@ -9426,14 +9513,21 @@ class Delft3DFileManager:
         source_path = os.path.abspath(source_path)
         sidecar_path = os.path.abspath(self._sidecar_flattened_path(source_path))
         source_mtime = str(int(os.path.getmtime(source_path)))
-        signature = "v7|" + "|".join(sorted(selected_variables))
+        signature = "v8|" + "|".join(sorted(selected_variables))
 
         if os.path.exists(sidecar_path):
             try:
                 with nc.Dataset(sidecar_path, "r") as sidecar_ds:
                     sidecar_signature = str(getattr(sidecar_ds, "qgis_flatten_signature", ""))
                     sidecar_mtime = str(getattr(sidecar_ds, "qgis_flatten_source_mtime", ""))
-                    if sidecar_signature == signature and sidecar_mtime == source_mtime:
+                    sidecar_source_path = str(
+                        getattr(sidecar_ds, "qgis_substrate_source_path", "")
+                    ).strip()
+                    if (
+                        sidecar_signature == signature
+                        and sidecar_mtime == source_mtime
+                        and sidecar_source_path == source_path
+                    ):
                         if progress_callback is not None:
                             progress_callback(len(selected_variables), len(selected_variables), "reuse")
                         return sidecar_path
@@ -9443,6 +9537,7 @@ class Delft3DFileManager:
         with nc.Dataset(source_path, "r") as source_ds, nc.Dataset(sidecar_path, "w", format="NETCDF4") as sidecar_ds:
             for attr_name in source_ds.ncattrs():
                 sidecar_ds.setncattr(attr_name, getattr(source_ds, attr_name))
+            sidecar_ds.setncattr("qgis_substrate_source_path", source_path)
 
             created_dims = set()
 
@@ -9540,13 +9635,6 @@ class Delft3DFileManager:
                     required_variable_names.update(
                         _referenced_variable_tokens(source_ds.variables[bed_level_name])
                     )
-                    continue
-
-                if selected_name == _SUBSTRATE_OPTION:
-                    for required_name in _SUBSTRATE_RAW_VARIABLES:
-                        actual_name = self._find_variable_name(source_ds, required_name)
-                        if actual_name:
-                            required_variable_names.add(actual_name)
                     continue
 
                 selected_var = source_ds.variables.get(selected_name)
@@ -10156,6 +10244,7 @@ class Delft3DFileManager:
         filepath = os.path.abspath(filepath)
         if not os.path.exists(filepath):
             raise RuntimeError(f"File does not exist: {filepath}")
+        substrate_source_path = self._substrate_source_path_for_file(filepath)
 
         def _dataset_group_count(layer):
             try:
@@ -10284,6 +10373,10 @@ class Delft3DFileManager:
                 _apply_crs_if_missing(mesh_layer)
                 try:
                     mesh_layer.setCustomProperty("delft3d_mesh_source", filepath)
+                    mesh_layer.setCustomProperty(
+                        "delft3d_substrate_source",
+                        substrate_source_path,
+                    )
                 except (RuntimeError, AttributeError):
                     pass
                 QgsProject.instance().addMapLayer(mesh_layer)
@@ -10301,6 +10394,10 @@ class Delft3DFileManager:
                     _apply_crs_if_missing(existing_layer)
                     try:
                         existing_layer.setCustomProperty("delft3d_mesh_source", filepath)
+                        existing_layer.setCustomProperty(
+                            "delft3d_substrate_source",
+                            substrate_source_path,
+                        )
                     except (RuntimeError, AttributeError):
                         pass
                     return existing_layer
