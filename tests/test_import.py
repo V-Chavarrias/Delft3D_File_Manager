@@ -1924,6 +1924,34 @@ def test_substrate_patch_grid_matches_pcolormesh_cell_dimensions(plugin):
     assert values.shape == (2, 3)
 
 
+def test_substrate_face_values_reads_only_selected_time_and_face(plugin, tmp_path):
+    import numpy as np
+
+    source_path = tmp_path / "substrate_face_values.nc"
+    source_values = np.arange(2 * 3 * 4 * 2, dtype=float).reshape(2, 3, 4, 2)
+    with Dataset(str(source_path), "w") as dataset:
+        dataset.createDimension("nBedLayers", 2)
+        dataset.createDimension("mesh2d_nFaces", 3)
+        dataset.createDimension("time", 4)
+        dataset.createDimension("nSedTot", 2)
+        variable = dataset.createVariable(
+            "mesh2d_lyrfrac",
+            "f8",
+            ("nBedLayers", "mesh2d_nFaces", "time", "nSedTot"),
+        )
+        variable[:] = source_values
+
+    with Dataset(str(source_path), "r") as dataset:
+        values, dimensions = plugin._substrate_face_values(
+            dataset.variables["mesh2d_lyrfrac"],
+            face_index=1,
+            time_index=2,
+        )
+
+    assert dimensions == ["nBedLayers", "nSedTot"]
+    np.testing.assert_array_equal(values, source_values[:, 1, 2, :])
+
+
 def _write_substrate_source(source_path):
     with Dataset(str(source_path), "w") as source_ds:
         source_ds.createDimension("time", 1)

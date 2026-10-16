@@ -3057,6 +3057,51 @@ class Delft3DFileManager:
         elevations[:, -1] = elevations[:, -2]
         return x_edges, elevations, values
 
+    def _substrate_face_values(self, variable, face_index, time_index):
+        """Read only one face and time slice from a substrate variable."""
+        import numpy as np
+
+        dimensions = list(variable.dimensions)
+        time_axis = next(
+            (
+                axis for axis, dim in enumerate(dimensions)
+                if self._is_time_dimension(dim)
+            ),
+            None,
+        )
+        face_axis = next(
+            (
+                axis for axis, dim in enumerate(dimensions)
+                if self._is_space_dimension(dim) and "face" in dim.lower()
+            ),
+            None,
+        )
+        if face_axis is None:
+            remaining_axes = [
+                axis for axis in range(len(dimensions)) if axis != time_axis
+            ]
+            face_axis = next(
+                (
+                    axis for axis in remaining_axes
+                    if "face" in dimensions[axis].lower()
+                ),
+                remaining_axes[0] if remaining_axes else 0,
+            )
+
+        index = [slice(None)] * len(dimensions)
+        if time_axis is not None:
+            index[time_axis] = min(
+                time_index,
+                variable.shape[time_axis] - 1,
+            )
+        index[face_axis] = face_index
+        data = np.asarray(variable[tuple(index)], dtype=float)
+        remaining_dimensions = [
+            dim for axis, dim in enumerate(dimensions)
+            if axis not in (time_axis, face_axis)
+        ]
+        return data, remaining_dimensions
+
     def _append_substrate_profile(self, qgis_points, substrate_mode="volume", fraction_label=""):
         """Render the selected substrate fraction as a chainage/elevation patch."""
         import netCDF4 as nc
@@ -3198,9 +3243,6 @@ class Delft3DFileManager:
             self._show_mesh_profile_message("The drawn line does not cross any mesh edge in the imported partition topology.")
             return
 
-        def _source_path(layer):
-            return self._mesh_layer_source_path(layer)
-
         def _face_index(node_x, node_y, face_nodes, point):
             for face_index, face in enumerate(face_nodes):
                 vertices = [
@@ -3222,20 +3264,29 @@ class Delft3DFileManager:
                     return face_index
             return None
 
-        samples = []
+        crossings_by_source = {}
         partition_owner_cache = {}
+        substrate_source_cache = {}
+        failed_mesh_sources = set()
         for layer, chainage, point in crossings:
-            mesh_source = _source_path(layer)
-            substrate_source = self._substrate_source_path(layer)
+            mesh_source = self._mesh_layer_source_path(layer)
+            if not mesh_source:
+                self._log_substrate_debug("skipping crossing without a mesh source path")
+                continue
+            if mesh_source in failed_mesh_sources:
+                continue
+            if mesh_source not in substrate_source_cache:
+                substrate_source_cache[mesh_source] = self._substrate_source_path(layer)
+            substrate_source = substrate_source_cache[mesh_source]
             self._log_substrate_debug(
                 f"sample chainage={chainage}, mesh_source={mesh_source!r}, "
                 f"substrate_source={substrate_source!r}"
             )
-            if not mesh_source or not substrate_source:
-                self._log_substrate_debug("skipping crossing without a source path")
+            if not substrate_source:
+                self._log_substrate_debug("skipping crossing without a substrate source path")
                 continue
-            try:
-                if mesh_source not in partition_owner_cache:
+            if mesh_source not in partition_owner_cache:
+                try:
                     with nc.Dataset(mesh_source, "r") as mesh_dataset:
                         owner_partition = getattr(
                             mesh_dataset,
@@ -3245,8 +3296,26 @@ class Delft3DFileManager:
                     partition_owner_cache[mesh_source] = (
                         None if owner_partition is None else int(owner_partition)
                     )
-                owner_partition = partition_owner_cache[mesh_source]
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    failed_mesh_sources.add(mesh_source)
+                    self._log_substrate_debug(
+                        f"could not read partition metadata from {mesh_source!r}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    continue
+            owner_partition = partition_owner_cache[mesh_source]
+            source_key = (mesh_source, substrate_source, owner_partition)
+            crossings_by_source.setdefault(source_key, []).append((chainage, point))
 
+        time_index = 0
+        try:
+            time_index = int(dataset_index.dataset())
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+        samples = []
+        for (mesh_source, substrate_source, owner_partition), source_crossings in crossings_by_source.items():
+            try:
                 with nc.Dataset(substrate_source, "r") as dataset:
                     variables = {name.lower(): name for name in dataset.variables}
                     required = ["mesh2d_node_x", "mesh2d_node_y", "mesh2d_face_nodes", "mesh2d_mor_bl", "mesh2d_thlyr"]
@@ -3267,10 +3336,8 @@ class Delft3DFileManager:
                         face_nodes = face_nodes.filled(-1)
                     start_index = int(getattr(face_variable, "start_index", 0))
                     face_nodes = np.asarray(face_nodes, dtype=int) - start_index
-                    face_index = _face_index(node_x, node_y, face_nodes, point)
-                    self._log_substrate_debug(f"face_index={face_index}")
-                    if face_index is None:
-                        continue
+
+                    domain_values = None
                     if owner_partition is not None:
                         domain_name = variables.get("mesh2d_flowelem_domain")
                         if domain_name is None:
@@ -3282,103 +3349,129 @@ class Delft3DFileManager:
                         if isinstance(domain_data, np.ma.MaskedArray):
                             domain_data = domain_data.filled(-999999)
                         domain_values = np.asarray(domain_data).reshape(-1)
-                        if face_index >= domain_values.size:
-                            self._log_substrate_debug(
-                                "face index exceeds the original partition's domain array"
-                            )
-                            continue
-                        try:
-                            face_owner = int(domain_values[face_index])
-                        except (TypeError, ValueError, OverflowError):
-                            face_owner = None
-                        if face_owner != owner_partition:
-                            self._log_substrate_debug(
-                                f"skipping non-owner face {face_index} "
-                                f"for partition {owner_partition}"
-                            )
-                            continue
 
                     fraction_variable = dataset.variables[fraction_name]
                     layer_variable = dataset.variables[variables["mesh2d_thlyr"]]
                     bed_variable = dataset.variables[variables["mesh2d_mor_bl"]]
-                    time_index = 0
-                    try:
-                        time_index = int(dataset_index.dataset())
-                    except (TypeError, ValueError, AttributeError):
-                        pass
+                    fraction_metadata = None
+                    for chainage, point in source_crossings:
+                        try:
+                            face_index = _face_index(node_x, node_y, face_nodes, point)
+                            self._log_substrate_debug(f"face_index={face_index}")
+                            if face_index is None:
+                                continue
+                            if owner_partition is not None:
+                                if face_index >= domain_values.size:
+                                    self._log_substrate_debug(
+                                        "face index exceeds the original partition's domain array"
+                                    )
+                                    continue
+                                try:
+                                    face_owner = int(domain_values[face_index])
+                                except (TypeError, ValueError, OverflowError):
+                                    face_owner = None
+                                if face_owner != owner_partition:
+                                    self._log_substrate_debug(
+                                        f"skipping non-owner face {face_index} "
+                                        f"for partition {owner_partition}"
+                                    )
+                                    continue
 
-                    def _face_values(variable, include_fraction=False):
-                        data = np.asarray(variable[:], dtype=float)
-                        dimensions = list(variable.dimensions)
-                        time_axis = next((dimensions.index(dim) for dim in dimensions if self._is_time_dimension(dim)), None)
-                        face_axis = next((dimensions.index(dim) for dim in dimensions if self._is_space_dimension(dim) and "face" in dim.lower()), None)
-                        if time_axis is not None:
-                            data = np.take(data, min(time_index, data.shape[time_axis] - 1), axis=time_axis)
-                            dimensions.pop(time_axis)
-                            if face_axis is not None and face_axis > time_axis:
-                                face_axis -= 1
-                        if face_axis is None:
-                            face_axis = next((index for index, dim in enumerate(dimensions) if "face" in dim.lower()), 0)
-                        data = np.take(data, face_index, axis=face_axis)
-                        dimensions.pop(face_axis)
-                        return data, dimensions
-
-                    bed_data, _ = _face_values(bed_variable)
-                    thickness_data, _ = _face_values(layer_variable)
-                    fraction_data, fraction_dimensions = _face_values(fraction_variable)
-                    fraction_dimension = next(
-                        (
-                            dim for dim in fraction_dimensions
-                            if self._is_sediment_dimension(dim) and "layer" not in dim.lower()
-                        ),
-                        fraction_dimensions[-1] if fraction_dimensions else None,
-                    )
-                    if fraction_dimension is None:
-                        continue
-                    fraction_labels = self._dimension_labels(dataset, fraction_dimension)
-                    fraction_axis = fraction_dimensions.index(fraction_dimension)
-                    if substrate_mode == "volume":
-                        fraction_index = next(
-                            (
-                                index for index, label in enumerate(fraction_labels)
-                                if str(label).strip().strip("#").casefold() == fraction_label.strip().strip("#").casefold()
-                            ),
-                            None,
-                        )
-                        if fraction_index is None:
-                            continue
-                        sample_values = np.take(
-                            fraction_data,
-                            fraction_index,
-                            axis=fraction_axis,
-                        ).reshape(-1)
-                    else:
-                        grain_sizes = self._loaded_grain_sizes(fraction_labels, sediment_records)
-                        if grain_sizes is None:
-                            self._show_mesh_profile_message(
-                                "The first loaded sediment table does not contain grain sizes for every substrate fraction."
+                            bed_data, _ = self._substrate_face_values(
+                                bed_variable,
+                                face_index,
+                                time_index,
                             )
-                            return
-                        if substrate_mode == "arithmetic":
-                            sample_values = np.sum(
-                                fraction_data * grain_sizes,
-                                axis=fraction_axis,
-                            ).reshape(-1)
-                        else:
-                            d0 = 1e-3
-                            sample_values = (
-                                d0 * 2.0 ** np.sum(
-                                    fraction_data * np.log2(grain_sizes / d0),
-                                    axis=fraction_axis,
+                            thickness_data, _ = self._substrate_face_values(
+                                layer_variable,
+                                face_index,
+                                time_index,
+                            )
+                            fraction_data, fraction_dimensions = self._substrate_face_values(
+                                fraction_variable,
+                                face_index,
+                                time_index,
+                            )
+                            if fraction_metadata is None:
+                                fraction_dimension = next(
+                                    (
+                                        dim for dim in fraction_dimensions
+                                        if self._is_sediment_dimension(dim)
+                                        and "layer" not in dim.lower()
+                                    ),
+                                    fraction_dimensions[-1] if fraction_dimensions else None,
                                 )
-                            ).reshape(-1)
-                    bed = float(np.asarray(bed_data).reshape(-1)[0])
-                    thickness = np.maximum(thickness_data, 0.0).reshape(-1)
-                    top = bed - np.concatenate(([0.0], np.cumsum(thickness)))[:-1]
-                    bottom = bed - np.cumsum(thickness)
-                    samples.append((float(chainage), top, bottom, sample_values))
+                                if fraction_dimension is None:
+                                    continue
+                                fraction_labels = self._dimension_labels(
+                                    dataset,
+                                    fraction_dimension,
+                                )
+                                fraction_axis = fraction_dimensions.index(fraction_dimension)
+                                fraction_index = None
+                                grain_sizes = None
+                                if substrate_mode == "volume":
+                                    fraction_index = next(
+                                        (
+                                            index for index, label in enumerate(fraction_labels)
+                                            if str(label).strip().strip("#").casefold()
+                                            == fraction_label.strip().strip("#").casefold()
+                                        ),
+                                        None,
+                                    )
+                                else:
+                                    grain_sizes = self._loaded_grain_sizes(
+                                        fraction_labels,
+                                        sediment_records,
+                                    )
+                                    if grain_sizes is None:
+                                        self._show_mesh_profile_message(
+                                            "The first loaded sediment table does not contain grain sizes for every substrate fraction."
+                                        )
+                                        return
+                                fraction_metadata = (
+                                    fraction_axis,
+                                    fraction_index,
+                                    grain_sizes,
+                                )
+
+                            fraction_axis, fraction_index, grain_sizes = fraction_metadata
+                            if substrate_mode == "volume":
+                                if fraction_index is None:
+                                    continue
+                                sample_values = np.take(
+                                    fraction_data,
+                                    fraction_index,
+                                    axis=fraction_axis,
+                                ).reshape(-1)
+                            elif substrate_mode == "arithmetic":
+                                sample_values = np.sum(
+                                    fraction_data * grain_sizes,
+                                    axis=fraction_axis,
+                                ).reshape(-1)
+                            else:
+                                d0 = 1e-3
+                                sample_values = (
+                                    d0 * 2.0 ** np.sum(
+                                        fraction_data * np.log2(grain_sizes / d0),
+                                        axis=fraction_axis,
+                                    )
+                                ).reshape(-1)
+                            bed = float(np.asarray(bed_data).reshape(-1)[0])
+                            thickness = np.maximum(thickness_data, 0.0).reshape(-1)
+                            top = bed - np.concatenate(([0.0], np.cumsum(thickness)))[:-1]
+                            bottom = bed - np.cumsum(thickness)
+                            samples.append((float(chainage), top, bottom, sample_values))
+                        except (OSError, RuntimeError, ValueError, KeyError, IndexError) as exc:
+                            self._log_substrate_debug(
+                                f"sample failed: {type(exc).__name__}: {exc}"
+                            )
+                            continue
             except (OSError, RuntimeError, ValueError, KeyError, IndexError) as exc:
-                self._log_substrate_debug(f"sample failed: {type(exc).__name__}: {exc}")
+                self._log_substrate_debug(
+                    f"source sampling failed for {substrate_source!r}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 continue
 
         self._log_substrate_debug(f"samples={len(samples)}")
