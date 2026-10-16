@@ -1,38 +1,43 @@
-import sys
-from types import ModuleType
 from unittest.mock import MagicMock
 
-# Stub all QGIS/PyQt modules before any plugin code is imported.
-# Must be at module level so it runs before test collection imports the plugin.
-for _mod_name in [
-    "qgis",
-    "qgis.core",
-    "qgis.PyQt",
-    "qgis.PyQt.QtCore",
-    "qgis.PyQt.QtWidgets",
-    "qgis.PyQt.QtGui",
-]:
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
-
-if "qgis.gui" not in sys.modules:
-    _qgis_gui = ModuleType("qgis.gui")
-
-    class _QgsMapTool:
-        def __init__(self, canvas):
-            self.canvas = canvas
-
-        def deactivate(self):
-            pass
-
-    _qgis_gui.QgsMapTool = _QgsMapTool
-    _qgis_gui.QgsRubberBand = MagicMock()
-    sys.modules["qgis.gui"] = _qgis_gui
-
 import pytest
+
+from tests.fixtures_qgis_mocks import install_qgis_mocks
+
+install_qgis_mocks()
 
 
 @pytest.fixture
 def plugin():
     from Delft3DFileManager.Delft3DFileManager import Delft3DFileManager
     return Delft3DFileManager(MagicMock())
+
+
+@pytest.fixture
+def strict_iface():
+    from tests.fixtures_qgis_fakes import FakeQgisInterface
+    return FakeQgisInterface()
+
+
+@pytest.fixture
+def strict_plugin(strict_iface):
+    from Delft3DFileManager.Delft3DFileManager import Delft3DFileManager
+    return Delft3DFileManager(strict_iface)
+
+
+@pytest.fixture
+def strict_project(monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+    from tests.fixtures_qgis_fakes import FakeQgsProject
+
+    FakeQgsProject.reset_instance()
+    monkeypatch.setattr(plugin_module, "QgsProject", FakeQgsProject)
+    return FakeQgsProject.instance()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    tier_markers = ("unit", "qgis_runtime", "e2e")
+    for item in items:
+        if not any(item.get_closest_marker(marker) for marker in tier_markers):
+            item.add_marker(pytest.mark.unit)

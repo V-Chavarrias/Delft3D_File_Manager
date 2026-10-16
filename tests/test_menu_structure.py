@@ -1,53 +1,23 @@
-from unittest.mock import MagicMock
-
 import Delft3DFileManager.Delft3DFileManager as plugin_module
 from tests.menu_expectations import SUBMENU_ACTIONS, TOP_LEVEL_MENU_ACTIONS
+from tests.fixtures_qgis_fakes import FakeAction, FakeMenu, FakeQgisInterface
 
 
 def test_menu_structure_and_viewer_callbacks(monkeypatch):
-    menus = []
-
-    class FakeSignal:
-        def connect(self, callback):
-            self.callback = callback
-
-    class FakeAction:
-        def __init__(self, icon, text, parent):
-            self.icon = icon
-            self.label = text
-            self.parent = parent
-            self.triggered = FakeSignal()
-
-        def setStatusTip(self, tip):
-            self.status_tip = tip
-
-    class FakeMenu:
-        def __init__(self, label, parent):
-            self.label = label
-            self.parent = parent
-            self.actions = []
-            self._menu_action = object()
-            menus.append(self)
-
-        def addAction(self, action):
-            self.actions.append(action)
-
-        def menuAction(self):
-            return self._menu_action
-
     monkeypatch.setattr(plugin_module, "QAction", FakeAction)
     monkeypatch.setattr(plugin_module, "QMenu", FakeMenu)
 
-    iface = MagicMock()
+    iface = FakeQgisInterface()
     plugin = plugin_module.Delft3DFileManager(iface)
     plugin.initGui()
 
     expected_submenus = dict(SUBMENU_ACTIONS)
-    assert [menu.label for menu in menus] == list(expected_submenus)
-    assert [action.label for action in plugin.viewer_menu.actions] == [
+    menus = [plugin.viewer_menu, plugin.compute_2d_variables_menu]
+    assert [menu.title() for menu in menus] == list(expected_submenus)
+    assert [action.text() for action in plugin.viewer_menu.actions()] == [
         *expected_submenus["Viewer"],
     ]
-    assert [action.label for action in plugin.compute_2d_variables_menu.actions] == [
+    assert [action.text() for action in plugin.compute_2d_variables_menu.actions()] == [
         *expected_submenus["Compute 2D Variables"],
     ]
     assert plugin.profile_chart_action.triggered.callback == plugin.open_cross_section_profile_window
@@ -56,24 +26,22 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert plugin.mesh_difference_action.triggered.callback == plugin.compute_mesh_difference
     assert plugin.large_map_action.triggered.callback == plugin.open_large_map_viewer
     assert plugin.export_action.triggered.callback == plugin.export_active_layer
-    assert ".xyn" in plugin.export_action.status_tip
+    assert ".xyn" in plugin.export_action.statusTip()
 
-    registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
+    registered = [action for _menu_name, action in iface.menu_additions]
     submenu_labels = {
-        plugin.viewer_menu.menuAction(): plugin.viewer_menu.label,
+        plugin.viewer_menu.menuAction(): plugin.viewer_menu.title(),
         plugin.compute_2d_variables_menu.menuAction(): (
-            plugin.compute_2d_variables_menu.label
+            plugin.compute_2d_variables_menu.title()
         ),
     }
     registered_labels = [
-        submenu_labels[action] if action in submenu_labels else action.label
+        submenu_labels[action] if action in submenu_labels else action.text()
         for action in registered
     ]
     assert registered_labels == list(TOP_LEVEL_MENU_ACTIONS)
     assert not hasattr(plugin, "export_pointcloud_action")
-    toolbar_actions = [
-        entry.args[0] for entry in iface.addToolBarIcon.call_args_list
-    ]
+    toolbar_actions = iface.toolbar_additions
     assert toolbar_actions == [
         plugin.import_action,
         plugin.export_action,
@@ -86,12 +54,12 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     ]
 
     plugin.unload()
-    removed = [entry.args[1] for entry in iface.removePluginMenu.call_args_list]
+    removed = [action for _menu_name, action in iface.menu_removals]
     assert plugin.viewer_menu.menuAction() in removed
     assert plugin.compute_2d_variables_menu.menuAction() in removed
     assert plugin.open_guide_action in removed
     assert plugin.create_mesh_polyline_action in removed
     assert plugin.boundary_conditions_action not in removed
     assert plugin.export_action in removed
-    iface.removeToolBarIcon.assert_any_call(plugin.mesh_difference_action)
-    iface.removeToolBarIcon.assert_any_call(plugin.large_map_action)
+    assert plugin.mesh_difference_action in iface.toolbar_removals
+    assert plugin.large_map_action in iface.toolbar_removals

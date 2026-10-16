@@ -220,18 +220,88 @@ def test_import_fixed_weir_optional_columns(plugin, tmp_path, column_count):
         ] + [((["TuTrung"],),)]
 
 
-def test_import_fixed_weir_rejects_missing_required_value(plugin, tmp_path):
+def test_import_fixed_weir_rejects_missing_required_value(
+    plugin,
+    strict_project,
+    tmp_path,
+):
     source = tmp_path / "incomplete.pliz"
     source.write_text("TuTrung\n1 5\n546631.361 2350533.841 18.560 2.000\n", encoding="utf-8")
 
-    with patch("Delft3DFileManager.Delft3DFileManager.QgsProject") as project, patch(
-        "Delft3DFileManager.Delft3DFileManager.QMessageBox"
-    ) as message_box:
+    with patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as message_box:
         plugin.load_fixed_weir_file(str(source))
 
-        project.instance.return_value.addMapLayer.assert_not_called()
         message_box.warning.assert_called_once()
         assert "fewer than 5 values" in message_box.warning.call_args.args[2]
+
+    assert strict_project.mapLayers() == {}
+
+
+def test_import_bridge_creates_strict_memory_layers(
+    strict_plugin,
+    strict_project,
+    monkeypatch,
+    tmp_path,
+):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+    from tests.fixtures_qgis_fakes import (
+        FakeFeature,
+        FakeField,
+        FakeGeometry,
+        FakeMemoryVectorLayer,
+        FakePoint,
+    )
+
+    source = tmp_path / "bridge.pliz"
+    source.write_text(
+        "Test Bridge\n2 4\n"
+        "120000 450000 2.5 1.0\n"
+        "120100 450100 2.5 1.0\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "QgsVectorLayer",
+        lambda uri, name, provider: FakeMemoryVectorLayer(
+            uri,
+            name,
+            provider,
+            plugin_module.QgsMapLayerType.VectorLayer,
+            plugin_module.QgsWkbTypes.GeometryType.PointGeometry,
+            plugin_module.QgsWkbTypes.GeometryType.LineGeometry,
+        ),
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "QgsField",
+        lambda name, field_type: FakeField(name, field_type),
+    )
+    monkeypatch.setattr(plugin_module, "QgsFeature", FakeFeature)
+    monkeypatch.setattr(plugin_module, "QgsPointXY", FakePoint)
+    monkeypatch.setattr(plugin_module, "QgsGeometry", FakeGeometry)
+
+    strict_plugin.load_bridge_file(str(source))
+
+    layers = {layer.name(): layer for layer in strict_project.mapLayers().values()}
+    line_layer = layers["bridge"]
+    point_layer = layers["bridge_points"]
+    assert line_layer.featureCount() == 1
+    assert point_layer.featureCount() == 2
+    assert [field.name() for field in point_layer.fields()] == [
+        "bridge_name",
+        "width",
+        "drag_cd",
+    ]
+    point_features = list(point_layer.getFeatures())
+    assert [feature["bridge_name"] for feature in point_features] == [
+        "Test Bridge",
+        "Test Bridge",
+    ]
+    assert [
+        (feature.geometry().asPoint().x(), feature.geometry().asPoint().y())
+        for feature in point_features
+    ] == [(120000.0, 450000.0), (120100.0, 450100.0)]
+    assert len(strict_plugin.iface.messageBar().success_messages) == 1
 
 
 def test_route_pliz_polyline(plugin):

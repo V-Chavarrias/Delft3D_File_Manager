@@ -1059,6 +1059,20 @@ Test:
 python -m pytest
 ```
 
+Fast unit tests, including both the legacy QGIS/PyQt stubs and stricter API fakes,
+are marked `unit` and can be selected independently:
+```bash
+python -m pytest -m unit
+```
+
+Real-QGIS integration and end-to-end tests use actual QGIS/Qt classes and must
+run from an initialized QGIS Python environment. Bypass the root unit-test
+stubs when selecting those tiers:
+```bash
+python -m pytest --confcutdir=tests\integration tests\integration -m qgis_runtime
+python -m pytest --confcutdir=tests\integration tests\integration -m e2e
+```
+
 Coverage (branch-aware, with missing lines shown):
 ```bash
 python -m pytest --cov=Delft3DFileManager --cov-report=term-missing --cov-report=xml --cov-fail-under=50
