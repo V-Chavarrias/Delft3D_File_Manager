@@ -1,6 +1,7 @@
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import Delft3DFileManager.Delft3DFileManager as plugin_module
+from tests.menu_expectations import SUBMENU_ACTIONS, TOP_LEVEL_MENU_ACTIONS
 
 
 def test_menu_structure_and_viewer_callbacks(monkeypatch):
@@ -41,20 +42,13 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     plugin = plugin_module.Delft3DFileManager(iface)
     plugin.initGui()
 
-    assert [menu.label for menu in menus] == ["Viewer", "Compute 2D Variables"]
+    expected_submenus = dict(SUBMENU_ACTIONS)
+    assert [menu.label for menu in menus] == list(expected_submenus)
     assert [action.label for action in plugin.viewer_menu.actions] == [
-        "Cross-Section",
-        "HIS Time Series",
-        "1D MAP",
-        "2D Slice",
-        "Large MAP Viewer",
-        "Boundary Conditions",
+        *expected_submenus["Viewer"],
     ]
     assert [action.label for action in plugin.compute_2d_variables_menu.actions] == [
-        "Froude Number",
-        "Streamfunction",
-        "Mesh Properties",
-        "Mesh Difference",
+        *expected_submenus["Compute 2D Variables"],
     ]
     assert plugin.profile_chart_action.triggered.callback == plugin.open_cross_section_profile_window
     assert plugin.boundary_conditions_action.triggered.callback == plugin.open_cross_section_profile_window
@@ -65,24 +59,17 @@ def test_menu_structure_and_viewer_callbacks(monkeypatch):
     assert ".xyn" in plugin.export_action.status_tip
 
     registered = [entry.args[1] for entry in iface.addPluginToMenu.call_args_list]
-    assert registered[:4] == [
-        plugin.install_deps_action,
-        plugin.open_guide_action,
-        plugin.viewer_menu.menuAction(),
-        plugin.compute_2d_variables_menu.menuAction(),
+    submenu_labels = {
+        plugin.viewer_menu.menuAction(): plugin.viewer_menu.label,
+        plugin.compute_2d_variables_menu.menuAction(): (
+            plugin.compute_2d_variables_menu.label
+        ),
+    }
+    registered_labels = [
+        submenu_labels[action] if action in submenu_labels else action.label
+        for action in registered
     ]
-    assert registered[4:] == [
-        plugin.import_action,
-        plugin.export_action,
-        plugin.bed_level_action,
-        plugin.create_trachytopes_action,
-        plugin.create_bridge_points_action,
-        plugin.create_fixed_weir_points_action,
-        plugin.create_1d_network_action,
-        plugin.create_mesh_polyline_action,
-        plugin.update_trachytopes_action,
-        plugin.export_trachytopes_action,
-    ]
+    assert registered_labels == list(TOP_LEVEL_MENU_ACTIONS)
     assert not hasattr(plugin, "export_pointcloud_action")
     toolbar_actions = [
         entry.args[0] for entry in iface.addToolBarIcon.call_args_list
