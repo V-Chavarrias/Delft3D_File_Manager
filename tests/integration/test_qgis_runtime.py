@@ -14,8 +14,8 @@ pytestmark = pytest.mark.qgis_runtime
 def qgis_runtime():
     if qgis_mocks_installed():
         pytest.skip(
-            "Run the QGIS runtime tier with --confcutdir=tests\\integration "
-            "to bypass the unit-test QGIS stubs."
+            "The unit-test process has QGIS stubs; the runtime dispatcher runs "
+            "this test in a separate QGIS Python process."
         )
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
