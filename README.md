@@ -1065,12 +1065,17 @@ are marked `unit` and can be selected independently:
 python -m pytest -m unit
 ```
 
-Real-QGIS integration and end-to-end tests use actual QGIS/Qt classes and must
-run from an initialized QGIS Python environment. Bypass the root unit-test
-stubs when selecting those tiers:
+The default `python -m pytest` run also looks for a QGIS 4 Python launcher on
+Windows and runs the real-QGIS tests in a separate process, isolated from the
+unit-test stubs. Set `QGIS_PYTHON` to override the automatic search. The
+QGIS Python environment must have `pytest` installed; with OSGeo4W, install it
+using that installation's `python-qgis.bat -m pip install --user pytest`.
+
+Real-QGIS integration and end-to-end tests use actual QGIS/Qt classes. To run
+them directly, use QGIS's Python launcher and bypass the root unit-test stubs:
 ```bash
-python -m pytest --confcutdir=tests\integration tests\integration -m qgis_runtime
-python -m pytest --confcutdir=tests\integration tests\integration -m e2e
+python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m qgis_runtime
+python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m e2e
 ```
 
 Coverage (branch-aware, with missing lines shown):
