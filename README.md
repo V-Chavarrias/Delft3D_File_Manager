@@ -4,7 +4,6 @@
 [![Coverage](https://codecov.io/gh/V-Chavarrias/Delft3D_File_Manager/branch/main/graph/badge.svg)](https://codecov.io/gh/V-Chavarrias/Delft3D_File_Manager)
 [![Release build](https://github.com/V-Chavarrias/Delft3D_File_Manager/actions/workflows/build.yml/badge.svg)](https://github.com/V-Chavarrias/Delft3D_File_Manager/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/V-Chavarrias/Delft3D_File_Manager)](https://github.com/V-Chavarrias/Delft3D_File_Manager/releases)
-[![Downloads](https://img.shields.io/github/downloads/V-Chavarrias/Delft3D_File_Manager/total)](https://github.com/V-Chavarrias/Delft3D_File_Manager/releases)
 [![CI Python](https://img.shields.io/badge/CI%20Python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/V-Chavarrias/Delft3D_File_Manager/actions/workflows/test.yml)
 [![QGIS](https://img.shields.io/badge/QGIS-3.x%20%7C%204.x-589632)](https://qgis.org/)
 
