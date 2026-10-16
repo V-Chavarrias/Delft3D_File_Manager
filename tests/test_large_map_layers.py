@@ -89,6 +89,7 @@ class FakeLayer:
         self.groups = []
         self.datasets = []
         self.settings = FakeSettings()
+        self.custom_properties = {}
         self.rendererChanged = FakeSignal()
         self.static_index = None
         if FakeLayer.support_removal:
@@ -102,6 +103,12 @@ class FakeLayer:
 
     def setCrs(self, crs):
         self.crs = crs
+
+    def setCustomProperty(self, key, value):
+        self.custom_properties[key] = value
+
+    def customProperty(self, key, default=None):
+        return self.custom_properties.get(key, default)
 
     def temporalProperties(self):
         return None
@@ -252,6 +259,15 @@ def test_layers_are_created_with_frame_and_partition_names(layer_set):
     assert all(layer.settings.native.enabled for layer in result.layers)
     assert project.root.groups[0].name() == "model (Large MAP)"
     assert len(project.root.groups[0].children_list) == 2
+
+
+def test_large_map_layers_keep_original_mesh_sources(layer_set):
+    result, _project = layer_set
+
+    assert [layer.customProperty("delft3d_mesh_source") for layer in result.layers] == [
+        result._slots[0].grid.path,
+        result._slots[1].grid.path,
+    ]
 
 
 def test_plot_uses_shared_range_and_keeps_style_for_same_variable(layer_set):

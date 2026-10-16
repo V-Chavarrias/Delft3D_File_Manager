@@ -162,6 +162,7 @@ class LargeMapLayerSet:
         layer = QgsMeshLayer(slot.uri, slot.name, "mesh_memory")
         if not layer.isValid():
             raise RuntimeError(f"Could not create the mesh layer for {slot.name}")
+        layer.setCustomProperty("delft3d_mesh_source", slot.grid.path)
         if self._crs is not None and self._crs.isValid():
             layer.setCrs(self._crs)
         temporal = layer.temporalProperties()
