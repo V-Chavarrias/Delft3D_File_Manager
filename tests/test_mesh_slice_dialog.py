@@ -138,6 +138,10 @@ def test_selected_lines_draw_substrate_patch_when_selected(plugin):
     feature.id.return_value = 7
     layer = MagicMock()
     layer.getSelectedFeatures.return_value = [feature]
+    crs = MagicMock()
+    crs.isValid.return_value = True
+    layer.crs.return_value = crs
+    plugin.iface.mapCanvas.return_value.mapSettings.return_value.destinationCrs.return_value = crs
     line = [(0.0, 0.0), (1.0, 1.0)]
     dialog = MagicMock()
     dialog.substrate_patch_mode.return_value = "volume"

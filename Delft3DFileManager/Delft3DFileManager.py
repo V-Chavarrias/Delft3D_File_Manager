@@ -2914,6 +2914,26 @@ class Delft3DFileManager:
                 continue
         return None
 
+    def _mesh_profile_display_points(self, layer, points):
+        """Transform selected line vertices into the map canvas CRS."""
+        from qgis.core import QgsCoordinateTransform, QgsProject
+
+        try:
+            source_crs = layer.crs()
+            target_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        except (AttributeError, RuntimeError):
+            return list(points)
+
+        if not source_crs.isValid() or not target_crs.isValid() or source_crs == target_crs:
+            return list(points)
+
+        try:
+            transform = QgsCoordinateTransform(source_crs, target_crs, QgsProject.instance())
+            return [transform.transform(point) for point in points]
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self._show_mesh_profile_message(f"Could not transform the selected line to the map CRS: {exc}")
+            return None
+
     def _add_selected_mesh_profiles(self):
         """Append profiles for selected line features in a vector line layer."""
         layer = self._selected_mesh_profile_line_layer()
@@ -2938,16 +2958,23 @@ class Delft3DFileManager:
             self._show_mesh_profile_message("The selected features contain no usable line geometry.")
             return
 
+        display_lines = []
+        for feature, points in lines:
+            display_points = self._mesh_profile_display_points(layer, points)
+            if display_points is None:
+                return
+            display_lines.append((feature, display_points))
+
         if substrate_mode:
-            self._append_substrate_profile(lines[0][1], substrate_mode, dialog.substrate_fraction())
-            if len(lines) > 1:
+            self._append_substrate_profile(display_lines[0][1], substrate_mode, dialog.substrate_fraction())
+            if len(display_lines) > 1:
                 dialog.set_status_message(
-                    f"A substrate patch shows one line; used feature {lines[0][0].id()} "
-                    f"of {len(lines)} selected lines."
+                    f"A substrate patch shows one line; used feature {display_lines[0][0].id()} "
+                    f"of {len(display_lines)} selected lines."
                 )
             return
 
-        for feature, points in lines:
+        for feature, points in display_lines:
             self._append_mesh_profile(points, label=f"Feature {feature.id()}")
 
     def _append_mesh_profile(self, qgis_points, label="Drawn profile"):

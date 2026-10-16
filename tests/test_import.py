@@ -81,6 +81,33 @@ def test_mesh_property_face_quality_computes_neighbor_counts():
     assert not _mesh_property_should_compute_connectivity({"edge_orthogonality"})
 
 
+def test_selected_mesh_profile_points_are_transformed_to_canvas_crs(plugin, monkeypatch):
+    plugin_module = sys.modules["Delft3DFileManager.Delft3DFileManager"]
+    source_crs = SimpleNamespace(isValid=lambda: True, authid=lambda: "EPSG:4326")
+    target_crs = SimpleNamespace(isValid=lambda: True, authid=lambda: "EPSG:28992")
+    layer = SimpleNamespace(crs=lambda: source_crs)
+    plugin.iface.mapCanvas.return_value.mapSettings.return_value.destinationCrs.return_value = target_crs
+
+    class Transform:
+        def __init__(self, source, target, _project):
+            assert source is source_crs
+            assert target is target_crs
+
+        @staticmethod
+        def transform(point):
+            return ("transformed", point)
+
+    monkeypatch.setattr(plugin_module, "QgsCoordinateTransform", Transform, raising=False)
+    monkeypatch.setattr(_qgis_core, "QgsCoordinateTransform", Transform)
+    monkeypatch.setattr(_qgis_core, "QgsProject", SimpleNamespace(instance=lambda: object()))
+
+    points = [(1.0, 2.0), (3.0, 4.0)]
+    assert plugin._mesh_profile_display_points(layer, points) == [
+        ("transformed", points[0]),
+        ("transformed", points[1]),
+    ]
+
+
 def _add_map_layer_mock():
     """Return the consistent addMapLayer mock from the qgis.core stub."""
     return _qgis_core.QgsProject.instance.return_value.addMapLayer
