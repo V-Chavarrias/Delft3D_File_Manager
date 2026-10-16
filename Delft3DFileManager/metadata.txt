@@ -3,7 +3,7 @@ name=Delft3D File Manager
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Import, visualize, analyze, and export Delft3D FM models and results in QGIS.
-version=11.1.0
+version=11.2.0
 author=Victor Chavarrias
 email=victor.chavarrias@deltares.nl
 repository=https://github.com/V-Chavarrias/Delft3D_File_Manager
@@ -12,6 +12,7 @@ homepage=https://github.com/V-Chavarrias/Delft3D_File_Manager
 tags=delft3d,weir,mesh,import,export,ugrid,netcdf
 about=Delft3D File Manager is a QGIS toolbox for Delft3D FM pre-processing, model inspection, analysis, and post-processing. It imports complete FM simulations and linked model inputs, fixed weirs, polylines, point clouds, XYZ data, UGRID meshes, partitioned and morphodynamic outputs, ShorelineS results, boundary forcing, structures, 1D fields, roughness, and cross-sections. It provides viewers for cross-section profiles, boundary-condition and HIS timeseries, 1D MAP results, 2D mesh slices, and very large (partitioned) MAP files loaded slice by slice; computes mesh differences, streamfunctions, Froude numbers, and mesh properties; interpolates bed levels; and creates mesh-edge-routed polylines and Delft3D network, bridge, fixed-weir, trachytope, polyline, and point-cloud data. QGIS 3.x and QGIS 4.x are supported.
 changelog=
+    11.2.0 - QGIS testing
     11.1.0 - Add the Large MAP Viewer: plot large (partitioned) MAP files by reading only the selected variable, time, and index into in-memory mesh layers, with previous/next stepping, derived variables, and Symbology synchronized across partitions.
     11.0.0 - Unify point-cloud XYN export under the main Export action, preserving bridge/fixed-weir PLIZ routing, and remove the separate Export Point Cloud menu action.
     10.5.0 - Add selected-layer mesh differences for matching scalar/vector node/face datasets, with common timestamps and static/temporal support.
