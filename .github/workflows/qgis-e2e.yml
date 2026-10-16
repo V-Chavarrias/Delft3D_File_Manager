@@ -1,0 +1,33 @@
+name: QGIS Plugin E2E
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packaged-plugin-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    container:
+      image: qgis/qgis:3.40.15-noble@sha256:d664f1eca1ef4f615efd92b944c90896622bc75f0446357dc50c2e56b379ddd9
+      env:
+        QT_QPA_PLATFORM: offscreen
+        QGIS_PREFIX_PATH: /usr
+        QGIS_E2E_REQUIRE_RUNTIME: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run packaged-plugin lifecycle test
+        run: >-
+          python3 -m pytest
+          --confcutdir=tests/e2e
+          tests/e2e
+          -m e2e
+          -v

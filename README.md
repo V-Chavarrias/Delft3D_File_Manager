@@ -1076,7 +1076,15 @@ them directly, use QGIS's Python launcher and bypass the root unit-test stubs:
 ```bash
 python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m qgis_runtime
 python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m e2e
+python-qgis.bat -m pytest --confcutdir=tests\e2e tests\e2e -m e2e
 ```
+
+The packaged-plugin lifecycle smoke test builds and extracts the ZIP before
+loading the package through `classFactory`, then checks menu/action registration
+and unload cleanup. It runs headlessly in the pinned QGIS 3.40.15 container in
+the [QGIS E2E workflow](./.github/workflows/qgis-e2e.yml). Pull-request runs are
+non-blocking while stability is measured; manual and scheduled runs report
+failures normally.
 
 Coverage (branch-aware, with missing lines shown):
 ```bash
