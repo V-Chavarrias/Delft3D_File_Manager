@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 netCDF4 = pytest.importorskip("netCDF4")
 
@@ -214,6 +215,44 @@ def test_derived_slices(partitioned):
     np.testing.assert_allclose(reader.read_slice(grid, entries[reader.BED_LEVEL_CHANGE_KEY], 2), 20.0)
     with pytest.raises(reader.LargeMapError):
         reader.read_slice(grid, entries[reader.STREAM_FUNCTION_KEY], 0)
+
+
+def test_theta_slices_use_taus_and_sediment_records(partitioned):
+    path = partitioned / "model_0000_map.nc"
+    records = [SimpleNamespace(name="sand", characteristic_diameter=0.001, dry_density=2650.0)]
+    with netCDF4.Dataset(path, "a") as dataset:
+        taus = dataset.createVariable("mesh2d_taus", "f8", ("time", "nmesh2d_face"))
+        taus[:] = 9810.0
+
+    entries = {entry.key: entry for entry in reader.list_variables(path, records)}
+    assert reader.THETA_KEY_PREFIX + "0" in entries
+    grid = reader.read_partition_grid(path)
+    ids = _global_face_ids(grid)
+    expected = np.full(len(ids), 1.0 / ((2650.0 - 1000.0) / 1000.0 * 0.001))
+    np.testing.assert_allclose(
+        reader.read_slice(grid, entries[reader.THETA_KEY_PREFIX + "0"], 0, sediment_records=records),
+        expected,
+    )
+
+
+def test_theta_slices_fall_back_to_velocity_and_chezy(partitioned):
+    path = partitioned / "model_0000_map.nc"
+    records = [SimpleNamespace(name="sand", characteristic_diameter=0.001, dry_density=2650.0)]
+    with netCDF4.Dataset(path, "a") as dataset:
+        chezy = dataset.createVariable("mesh2d_czs", "f8", ("time", "nmesh2d_face"))
+        chezy[:] = 10.0
+
+    entries = {entry.key: entry for entry in reader.list_variables(path, records)}
+    assert reader.THETA_KEY_PREFIX + "0" in entries
+    grid = reader.read_partition_grid(path)
+    ids = _global_face_ids(grid)
+    velocity = np.hypot(0.3 * (ids + 1), 0.4 * (ids + 1))
+    shear = 1000.0 * velocity ** 2 * 9.81 / 10.0 ** 2
+    expected = shear / (1000.0 * 9.81 * 1.65 * 0.001)
+    np.testing.assert_allclose(
+        reader.read_slice(grid, entries[reader.THETA_KEY_PREFIX + "0"], 0, sediment_records=records),
+        expected,
+    )
 
 
 def test_stream_function_is_consistent_across_partitions(partitioned):

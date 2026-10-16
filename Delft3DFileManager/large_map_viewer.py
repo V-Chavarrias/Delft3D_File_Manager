@@ -166,7 +166,8 @@ class LargeMapViewer:
                 )
                 grids.append(reader.read_partition_grid(partition_path))
             self._update_progress(progress, 65, "Reading variables and times...")
-            entries = reader.list_variables(paths[0])
+            sediment_records = getattr(self.plugin, "_sediment_records", None)
+            entries = reader.list_variables(paths[0], sediment_records)
             _values, time_labels = reader.read_times(paths[0])
             crs = crs_from_info(*reader.read_crs_info(paths[0]))
 
@@ -243,7 +244,11 @@ class LargeMapViewer:
     def read_values(self, entry, time_index, extra_indices):
         if entry.key == reader.STREAM_FUNCTION_KEY:
             return self._stream_values(time_index)
-        return [reader.read_slice(grid, entry, time_index, extra_indices) for grid in self.grids]
+        sediment_records = getattr(self.plugin, "_sediment_records", None)
+        return [
+            reader.read_slice(grid, entry, time_index, extra_indices, sediment_records)
+            for grid in self.grids
+        ]
 
     def plot(self):
         dialog = self.dialog

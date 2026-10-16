@@ -9,6 +9,7 @@ import glob
 import os
 import re
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -22,6 +23,9 @@ FROUDE_KEY = "derived:froude_number"
 VELOCITY_MAGNITUDE_KEY = "derived:velocity_magnitude"
 BED_LEVEL_CHANGE_KEY = "derived:cumulative_bed_level_change"
 STREAM_FUNCTION_KEY = "derived:stream_function"
+THETA_KEY_PREFIX = "derived:theta:"
+WATER_DENSITY = 1000.0
+GRAVITY = 9.81
 
 _PARTITION_PATTERN = re.compile(r"^(?P<prefix>.*_)(?P<part>\d{4})(?P<suffix>_.*\.nc)$", re.IGNORECASE)
 
@@ -339,7 +343,7 @@ def _plain_2d(dataset, layout, name):
     return set(dataset.variables[name].dimensions) == {layout.time_dim, layout.face_dim}
 
 
-def list_variables(path):
+def list_variables(path, sediment_records=None):
     """Return the plottable face/node variables plus available derived variables."""
     netcdf = _netcdf()
     entries = []
@@ -385,12 +389,45 @@ def list_variables(path):
             derived.append(
                 VariableEntry(BED_LEVEL_CHANGE_KEY, "Cumulative bed level change (derived) [m]", FACE, True, derived=True, units="m")
             )
+        if _shear_stress_available(names):
+            for index, record in enumerate(_valid_theta_records(sediment_records)):
+                derived.append(
+                    VariableEntry(
+                        f"{THETA_KEY_PREFIX}{index}",
+                        f"Non-dimensional bed shear stress - {record.name} (derived) [-]",
+                        FACE,
+                        True,
+                        derived=True,
+                        units="-",
+                    )
+                )
         if names["q1"] and names["edge_nodes"]:
             derived.append(
                 VariableEntry(STREAM_FUNCTION_KEY, "Streamfunction (derived) [m3/s]", NODE, True, derived=True, units="m3 s-1")
             )
     entries.sort(key=lambda entry: entry.key.lower())
     return derived + entries
+
+
+def _valid_theta_records(records):
+    valid = []
+    for record in records or []:
+        try:
+            diameter = float(record.characteristic_diameter)
+            density = float(record.dry_density)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not np.isfinite(diameter) or diameter <= 0:
+            continue
+        if not np.isfinite(density) or density <= WATER_DENSITY:
+            continue
+        name = str(getattr(record, "name", "fraction") or "fraction")
+        valid.append(SimpleNamespace(name=name, diameter=diameter, density=density))
+    return valid
+
+
+def _shear_stress_available(names):
+    return bool(names["taus"] or (names["chezy"] and (names["ucmag"] or (names["ucx"] and names["ucy"]))))
 
 
 def _derived_inputs(dataset, layout):
@@ -410,6 +447,8 @@ def _derived_inputs(dataset, layout):
         edge_nodes = None
     return {
         "depth": face_var("waterdepth"),
+        "taus": face_var("taus"),
+        "chezy": face_var("czs"),
         "ucmag": face_var("ucmag"),
         "ucx": face_var("ucx"),
         "ucy": face_var("ucy"),
@@ -436,7 +475,7 @@ def _read_hyperslab(dataset, layout, name, time_index, extra_indices, spatial_di
     return np.asarray(np.ma.filled(np.ma.asarray(values, dtype=float), np.nan), dtype=float).reshape(-1)
 
 
-def read_slice(grid, entry, time_index=0, extra_indices=None):
+def read_slice(grid, entry, time_index=0, extra_indices=None, sediment_records=None):
     """Read one plotted slice of ``entry`` for ``grid`` (owned faces / used nodes)."""
     if entry.key == STREAM_FUNCTION_KEY:
         raise LargeMapError("Use StreamFunctionGraph for the streamfunction")
@@ -449,12 +488,12 @@ def read_slice(grid, entry, time_index=0, extra_indices=None):
             spatial_dim = layout.face_dim if entry.location == FACE else layout.node_dim
             values = _read_hyperslab(dataset, layout, entry.key, time_index, extra_indices, spatial_dim)
         else:
-            values = _derived_slice(dataset, layout, entry.key, time_index)
+            values = _derived_slice(dataset, layout, entry.key, time_index, sediment_records)
     index = grid.face_index if entry.location == FACE else grid.node_index
     return values[index]
 
 
-def _derived_slice(dataset, layout, key, time_index):
+def _derived_slice(dataset, layout, key, time_index, sediment_records=None):
     names = _derived_inputs(dataset, layout)
 
     def face(name):
@@ -464,6 +503,26 @@ def _derived_slice(dataset, layout, key, time_index):
         if names["ucmag"]:
             return face(names["ucmag"])
         return np.hypot(face(names["ucx"]), face(names["ucy"]))
+
+    if key.startswith(THETA_KEY_PREFIX):
+        try:
+            fraction_index = int(key[len(THETA_KEY_PREFIX):])
+        except ValueError as exc:
+            raise LargeMapError(f"Invalid theta variable '{key}'") from exc
+        records = _valid_theta_records(sediment_records)
+        if fraction_index >= len(records):
+            raise LargeMapError("Sediment data is unavailable for this theta variable")
+        if not _shear_stress_available(names):
+            raise LargeMapError(f"{os.path.basename(dataset.filepath())} lacks bed shear stress or velocity/Chezy inputs")
+        if names["taus"]:
+            shear = face(names["taus"])
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                shear = WATER_DENSITY * velocity() ** 2 * GRAVITY / face(names["chezy"]) ** 2
+        record = records[fraction_index]
+        delta = (record.density - WATER_DENSITY) / WATER_DENSITY
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return shear / (WATER_DENSITY * GRAVITY * delta * record.diameter)
 
     if key == FROUDE_KEY and names["depth"] and (names["ucmag"] or (names["ucx"] and names["ucy"])):
         return compute_froude_number(face(names["depth"])[np.newaxis, :], velocity()[np.newaxis, :])[0]

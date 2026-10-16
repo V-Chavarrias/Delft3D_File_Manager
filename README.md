@@ -187,8 +187,11 @@ Workflow:
 2. Select a **Variable**. All 2D face and node variables are listed, plus the
    derived variables that can be computed from the file: Froude number,
    velocity magnitude (when `ucmag` is absent), cumulative bed level change
-   (`mor_bl` relative to the first time), and the streamfunction (from `q1`,
-   computed across all partitions).
+	(`mor_bl` relative to the first time), nondimensional bed shear stress per
+	sediment fraction, and the streamfunction (from `q1`, computed across all
+	partitions). The theta variables require an imported `.sed` file containing
+	`RhoSol` for each fraction. They use `mesh2d_taus` when available; otherwise
+	they use velocity and `mesh2d_czs` to calculate the bed shear stress.
 3. Select the **Time**. For variables with additional dimensions (for example
    sediment fraction or bed layer) one index selector per dimension is shown.
 4. Click **Plot**. The selected data replaces the plotted dataset on the
@@ -486,6 +489,12 @@ The plugin automatically detects and creates separate layers for each component 
 NetCDF files whose global `description` is exactly `gdm_write_M2D_netcdf; v1.0` are treated as per-cell scalar values instead. Activate the matching 2D mesh layer before importing; the file's one-dimensional `data` array must have exactly one value per face. The plugin combines those values with the active mesh topology in a temporary UGRID NetCDF and loads it as a native mesh layer with scalar rendering enabled. This avoids creating a separate polygon feature for each cell. The original input and grid files are not changed. The temporary companion is intended for the current QGIS session and may not be available when reopening a saved project.
 
 When a UGRID file contains variables with extra dimensions beyond time and mesh space (for example sediment fraction or bed layer dimensions), and those variables are not handled by the regular loader, the plugin prompts for which non-topology data variables to include. Regular flow-element-center variables such as `mesh2d_mor_bl` are not offered again, but **Cumulative bed level change** remains available as a derived option. The plugin creates or reuses a sidecar NetCDF file (`*_qgis_flat.nc`) next to the source, flattens the selected variables into additional variables, and loads that flattened mesh file in QGIS.
+
+When an imported sediment table contains `RhoSol`, the flattening dialog also
+offers **Non-dimensional bed shear stress**. It creates one `mesh2d_theta_*`
+face variable per sediment fraction using `mesh2d_taus`, or the velocity/Chezy
+fallback when `mesh2d_taus` is absent. The water density is 1000 kg/m3 and
+gravity is 9.81 m/s2.
 
 If there is no valid active 2D mesh, the active mesh has no readable NetCDF source, the cell array is not one-dimensional numeric data, or the number of values differs from the mesh face count, the importer reports a warning and does not create a plotted layer.
 

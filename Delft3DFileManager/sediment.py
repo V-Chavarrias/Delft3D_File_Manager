@@ -19,6 +19,7 @@ class SedimentRecord:
     diameter: float = None
     minimum_diameter: float = None
     maximum_diameter: float = None
+    dry_density: float = None
 
 
 def _parse_sections(filepath):
@@ -80,6 +81,11 @@ def read_sediment_file(filepath):
 
         block_name = values.get("name", "[Sediment]")
         sediment_type = values.get("sedtyp", "").strip()
+        dry_density = (
+            _positive_float(values, "rhosol", block_name)
+            if "rhosol" in values
+            else None
+        )
         if "seddia" in values:
             diameter = _positive_float(values, "seddia", block_name)
             records.append(SedimentRecord(
@@ -87,6 +93,7 @@ def read_sediment_file(filepath):
                 sediment_type=sediment_type,
                 characteristic_diameter=diameter,
                 diameter=diameter,
+                dry_density=dry_density,
             ))
             continue
 
@@ -102,6 +109,7 @@ def read_sediment_file(filepath):
             characteristic_diameter=math.sqrt(minimum * maximum),
             minimum_diameter=minimum,
             maximum_diameter=maximum,
+            dry_density=dry_density,
         ))
 
     if not records:

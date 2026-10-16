@@ -1936,6 +1936,43 @@ def _write_substrate_source(source_path):
         hidden_exposure[:] = [[1.0]]
 
 
+def test_theta_flattening_creates_one_variable_per_loaded_sediment(plugin, tmp_path):
+    from Delft3DFileManager.Delft3DFileManager import _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION
+
+    source_path = tmp_path / "theta.nc"
+    _write_substrate_source(source_path)
+    with Dataset(str(source_path), "a") as source_ds:
+        taus = source_ds.createVariable("mesh2d_taus", "f8", ("time", "mesh2d_nFaces"))
+        taus[:] = [[9810.0]]
+
+    plugin._sediment_records = [
+        SimpleNamespace(
+            name="sand",
+            characteristic_diameter=0.001,
+            dry_density=2650.0,
+        ),
+        SimpleNamespace(
+            name="gravel",
+            characteristic_diameter=0.01,
+            dry_density=2700.0,
+        ),
+    ]
+    with Dataset(str(source_path), "r") as source_ds:
+        analysis = plugin._analyze_ugrid_data_variables(source_ds)
+
+    assert _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION in analysis["flattenable_names"]
+    sidecar_path = plugin._prepare_flattened_ugrid_sidecar(
+        str(source_path),
+        [_NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION],
+    )
+
+    with Dataset(sidecar_path, "r") as sidecar:
+        assert float(sidecar.variables["mesh2d_theta_sand"][0, 0]) == pytest.approx(606.060606060606)
+        assert float(sidecar.variables["mesh2d_theta_gravel"][0, 0]) == pytest.approx(58.8235294117647)
+        assert sidecar.variables["mesh2d_theta_sand"].units == "1"
+        assert sidecar.variables["mesh2d_theta_sand"].sediment_dry_density == 2650.0
+
+
 def test_selected_thickness_and_fraction_are_both_flattened(plugin, tmp_path):
     source_path = tmp_path / "substrate.nc"
     _write_substrate_source(source_path)

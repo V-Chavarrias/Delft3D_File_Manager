@@ -62,6 +62,10 @@ except ImportError:
 _IMPORT_PROGRESS_DIALOG_OBJECT_NAME = "Delft3DFileManagerImportProgressDialog"
 _CUMULATIVE_BED_LEVEL_CHANGE_OPTION = "Cumulative bed level change"
 _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE = "mesh2d_mor_bl_change"
+_NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION = "Non-dimensional bed shear stress"
+_NON_DIMENSIONAL_BED_SHEAR_STRESS_PREFIX = "mesh2d_theta_"
+_WATER_DENSITY = 1000.0
+_GRAVITY = 9.81
 
 
 def _qt_major_version():
@@ -9353,6 +9357,9 @@ class Delft3DFileManager:
         if has_bed_level:
             has_morphodynamic = True
             flattenable_names.insert(0, _CUMULATIVE_BED_LEVEL_CHANGE_OPTION)
+        if self._theta_source_variables(nc_dataset) and self._theta_records():
+            has_morphodynamic = True
+            flattenable_names.insert(0, _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION)
 
         return {
             "candidate_names": sorted(candidate_names),
@@ -9360,6 +9367,98 @@ class Delft3DFileManager:
             "default_selected": list(flattenable_names),
             "has_morphodynamic": has_morphodynamic,
         }
+
+    def _theta_records(self):
+        """Return loaded sediment records that can produce nondimensional shear."""
+        import numpy as np
+
+        records = []
+        for record in self._sediment_records:
+            try:
+                diameter = float(record.characteristic_diameter)
+                density = float(record.dry_density)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not np.isfinite(diameter) or diameter <= 0:
+                continue
+            if not np.isfinite(density) or density <= _WATER_DENSITY:
+                continue
+            records.append((record, diameter, density))
+        return records
+
+    def _theta_source_variables(self, nc_dataset):
+        """Return compatible bed-shear source variable names, or ``None``."""
+        taus_name = self._find_variable_name(nc_dataset, "mesh2d_taus")
+        chezy_name = self._find_variable_name(nc_dataset, "mesh2d_czs")
+        ucmag_name = self._find_variable_name(nc_dataset, "mesh2d_ucmag")
+        ucx_name = self._find_variable_name(nc_dataset, "mesh2d_ucx")
+        ucy_name = self._find_variable_name(nc_dataset, "mesh2d_ucy")
+
+        candidates = [taus_name, chezy_name, ucmag_name, ucx_name, ucy_name]
+        candidates = [nc_dataset.variables[name] for name in candidates if name]
+        if not candidates:
+            return None
+        reference = next((variable for variable in candidates if len(variable.dimensions) == 2), None)
+        if reference is None:
+            return None
+        dimensions = set(reference.dimensions)
+        if not any(self._is_time_dimension(dim) for dim in dimensions):
+            return None
+        if not any(self._is_space_dimension(dim) for dim in dimensions):
+            return None
+
+        def compatible(name):
+            return bool(name and set(nc_dataset.variables[name].dimensions) == dimensions)
+
+        if compatible(taus_name):
+            return {
+                "taus": taus_name,
+                "chezy": None,
+                "ucmag": None,
+                "ucx": None,
+                "ucy": None,
+                "dimensions": tuple(reference.dimensions),
+            }
+        if compatible(chezy_name) and (
+            compatible(ucmag_name) or (compatible(ucx_name) and compatible(ucy_name))
+        ):
+            return {
+                "taus": None,
+                "chezy": chezy_name,
+                "ucmag": ucmag_name if compatible(ucmag_name) else None,
+                "ucx": ucx_name if compatible(ucx_name) else None,
+                "ucy": ucy_name if compatible(ucy_name) else None,
+                "dimensions": tuple(reference.dimensions),
+            }
+        return None
+
+    def _theta_data(self, source_ds, source_variables, record):
+        """Compute one theta array while preserving the source dimensions."""
+        import numpy as np
+
+        dimensions = source_variables["dimensions"]
+
+        def data(name):
+            variable = source_ds.variables[name]
+            values = np.ma.asarray(variable[:], dtype=float)
+            values = np.asarray(values.filled(np.nan), dtype=float)
+            axes = [variable.dimensions.index(dim) for dim in dimensions]
+            return np.transpose(values, axes)
+
+        if source_variables["taus"]:
+            shear = data(source_variables["taus"])
+        else:
+            velocity = data(source_variables["ucmag"]) if source_variables["ucmag"] else np.hypot(
+                data(source_variables["ucx"]), data(source_variables["ucy"])
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                shear = _WATER_DENSITY * velocity ** 2 * _GRAVITY / data(source_variables["chezy"]) ** 2
+
+        density = float(record.dry_density)
+        diameter = float(record.characteristic_diameter)
+        delta = (density - _WATER_DENSITY) / _WATER_DENSITY
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return shear / (_WATER_DENSITY * _GRAVITY * delta * diameter)
 
     def _find_morphodynamic_bed_level_variable(self, nc_dataset):
         """Return the actual variable name for morphodynamic bed level, if present."""
@@ -9663,6 +9762,17 @@ class Delft3DFileManager:
                     )
                     continue
 
+                if selected_name == _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION:
+                    theta_sources = self._theta_source_variables(source_ds)
+                    if theta_sources is None or not self._theta_records():
+                        raise RuntimeError(
+                            "Non-dimensional bed shear stress requires compatible shear inputs and sediment densities."
+                        )
+                    for source_name in theta_sources.values():
+                        if source_name and source_name in source_ds.variables:
+                            required_variable_names.add(source_name)
+                    continue
+
                 selected_var = source_ds.variables.get(selected_name)
                 if selected_var is None:
                     continue
@@ -9763,6 +9873,45 @@ class Delft3DFileManager:
                         change_data = bed_data - np.expand_dims(initial_bed, axis=time_axis)
                     change_variable[:] = change_data
                     generated_names.append(_CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE)
+                    continue
+
+                if variable_name == _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION:
+                    theta_sources = self._theta_source_variables(source_ds)
+                    theta_records = self._theta_records()
+                    if theta_sources is None or not theta_records:
+                        raise RuntimeError(
+                            "Non-dimensional bed shear stress requires compatible shear inputs and sediment densities."
+                        )
+                    _ensure_dimensions(theta_sources["dimensions"])
+                    used_names = set(sidecar_ds.variables.keys()) | set(generated_names)
+                    for record, _diameter, _density in theta_records:
+                        token = self._sanitize_netcdf_token(
+                            getattr(record, "name", "fraction"),
+                            fallback="fraction",
+                        )
+                        output_name = f"{_NON_DIMENSIONAL_BED_SHEAR_STRESS_PREFIX}{token}"
+                        suffix = 2
+                        while output_name in used_names:
+                            output_name = f"{_NON_DIMENSIONAL_BED_SHEAR_STRESS_PREFIX}{token}_{suffix}"
+                            suffix += 1
+                        output_variable = sidecar_ds.createVariable(
+                            output_name,
+                            "f8",
+                            theta_sources["dimensions"],
+                        )
+                        output_variable.setncattr(
+                            "long_name",
+                            f"Non-dimensional bed shear stress for {getattr(record, 'name', 'fraction')}",
+                        )
+                        output_variable.setncattr("standard_name", "non_dimensional_bed_shear_stress")
+                        output_variable.setncattr("units", "1")
+                        output_variable.setncattr("water_density", _WATER_DENSITY)
+                        output_variable.setncattr("gravity", _GRAVITY)
+                        output_variable.setncattr("sediment_dry_density", float(record.dry_density))
+                        output_variable.setncattr("sediment_diameter", float(record.characteristic_diameter))
+                        output_variable[:] = self._theta_data(source_ds, theta_sources, record)
+                        generated_names.append(output_name)
+                        used_names.add(output_name)
                     continue
 
                 if variable_name not in source_ds.variables:
