@@ -1066,8 +1066,8 @@ pre-commit run --all-files
 
 Release:
 ```
-git tag v1.0
-git push origin v1.0
+git tag v11.1.0
+git push origin v11.1.0
 ```
 
 ## License

@@ -883,7 +883,7 @@ class BedLevelDialog(QDialog):
             return
 
         method_key = self.combo_method.currentData()
-    outside_policy = self.combo_outside_policy.currentData()
+        outside_policy = self.combo_outside_policy.currentData()
         input_mesh_path = self.mesh_path_edit.text().strip()
         output_mesh_path = self.output_mesh_edit.text().strip()
         mesh_path = input_mesh_path
