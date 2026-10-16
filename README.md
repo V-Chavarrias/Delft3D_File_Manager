@@ -1052,6 +1052,13 @@ Test:
 python -m pytest
 ```
 
+Coverage (branch-aware, with missing lines shown):
+```bash
+python -m pytest --cov=Delft3DFileManager --cov-report=term-missing --cov-report=xml --cov-fail-under=50
+```
+
+CI currently enforces a 50% coverage floor, five percentage points below the 55% baseline measured locally on Python 3.12, and the test workflow publishes `coverage.xml` as an artifact. The standard test suite stubs QGIS/PyQt, so its coverage report does not replace runtime testing in QGIS.
+
 Build:
 ```bash
 python .\build_plugin.py

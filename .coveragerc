@@ -1,0 +1,22 @@
+[run]
+source =
+    Delft3DFileManager
+branch = True
+omit =
+    */tests/*
+    */test_*.py
+    */conftest.py
+    */__pycache__/*
+    */.pytest_cache/*
+    */.venv/*
+    */venv/*
+    */build/*
+    */dist/*
+    */data/*
+    */data_tmp/*
+    */plans/*
+    */presentation/*
+    */*.py[cod]
+
+[report]
+show_missing = True

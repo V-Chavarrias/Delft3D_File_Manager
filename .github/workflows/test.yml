@@ -33,4 +33,17 @@ jobs:
         run: pytest tests/test_qt_compatibility.py -v
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: >-
+          python -m pytest tests/ -v
+          --cov=Delft3DFileManager
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-fail-under=50
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: warn

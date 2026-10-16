@@ -2,3 +2,6 @@ data_tmp/*
 presentation/*
 *.pyc
 *.zip
+.coverage
+coverage.xml
+htmlcov/
