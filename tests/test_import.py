@@ -1952,6 +1952,66 @@ def test_substrate_face_values_reads_only_selected_time_and_face(plugin, tmp_pat
     np.testing.assert_array_equal(values, source_values[:, 1, 2, :])
 
 
+def test_substrate_face_indexer_matches_unstructured_triangles(plugin):
+    import numpy as np
+    from scipy.spatial import Delaunay
+
+    rng = np.random.default_rng(20261016)
+    node_coordinates = rng.random((64, 2))
+    faces = Delaunay(node_coordinates).simplices
+    face_nodes = np.column_stack(
+        (faces, np.full(len(faces), -1, dtype=int))
+    )
+    locate_face = plugin._substrate_face_indexer(
+        node_coordinates[:, 0],
+        node_coordinates[:, 1],
+        face_nodes,
+    )
+
+    edges = np.vstack((
+        faces[:, [0, 1]],
+        faces[:, [1, 2]],
+        faces[:, [2, 0]],
+    ))
+    edges = np.unique(np.sort(edges, axis=1), axis=0)
+    query_points = np.vstack((
+        node_coordinates[faces].mean(axis=1),
+        node_coordinates[edges].mean(axis=1),
+        node_coordinates,
+        [[-0.5, 0.5], [1.5, 1.5]],
+    ))
+
+    def linear_face_index(point):
+        for face_index, face in enumerate(face_nodes):
+            vertices = [
+                tuple(node_coordinates[int(index)])
+                for index in face
+                if 0 <= int(index) < len(node_coordinates)
+            ]
+            inside = False
+            if len(vertices) < 3:
+                continue
+            previous = vertices[-1]
+            for current in vertices:
+                if (
+                    (current[1] > point[1]) != (previous[1] > point[1])
+                    and point[0]
+                    < (previous[0] - current[0])
+                    * (point[1] - current[1])
+                    / (previous[1] - current[1])
+                    + current[0]
+                ):
+                    inside = not inside
+                previous = current
+            if inside:
+                return face_index
+        return None
+
+    expected = [linear_face_index(point) for point in query_points]
+    actual = [locate_face(point) for point in query_points]
+    assert actual == expected
+
+
 def _write_substrate_source(source_path):
     with Dataset(str(source_path), "w") as source_ds:
         source_ds.createDimension("time", 1)

@@ -3102,6 +3102,84 @@ class Delft3DFileManager:
         ]
         return data, remaining_dimensions
 
+    def _substrate_face_indexer(self, node_x, node_y, face_nodes):
+        """Build a face locator that tests polygons inside their bounding boxes."""
+        import numpy as np
+
+        node_x = np.asarray(node_x, dtype=float)
+        node_y = np.asarray(node_y, dtype=float)
+        faces = np.asarray(face_nodes, dtype=int)
+        if (
+            node_x.size == 0
+            or node_y.size == 0
+            or faces.ndim != 2
+            or faces.shape[0] == 0
+            or faces.shape[1] == 0
+        ):
+            return lambda _point: None
+
+        valid = (
+            (faces >= 0)
+            & (faces < node_x.size)
+            & (faces < node_y.size)
+        )
+        safe_faces = np.clip(faces, 0, min(node_x.size, node_y.size) - 1)
+        face_x = node_x[safe_faces]
+        face_y = node_y[safe_faces]
+        valid &= np.isfinite(face_x) & np.isfinite(face_y)
+        min_x = np.min(np.where(valid, face_x, np.inf), axis=1)
+        max_x = np.max(np.where(valid, face_x, -np.inf), axis=1)
+        min_y = np.min(np.where(valid, face_y, np.inf), axis=1)
+        max_y = np.max(np.where(valid, face_y, -np.inf), axis=1)
+
+        finite_x = node_x[np.isfinite(node_x)]
+        finite_y = node_y[np.isfinite(node_y)]
+        coordinate_scale = max(
+            1.0,
+            float(np.max(np.abs(finite_x))) if finite_x.size else 0.0,
+            float(np.max(np.abs(finite_y))) if finite_y.size else 0.0,
+        )
+        tolerance = max(
+            1e-9,
+            np.finfo(float).eps * coordinate_scale * 16.0,
+        )
+
+        def _face_index(point):
+            px, py = float(point[0]), float(point[1])
+            candidates = np.flatnonzero(
+                (min_x <= px + tolerance)
+                & (max_x >= px - tolerance)
+                & (min_y <= py + tolerance)
+                & (max_y >= py - tolerance)
+            )
+            for face_index in candidates:
+                vertices = [
+                    (float(node_x[int(index)]), float(node_y[int(index)]))
+                    for index in faces[face_index]
+                    if 0 <= int(index) < node_x.size
+                    and int(index) < node_y.size
+                ]
+                inside = False
+                if len(vertices) < 3:
+                    continue
+                previous = vertices[-1]
+                for current in vertices:
+                    if (
+                        (current[1] > py) != (previous[1] > py)
+                        and px
+                        < (previous[0] - current[0])
+                        * (py - current[1])
+                        / (previous[1] - current[1])
+                        + current[0]
+                    ):
+                        inside = not inside
+                    previous = current
+                if inside:
+                    return int(face_index)
+            return None
+
+        return _face_index
+
     def _append_substrate_profile(self, qgis_points, substrate_mode="volume", fraction_label=""):
         """Render the selected substrate fraction as a chainage/elevation patch."""
         import netCDF4 as nc
@@ -3243,27 +3321,6 @@ class Delft3DFileManager:
             self._show_mesh_profile_message("The drawn line does not cross any mesh edge in the imported partition topology.")
             return
 
-        def _face_index(node_x, node_y, face_nodes, point):
-            for face_index, face in enumerate(face_nodes):
-                vertices = [
-                    (float(node_x[int(index)]), float(node_y[int(index)]))
-                    for index in face
-                    if 0 <= int(index) < len(node_x)
-                ]
-                inside = False
-                if len(vertices) < 3:
-                    continue
-                previous = vertices[-1]
-                for current in vertices:
-                    if ((current[1] > point[1]) != (previous[1] > point[1]) and
-                            point[0] < (previous[0] - current[0]) * (point[1] - current[1]) /
-                            (previous[1] - current[1]) + current[0]):
-                        inside = not inside
-                    previous = current
-                if inside:
-                    return face_index
-            return None
-
         crossings_by_source = {}
         partition_owner_cache = {}
         substrate_source_cache = {}
@@ -3336,6 +3393,11 @@ class Delft3DFileManager:
                         face_nodes = face_nodes.filled(-1)
                     start_index = int(getattr(face_variable, "start_index", 0))
                     face_nodes = np.asarray(face_nodes, dtype=int) - start_index
+                    face_indexer = self._substrate_face_indexer(
+                        node_x,
+                        node_y,
+                        face_nodes,
+                    )
 
                     domain_values = None
                     if owner_partition is not None:
@@ -3356,7 +3418,7 @@ class Delft3DFileManager:
                     fraction_metadata = None
                     for chainage, point in source_crossings:
                         try:
-                            face_index = _face_index(node_x, node_y, face_nodes, point)
+                            face_index = face_indexer(point)
                             self._log_substrate_debug(f"face_index={face_index}")
                             if face_index is None:
                                 continue
