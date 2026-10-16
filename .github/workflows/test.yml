@@ -41,7 +41,7 @@ jobs:
           --cov=Delft3DFileManager
           --cov-report=term-missing
           --cov-report=xml
-          --cov-fail-under=50
+          --cov-fail-under=55
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12' && github.event_name == 'push'

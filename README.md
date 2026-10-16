@@ -1054,25 +1054,29 @@ Security guardrails (for contributors and coding agents):
 - Keep package installation restricted to the internal allowlist (`self._required_packages`) and never pass user-controlled strings into command execution.
 - If process execution is absolutely required in future work, use strict allowlists, argument lists (never shell strings), and document the threat model in the pull request.
 
-Test:
-```bash
-python -m pytest
-```
+Testing
 
-Fast unit tests, including both the legacy QGIS/PyQt stubs and stricter API fakes,
-are marked `unit` and can be selected independently:
+For day-to-day development, run the fast unit suite. It uses QGIS/PyQt stubs
+and does not start a real QGIS runtime:
 ```bash
 python -m pytest -m unit
 ```
 
-The default `python -m pytest` run also looks for a QGIS 4 Python launcher on
-Windows and runs the real-QGIS tests in a separate process, isolated from the
-unit-test stubs. Set `QGIS_PYTHON` to override the automatic search. The
-QGIS Python environment must have `pytest` installed; with OSGeo4W, install it
-using that installation's `python-qgis.bat -m pip install --user pytest`.
+Before pushing, run the full test suite and coverage check:
+```bash
+python -m pytest
+python -m pytest --cov=Delft3DFileManager --cov-report=term-missing --cov-report=xml --cov-fail-under=55
+```
 
-Real-QGIS integration and end-to-end tests use actual QGIS/Qt classes. To run
-them directly, use QGIS's Python launcher and bypass the root unit-test stubs:
+The full `python -m pytest` run also looks for a QGIS 4 Python launcher on
+Windows and runs the real-QGIS integration tests in a separate process,
+isolated from the unit-test stubs. Set `QGIS_PYTHON` to override the automatic
+search. The QGIS Python environment must have `pytest` installed; with OSGeo4W,
+install it using that installation's `python-qgis.bat -m pip install --user pytest`.
+
+Real-QGIS integration and end-to-end tests use actual QGIS/Qt classes. Run
+these heavier checks before pushing, using QGIS's Python launcher and
+bypassing the root unit-test stubs:
 ```bash
 python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m qgis_runtime
 python-qgis.bat -m pytest --confcutdir=tests\integration tests\integration -m e2e
@@ -1086,12 +1090,10 @@ the [QGIS E2E workflow](./.github/workflows/qgis-e2e.yml). Pull-request runs are
 non-blocking while stability is measured; manual and scheduled runs report
 failures normally.
 
-Coverage (branch-aware, with missing lines shown):
-```bash
-python -m pytest --cov=Delft3DFileManager --cov-report=term-missing --cov-report=xml --cov-fail-under=50
-```
-
-CI currently enforces a 50% coverage floor, five percentage points below the 55% baseline measured locally on Python 3.12, and the test workflow publishes `coverage.xml` as an artifact. The standard test suite stubs QGIS/PyQt, so its coverage report does not replace runtime testing in QGIS.
+Coverage is branch-aware. CI enforces a 55% coverage floor and the test
+workflow publishes `coverage.xml` as an artifact. The standard test suite
+stubs QGIS/PyQt, so its coverage report does not replace runtime testing in
+QGIS.
 
 Build:
 ```bash

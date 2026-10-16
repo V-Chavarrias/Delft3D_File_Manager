@@ -32,7 +32,7 @@ jobs:
           --cov=Delft3DFileManager
           --cov-report=term-missing
           --cov-report=xml
-          --cov-fail-under=50
+          --cov-fail-under=55
 
   build:
     needs: test
