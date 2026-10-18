@@ -205,17 +205,31 @@ def test_mesh_capture_handlers_are_optional(dialog_module):
     draw = MagicMock()
     selected_lines = MagicMock()
     substrate = MagicMock()
-    dialog.set_mesh_handlers(draw, selected_lines, substrate)
+    draw_point = MagicMock()
+    selected_points = MagicMock()
+    dialog.set_mesh_handlers(
+        draw,
+        selected_lines,
+        substrate,
+        on_point_draw_requested=draw_point,
+        on_selected_points_requested=selected_points,
+    )
 
     dialog._draw_profile()
     dialog._add_selected_lines()
     dialog._substrate_selection_changed()
+    dialog._draw_point_series()
+    dialog._add_selected_points()
 
     draw.assert_called_once_with()
     selected_lines.assert_called_once_with()
     substrate.assert_called_once_with("", "")
+    draw_point.assert_called_once_with()
+    selected_points.assert_called_once_with()
 
     dialog.set_mesh_handlers()
     dialog._draw_profile()
     dialog._add_selected_lines()
     dialog._substrate_selection_changed()
+    dialog._draw_point_series()
+    dialog._add_selected_points()

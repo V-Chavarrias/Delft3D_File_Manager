@@ -93,6 +93,18 @@ def _write_partition(path, part, local_faces, owner, reverse_edges=False):
         time.units = "seconds since 2020-01-01 00:00:00"
         time[:] = TIMES
 
+        node_series = ds.createVariable(
+            "mesh2d_node_series",
+            "f8",
+            ("nmesh2d_node", "time"),
+        )
+        node_series[:] = np.asarray(
+            [
+                [x + 100 * y + 1000 * t for t in range(nt)]
+                for x, y in zip(node_x[used], node_y[used])
+            ]
+        )
+
         def face_series(name, scale, units="m"):
             variable = ds.createVariable(name, "f8", ("time", "nmesh2d_face"))
             variable.units = units
@@ -197,6 +209,106 @@ def test_read_slice_reads_only_owned_values_in_any_dimension_order(partitioned):
         np.testing.assert_allclose(
             reader.read_slice(grid, entries["mesh2d_node_z"]), grid.node_x + 100 * grid.node_y
         )
+
+
+def test_read_point_series_reads_temporal_node_face_and_extra_dimension_values(partitioned):
+    path = partitioned / "model_0000_map.nc"
+    grids = [
+        reader.read_partition_grid(partition_path)
+        for partition_path in reader.discover_partitions(path)
+    ]
+    entries = {entry.key: entry for entry in reader.list_variables(path)}
+    grid = grids[0]
+    local_face = 0
+    face_index = int(grid.face_index[local_face])
+    global_face = int(_global_face_ids(grid)[local_face])
+    np.testing.assert_allclose(
+        reader.read_point_series(grid, entries["mesh2d_s1"], face_index),
+        [global_face + 1, global_face + 11, global_face + 21],
+    )
+
+    local_node = 0
+    node_index = int(grid.node_index[local_node])
+    node_value = grid.node_x[local_node] + 100 * grid.node_y[local_node]
+    np.testing.assert_allclose(
+        reader.read_point_series(grid, entries["mesh2d_node_series"], node_index),
+        [node_value, node_value + 1000, node_value + 2000],
+    )
+
+    np.testing.assert_allclose(
+        reader.read_point_series(
+            grid,
+            entries["mesh2d_lyrfrac"],
+            face_index,
+            extra_indices=[2, 1],
+        ),
+        [100 * (global_face + 1) + 21, 1000 + 100 * (global_face + 1) + 21,
+         2000 + 100 * (global_face + 1) + 21],
+    )
+
+
+def test_read_point_series_supports_derived_face_variables_and_rejects_static(partitioned):
+    path = partitioned / "model_0000_map.nc"
+    grid = reader.read_partition_grid(path)
+    entries = {entry.key: entry for entry in reader.list_variables(path)}
+    face_index = int(grid.face_index[0])
+
+    expected_froude = [
+        reader.read_slice(grid, entries[reader.FROUDE_KEY], time_index)[0]
+        for time_index in range(len(TIMES))
+    ]
+    np.testing.assert_allclose(
+        reader.read_point_series(grid, entries[reader.FROUDE_KEY], face_index),
+        expected_froude,
+    )
+    for key in (reader.VELOCITY_MAGNITUDE_KEY, reader.BED_LEVEL_CHANGE_KEY):
+        expected = [
+            reader.read_slice(grid, entries[key], time_index)[0]
+            for time_index in range(len(TIMES))
+        ]
+        np.testing.assert_allclose(
+            reader.read_point_series(grid, entries[key], face_index),
+            expected,
+        )
+
+    with pytest.raises(reader.LargeMapError, match="no time dimension"):
+        reader.read_point_series(grid, entries["mesh2d_node_z"], 0)
+
+
+def test_read_point_series_supports_theta_derived_face_variable(partitioned):
+    path = partitioned / "model_0000_map.nc"
+    records = [
+        SimpleNamespace(
+            name="sand",
+            characteristic_diameter=0.001,
+            dry_density=2650.0,
+        )
+    ]
+    with netCDF4.Dataset(path, "a") as dataset:
+        taus = dataset.createVariable("mesh2d_taus", "f8", ("time", "nmesh2d_face"))
+        taus[:] = 9810.0
+
+    grid = reader.read_partition_grid(path)
+    entry = next(
+        entry
+        for entry in reader.list_variables(path, records)
+        if entry.key == reader.THETA_KEY_PREFIX + "0"
+    )
+    face_index = int(grid.face_index[0])
+    expected = [
+        reader.read_slice(grid, entry, time_index, sediment_records=records)[0]
+        for time_index in range(len(TIMES))
+    ]
+
+    np.testing.assert_allclose(
+        reader.read_point_series(
+            grid,
+            entry,
+            face_index,
+            sediment_records=records,
+        ),
+        expected,
+    )
 
 
 def test_derived_slices(partitioned):

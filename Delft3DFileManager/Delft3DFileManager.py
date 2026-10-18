@@ -490,6 +490,8 @@ class Delft3DFileManager:
         self._mesh_profile_dialog = None
         self._mesh_profile_map_tool = None
         self._mesh_profile_previous_map_tool = None
+        self._mesh_point_map_tool = None
+        self._mesh_point_previous_map_tool = None
         self._mesh_profile_source_layers = []
         self._substrate_patch_requested = False
         self._substrate_patch_mode = "volume"
@@ -773,6 +775,8 @@ class Delft3DFileManager:
         """Remove the plugin menu item and icon"""
         if self._mesh_polyline_map_tool is not None:
             self._mesh_polyline_map_tool.cancel()
+        self._cancel_mesh_profile_capture()
+        self._cancel_mesh_point_capture()
         if self.import_action:
             self.iface.removeToolBarIcon(self.import_action)
             self.iface.removePluginMenu("&Delft3D File Manager", self.import_action)
@@ -2287,6 +2291,8 @@ class Delft3DFileManager:
             on_draw_requested=self._on_mesh_draw_requested,
             on_selected_lines_requested=self._add_selected_mesh_profiles,
             on_substrate_patch_requested=self._on_substrate_selection_changed,
+            on_point_draw_requested=self._start_mesh_point_capture,
+            on_selected_points_requested=self._add_selected_mesh_point_series,
         )
         return dialog
 
@@ -2757,7 +2763,7 @@ class Delft3DFileManager:
         layers = self._mesh_profile_layers_for_active()
         if not layers:
             self._show_mesh_profile_message(
-                "Activate an imported mesh layer, then draw a line or select line features."
+                "Activate an imported mesh layer, then draw a line or point, or select line or point features."
             )
             return
 
@@ -2785,6 +2791,38 @@ class Delft3DFileManager:
         else:
             self._start_mesh_profile_capture()
 
+    def _cancel_mesh_profile_capture(self):
+        """Restore the prior map tool and discard an unfinished line capture."""
+        tool = self._mesh_profile_map_tool
+        if tool is None:
+            return
+        canvas = self.iface.mapCanvas()
+        try:
+            if canvas.mapTool() is tool:
+                canvas.setMapTool(self._mesh_profile_previous_map_tool)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        try:
+            tool.rubber_band.reset(QgsWkbTypes.LineGeometry)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        self._mesh_profile_map_tool = None
+        self._mesh_profile_previous_map_tool = None
+
+    def _cancel_mesh_point_capture(self):
+        """Restore the prior map tool and discard an unfinished point capture."""
+        tool = self._mesh_point_map_tool
+        if tool is None:
+            return
+        canvas = self.iface.mapCanvas()
+        try:
+            if canvas.mapTool() is tool:
+                canvas.setMapTool(self._mesh_point_previous_map_tool)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        self._mesh_point_map_tool = None
+        self._mesh_point_previous_map_tool = None
+
     def _on_substrate_selection_changed(self, substrate_mode, fraction_label):
         """Draw a substrate patch for the dropdown selection along the active or last line."""
         canvas = self.iface.mapCanvas()
@@ -2808,6 +2846,8 @@ class Delft3DFileManager:
         fraction_label="",
     ):
         """Capture a polyline from the map canvas and append its mesh profile."""
+        self._cancel_mesh_point_capture()
+        self._cancel_mesh_profile_capture()
         self._substrate_patch_requested = bool(substrate_patch)
         self._substrate_patch_mode = str(substrate_mode or "volume")
         self._substrate_fraction_label = str(fraction_label or "")
@@ -2858,6 +2898,7 @@ class Delft3DFileManager:
                 dialog.set_status_message("Dataset slice captured. Draw another slice or close this window.")
                 canvas.setMapTool(previous_tool)
                 manager._mesh_profile_map_tool = None
+                manager._mesh_profile_previous_map_tool = None
 
             def canvasDoubleClickEvent(self, event):
                 if event.button() != _left_mouse_button_value():
@@ -2890,8 +2931,58 @@ class Delft3DFileManager:
             fraction_label=fraction_label,
         )
 
+    def _start_mesh_point_capture(self):
+        """Capture one map point and append its active dataset time series."""
+        layers = list(self._mesh_profile_source_layers or self._mesh_profile_layers_for_active())
+        if not layers:
+            self._show_mesh_profile_message(
+                "Activate an imported mesh layer before capturing a point time series."
+            )
+            return
+
+        self._cancel_mesh_profile_capture()
+        self._cancel_mesh_point_capture()
+        from qgis.gui import QgsMapTool
+
+        canvas = self.iface.mapCanvas()
+        previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        manager = self
+        dialog = self._ensure_mesh_profile_dialog()
+
+        class _MeshPointMapTool(QgsMapTool):
+            def __init__(self):
+                super().__init__(canvas)
+
+            def canvasPressEvent(self, event):
+                if event.button() != _left_mouse_button_value():
+                    return
+                transform = canvas.getCoordinateTransform()
+                point = transform.toMapCoordinates(event.pos().x(), event.pos().y())
+                manager._cancel_mesh_point_capture()
+                manager._append_mesh_point_series([point], ["Map point"])
+
+        self._mesh_point_previous_map_tool = previous_tool
+        self._mesh_point_map_tool = _MeshPointMapTool()
+        canvas.setMapTool(self._mesh_point_map_tool)
+        dialog.set_status_message("Point time series: click the map to select a location.")
+        try:
+            self.iface.messageBar().pushInfo(
+                "2D Slice",
+                "Click the map once to plot the selected mesh dataset through time.",
+            )
+        except (AttributeError, RuntimeError):
+            pass
+
     def _selected_mesh_profile_line_layer(self):
         """Return the active or selected vector line layer for mesh profiles."""
+        return self._selected_mesh_profile_vector_layer(QgsWkbTypes.LineGeometry)
+
+    def _selected_mesh_profile_point_layer(self):
+        """Return the active or selected vector point layer for mesh profiles."""
+        return self._selected_mesh_profile_vector_layer(QgsWkbTypes.PointGeometry)
+
+    def _selected_mesh_profile_vector_layer(self, geometry_type):
+        """Return the active-first selected vector layer of the requested geometry type."""
         active_layer = self.iface.activeLayer()
         candidates = []
         if active_layer is not None:
@@ -2906,7 +2997,7 @@ class Delft3DFileManager:
             try:
                 if (
                     layer.type() == QgsMapLayerType.VectorLayer
-                    and layer.geometryType() == QgsWkbTypes.LineGeometry
+                    and layer.geometryType() == geometry_type
                     and list(layer.getSelectedFeatures())
                 ):
                     return layer
@@ -2976,6 +3067,271 @@ class Delft3DFileManager:
 
         for feature, points in display_lines:
             self._append_mesh_profile(points, label=f"Feature {feature.id()}")
+
+    def _add_selected_mesh_point_series(self):
+        """Append time series for selected point features in a vector point layer."""
+        layer = self._selected_mesh_profile_point_layer()
+        if layer is None:
+            self._show_mesh_profile_message("Activate a point layer with selected features.")
+            return
+
+        features = list(layer.getSelectedFeatures())
+        if not features:
+            self._show_mesh_profile_message("Select one or more point features first.")
+            return
+
+        display_points = []
+        labels = []
+        for feature in features:
+            try:
+                vertices = list(feature.geometry().vertices())
+            except (AttributeError, RuntimeError, TypeError):
+                vertices = []
+            for point_index, point in enumerate(vertices):
+                transformed = self._mesh_profile_display_points(layer, [point])
+                if transformed is None:
+                    return
+                display_points.extend(transformed)
+                feature_label = f"Feature {feature.id()}"
+                if len(vertices) > 1:
+                    feature_label += f" point {point_index + 1}"
+                labels.extend([feature_label] * len(transformed))
+
+        if not display_points:
+            self._show_mesh_profile_message("The selected features contain no usable point geometry.")
+            return
+
+        self._append_mesh_point_series(display_points, labels)
+
+    def _mesh_profile_point_in_mesh_crs(self, point, layer):
+        """Transform a canvas point into the mesh-layer coordinate system."""
+        from qgis.core import QgsCoordinateTransform, QgsPointXY, QgsProject
+
+        point = QgsPointXY(float(point.x()), float(point.y()))
+        try:
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            mesh_crs = layer.crs()
+        except (AttributeError, RuntimeError):
+            return point
+        if (
+            not callable(getattr(canvas_crs, "isValid", None))
+            or not canvas_crs.isValid()
+            or not callable(getattr(mesh_crs, "isValid", None))
+            or not mesh_crs.isValid()
+            or canvas_crs == mesh_crs
+        ):
+            return point
+        try:
+            return QgsCoordinateTransform(
+                canvas_crs,
+                mesh_crs,
+                QgsProject.instance(),
+            ).transform(point)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            self._show_mesh_profile_message(
+                f"Could not transform the selected point to the mesh CRS: {exc}"
+            )
+            return None
+
+    def _mesh_profile_point_sample_grids(self, layers):
+        """Read each partition's owned topology for nearest-sample lookup."""
+        from . import large_map_reader
+
+        grids = []
+        for layer in layers:
+            source_path = self._mesh_layer_source_path(layer)
+            if not source_path:
+                self._show_mesh_profile_message(
+                    "Could not resolve the NetCDF source for an active mesh partition."
+                )
+                return None
+            try:
+                grids.append(large_map_reader.read_partition_grid(source_path))
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                KeyError,
+                TypeError,
+                large_map_reader.LargeMapError,
+            ) as exc:
+                self._show_mesh_profile_message(
+                    f"Could not read the mesh topology for point sampling: {exc}"
+                )
+                return None
+        return grids
+
+    def _mesh_profile_temporal_group(self, layer):
+        """Return the active group's temporal indexes, coordinates and data location."""
+        import math
+
+        from qgis.core import QgsMeshDatasetGroupMetadata, QgsMeshDatasetIndex
+        from .mesh_profile_sampler import active_scalar_dataset_group
+
+        group_index = active_scalar_dataset_group(layer)
+        if group_index is None:
+            self._show_mesh_profile_message(
+                "No scalar dataset is selected for the active mesh. Select a scalar group first."
+            )
+            return None
+
+        group_dataset_index = QgsMeshDatasetIndex(group_index, 0)
+        try:
+            metadata = layer.datasetGroupMetadata(group_dataset_index)
+            count = int(layer.datasetCount(group_dataset_index))
+        except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+            self._show_mesh_profile_message(f"Could not read the selected dataset group: {exc}")
+            return None
+        if count <= 0:
+            self._show_mesh_profile_message("The selected dataset group contains no datasets.")
+            return None
+
+        temporal_method = getattr(metadata, "isTemporal", None)
+        try:
+            is_temporal = temporal_method() if callable(temporal_method) else count > 1
+        except (RuntimeError, TypeError, ValueError, AttributeError):
+            is_temporal = count > 1
+        if not is_temporal:
+            self._show_mesh_profile_message(
+                "The selected dataset is static and has no time series. Select a time-dependent dataset."
+            )
+            return None
+
+        dataset_indexes = []
+        time_values = []
+        for dataset_number in range(count):
+            dataset_index = QgsMeshDatasetIndex(group_index, dataset_number)
+            try:
+                dataset_metadata = layer.datasetMetadata(dataset_index)
+                if not getattr(dataset_metadata, "isValid", lambda: True)():
+                    raise ValueError(f"Dataset {dataset_number + 1} is invalid")
+                time_value = float(dataset_metadata.time())
+            except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+                self._show_mesh_profile_message(
+                    f"Could not read time metadata for dataset {dataset_number + 1}: {exc}"
+                )
+                return None
+            if not math.isfinite(time_value):
+                self._show_mesh_profile_message(
+                    f"Dataset {dataset_number + 1} has a non-finite time value."
+                )
+                return None
+            dataset_indexes.append(dataset_index)
+            time_values.append(time_value)
+
+        try:
+            data_type = metadata.dataType()
+            enum = getattr(QgsMeshDatasetGroupMetadata, "DataType", QgsMeshDatasetGroupMetadata)
+            node_type = getattr(QgsMeshDatasetGroupMetadata, "DataOnVertices", None)
+            face_type = getattr(QgsMeshDatasetGroupMetadata, "DataOnFaces", None)
+            if node_type is None:
+                node_type = getattr(enum, "DataOnVertices", None)
+            if face_type is None:
+                face_type = getattr(enum, "DataOnFaces", None)
+        except (RuntimeError, TypeError, AttributeError) as exc:
+            self._show_mesh_profile_message(f"Could not determine the dataset location: {exc}")
+            return None
+
+        if data_type == node_type:
+            location = "node"
+        elif data_type == face_type:
+            location = "face"
+        else:
+            self._show_mesh_profile_message(
+                "Point time series are supported for node and face datasets, not edge datasets."
+            )
+            return None
+        return group_index, metadata, dataset_indexes, time_values, location
+
+    def _append_mesh_point_series(self, qgis_points, labels):
+        """Sample the active scalar group at nearest mesh samples for every time."""
+        layers = list(self._mesh_profile_source_layers or self._mesh_profile_layers_for_active())
+        if not layers:
+            self._show_mesh_profile_message("Activate an imported mesh layer before sampling a point.")
+            return
+
+        context = self._mesh_profile_temporal_group(layers[0])
+        if context is None:
+            return
+        _group_index, metadata, dataset_indexes, time_values, location = context
+        mesh_points = []
+        for point in qgis_points:
+            mesh_point = self._mesh_profile_point_in_mesh_crs(point, layers[0])
+            if mesh_point is None:
+                return
+            mesh_points.append(mesh_point)
+
+        grids = self._mesh_profile_point_sample_grids(layers)
+        if grids is None:
+            return
+        if len(grids) != len(layers):
+            self._show_mesh_profile_message("Could not match mesh partitions to their topology.")
+            return
+
+        from qgis.core import QgsPointXY
+        from .mesh_profile_sampler import (
+            nearest_mesh_sample_candidates,
+            sample_partitioned_mesh_timeseries,
+        )
+
+        profiles = []
+        for point_number, point in enumerate(mesh_points):
+            candidates = nearest_mesh_sample_candidates(
+                grids,
+                (point.x(), point.y()),
+                location,
+            )
+            if not candidates:
+                self._show_mesh_profile_message(
+                    f"No {location} samples are available in the active mesh partitions."
+                )
+                return
+            candidate_layers = [layers[grid_index] for grid_index, _, _ in candidates]
+            sample_point = candidates[0][2]
+            self._prepare_mesh_profile_layers(candidate_layers)
+            values = sample_partitioned_mesh_timeseries(
+                candidate_layers,
+                sample_point,
+                dataset_indexes,
+                point_factory=lambda value: QgsPointXY(value[0], value[1]),
+            )
+            label = labels[point_number] if point_number < len(labels) else f"Point {point_number + 1}"
+            profiles.append({
+                "points": list(zip(time_values, values)),
+                "label": label,
+            })
+
+        group_name = metadata.name() if callable(getattr(metadata, "name", None)) else str(metadata.name)
+        options_method = getattr(metadata, "extraOptions", None)
+        options = options_method() if callable(options_method) else {}
+        units = next(
+            (str(value).strip() for key, value in options.items() if str(key).lower() == "units"),
+            "",
+        )
+        y_axis_label = f"{group_name} [{units}]" if units else str(group_name)
+        message = ""
+        if not any(
+            value is not None
+            for profile in profiles
+            for _, value in profile["points"]
+        ):
+            message = (
+                "No finite dataset values were found at the selected mesh samples. "
+                "Check that the selected dataset is available in the active partitions."
+            )
+
+        dialog = self._ensure_mesh_profile_dialog()
+        dialog.set_profiles(
+            profiles,
+            "Point time series",
+            {"x_axis_label": "time [h]", "y_axis_label": y_axis_label},
+            message=message,
+        )
+        dialog.reset_view()
+        dialog.setWindowTitle("2D Slice - Point Time Series")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _append_mesh_profile(self, qgis_points, label="Drawn profile"):
         """Sample one line using the displayed dataset and append its curve."""

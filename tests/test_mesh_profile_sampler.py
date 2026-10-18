@@ -9,7 +9,9 @@ from Delft3DFileManager.mesh_profile_sampler import (
     dataset_index_for_displayed_scalar,
     densify_polyline,
     mesh_edge_crossings,
+    nearest_mesh_sample_candidates,
     sample_partitioned_mesh,
+    sample_partitioned_mesh_timeseries,
 )
 
 
@@ -56,6 +58,23 @@ class _Layer:
         return _DatasetValue(self.values.get(tuple(point), math.nan))
 
 
+class _TemporalLayer:
+    def __init__(self, values):
+        self.values = values
+
+    def datasetValue(self, dataset_index, point):
+        return _DatasetValue(
+            self.values.get((tuple(dataset_index), tuple(point)), math.nan)
+        )
+
+
+class _Grid:
+    def __init__(self, node_x, node_y, faces):
+        self.node_x = np.asarray(node_x, dtype=float)
+        self.node_y = np.asarray(node_y, dtype=float)
+        self.faces = np.asarray(faces, dtype=int)
+
+
 def test_cumulative_chainage_and_densification():
     points = densify_polyline([(0, 0), (10, 0)], maximum_spacing=3)
 
@@ -84,6 +103,50 @@ def test_sample_partitioned_mesh_preserves_missing_data_gaps():
     )
 
     assert profile == [(0.0, None), (1.0, None)]
+
+
+def test_sample_partitioned_mesh_timeseries_uses_finite_partition_values():
+    point = (0.0, 0.0)
+    first = _TemporalLayer({
+        ((2, 0), point): 1.0,
+        ((2, 1), point): math.nan,
+    })
+    second = _TemporalLayer({((2, 1), point): 2.0})
+
+    values = sample_partitioned_mesh_timeseries(
+        [first, second],
+        point,
+        [(2, 0), (2, 1), (2, 2)],
+    )
+
+    assert values == [1.0, 2.0, None]
+
+
+def test_nearest_mesh_sample_candidates_respects_node_and_face_location():
+    grid = _Grid(
+        [0, 1, 1, 0],
+        [0, 0, 1, 1],
+        [[0, 1, 2, 3]],
+    )
+
+    assert nearest_mesh_sample_candidates([grid], (0.8, 0.2), "node") == [
+        (0, 1, (1.0, 0.0))
+    ]
+    assert nearest_mesh_sample_candidates([grid], (0.6, 0.4), "face") == [
+        (0, 0, (0.5, 0.5))
+    ]
+
+
+def test_nearest_mesh_sample_candidates_keeps_duplicate_partition_nodes():
+    grid = _Grid([0, 1, 1, 0], [0, 0, 1, 1], [[0, 1, 2, 3]])
+
+    candidates = nearest_mesh_sample_candidates(
+        [grid, grid],
+        (0.0, 0.0),
+        "node",
+    )
+
+    assert candidates == [(0, 0, (0.0, 0.0)), (1, 0, (0.0, 0.0))]
 
 
 def test_sample_partitioned_mesh_finds_values_between_outside_endpoints():

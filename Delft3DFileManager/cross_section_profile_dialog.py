@@ -414,6 +414,8 @@ class CrossSectionProfileDialog(QDialog):
         self._on_draw_requested = None
         self._on_selected_lines_requested = None
         self._on_substrate_patch_requested = None
+        self._on_point_draw_requested = None
+        self._on_selected_points_requested = None
 
         self._ve_spin = QDoubleSpinBox()
         self._ve_spin.setMinimum(0.1)
@@ -434,6 +436,10 @@ class CrossSectionProfileDialog(QDialog):
         self._draw_button.clicked.connect(self._draw_profile)
         self._selected_lines_button = QPushButton("Add Selected Line Slices")
         self._selected_lines_button.clicked.connect(self._add_selected_lines)
+        self._draw_point_button = QPushButton("Draw Point Time Series")
+        self._draw_point_button.clicked.connect(self._draw_point_series)
+        self._selected_points_button = QPushButton("Add Selected Point Time Series")
+        self._selected_points_button.clicked.connect(self._add_selected_points)
         self._substrate_fraction_combo = QComboBox()
         self._substrate_fraction_combo.setToolTip(
             "Choose a substrate value to draw a substrate patch instead of a dataset slice"
@@ -455,11 +461,16 @@ class CrossSectionProfileDialog(QDialog):
         control_layout.addStretch(1)
         control_layout.addWidget(self._reset_button)
         control_layout.addWidget(self._print_button)
+        mesh_layout = QHBoxLayout()
+        point_layout = QHBoxLayout()
         if self._mesh_mode:
-            control_layout.addWidget(self._clear_button)
-            control_layout.addWidget(self._draw_button)
-            control_layout.addWidget(self._selected_lines_button)
-            control_layout.addWidget(self._substrate_fraction_combo)
+            mesh_layout.addWidget(self._clear_button)
+            mesh_layout.addWidget(self._draw_button)
+            mesh_layout.addWidget(self._selected_lines_button)
+            mesh_layout.addWidget(self._substrate_fraction_combo)
+            point_layout.addWidget(self._draw_point_button)
+            point_layout.addWidget(self._selected_points_button)
+            point_layout.addStretch(1)
 
         limits_layout = QHBoxLayout()
         limits_layout.addWidget(QLabel("y limits:"))
@@ -474,6 +485,9 @@ class CrossSectionProfileDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._meta_label)
         layout.addLayout(control_layout)
+        if self._mesh_mode:
+            layout.addLayout(mesh_layout)
+            layout.addLayout(point_layout)
         layout.addLayout(limits_layout)
         layout.addWidget(self._chart_widget)
         layout.addWidget(self._message_label)
@@ -485,6 +499,8 @@ class CrossSectionProfileDialog(QDialog):
             self._clear_button,
             self._draw_button,
             self._selected_lines_button,
+            self._draw_point_button,
+            self._selected_points_button,
         ):
             button.setAutoDefault(False)
             button.setDefault(False)
@@ -494,11 +510,15 @@ class CrossSectionProfileDialog(QDialog):
         on_draw_requested=None,
         on_selected_lines_requested=None,
         on_substrate_patch_requested=None,
+        on_point_draw_requested=None,
+        on_selected_points_requested=None,
     ):
         """Set callbacks used by the mesh profile capture controls."""
         self._on_draw_requested = on_draw_requested
         self._on_selected_lines_requested = on_selected_lines_requested
         self._on_substrate_patch_requested = on_substrate_patch_requested
+        self._on_point_draw_requested = on_point_draw_requested
+        self._on_selected_points_requested = on_selected_points_requested
 
     def _draw_profile(self):
         if callable(self._on_draw_requested):
@@ -507,6 +527,14 @@ class CrossSectionProfileDialog(QDialog):
     def _add_selected_lines(self):
         if callable(self._on_selected_lines_requested):
             self._on_selected_lines_requested()
+
+    def _draw_point_series(self):
+        if callable(self._on_point_draw_requested):
+            self._on_point_draw_requested()
+
+    def _add_selected_points(self):
+        if callable(self._on_selected_points_requested):
+            self._on_selected_points_requested()
 
     def _substrate_selection_changed(self, _index=None):
         if callable(self._on_substrate_patch_requested):
@@ -579,6 +607,10 @@ class CrossSectionProfileDialog(QDialog):
     def set_status_message(self, message):
         """Update the non-modal status text without changing the chart."""
         self._message_label.setText(str(message or ""))
+
+    def reset_view(self):
+        """Reset chart limits and exaggeration after replacing the plotted quantity."""
+        self._on_reset()
 
     def _on_reset(self):
         self._ve_spin.setValue(1.0)

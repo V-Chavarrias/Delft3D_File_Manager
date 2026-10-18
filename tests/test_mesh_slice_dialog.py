@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -156,3 +157,186 @@ def test_selected_lines_draw_substrate_patch_when_selected(plugin):
 
     plugin._append_substrate_profile.assert_called_once_with(line, "volume", "Sediment1")
     plugin._append_mesh_profile.assert_not_called()
+
+
+def test_selected_point_features_append_named_point_series(plugin):
+    first = MagicMock()
+    first.id.return_value = 7
+    first_point = MagicMock()
+    first.geometry.return_value.vertices.return_value = [first_point]
+    second = MagicMock()
+    second.id.return_value = 8
+    second_points = [MagicMock(), MagicMock()]
+    second.geometry.return_value.vertices.return_value = second_points
+    layer = MagicMock()
+    layer.getSelectedFeatures.return_value = [first, second]
+    plugin._selected_mesh_profile_point_layer = MagicMock(return_value=layer)
+    plugin._mesh_profile_display_points = MagicMock(
+        side_effect=lambda _layer, points: points
+    )
+    plugin._append_mesh_point_series = MagicMock()
+
+    plugin._add_selected_mesh_point_series()
+
+    plugin._append_mesh_point_series.assert_called_once_with(
+        [first_point, *second_points],
+        ["Feature 7", "Feature 8 point 1", "Feature 8 point 2"],
+    )
+
+
+def test_append_mesh_point_series_replaces_chart_with_temporal_profiles(plugin, monkeypatch):
+    import qgis.core
+
+    class _DatasetValue:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar(self):
+            return self.value
+
+    point = SimpleNamespace(x=lambda: 0.0, y=lambda: 0.0)
+    grid = SimpleNamespace(
+        node_x=np.asarray([0.0, 1.0]),
+        node_y=np.asarray([0.0, 0.0]),
+        faces=np.asarray([[0, 1, 1]]),
+    )
+    layer = SimpleNamespace(
+        datasetValue=lambda dataset_index, _point: _DatasetValue(
+            {(2, 0): 1.5, (2, 1): 2.5}[tuple(dataset_index)]
+        )
+    )
+    metadata = SimpleNamespace(
+        name=lambda: "Water level",
+        extraOptions=lambda: {"units": "m"},
+    )
+    dialog = MagicMock()
+    plugin._mesh_profile_source_layers = [layer]
+    plugin._mesh_profile_temporal_group = MagicMock(
+        return_value=(2, metadata, [(2, 0), (2, 1)], [0.0, 1.0], "node")
+    )
+    plugin._mesh_profile_point_in_mesh_crs = MagicMock(return_value=point)
+    plugin._mesh_profile_point_sample_grids = MagicMock(return_value=[grid])
+    plugin._prepare_mesh_profile_layers = MagicMock()
+    plugin._ensure_mesh_profile_dialog = MagicMock(return_value=dialog)
+    monkeypatch.setattr(qgis.core, "QgsPointXY", lambda x, y: (x, y))
+
+    plugin._append_mesh_point_series([point], ["Map point"])
+
+    dialog.set_profiles.assert_called_once_with(
+        [{"points": [(0.0, 1.5), (1.0, 2.5)], "label": "Map point"}],
+        "Point time series",
+        {"x_axis_label": "time [h]", "y_axis_label": "Water level [m]"},
+        message="",
+    )
+    dialog.reset_view.assert_called_once_with()
+
+
+def test_mesh_profile_temporal_group_reports_static_data(plugin, monkeypatch):
+    import qgis.core
+
+    class _DatasetIndex:
+        def __init__(self, group, dataset=0):
+            self.group = group
+            self.dataset = dataset
+
+    class _GroupMetadata:
+        DataOnVertices = 1
+        DataOnFaces = 2
+
+        def isTemporal(self):
+            return False
+
+    class _DatasetGroupMetadata:
+        DataOnVertices = 1
+        DataOnFaces = 2
+
+    metadata = _GroupMetadata()
+    layer = SimpleNamespace(
+        activeScalarDatasetGroup=lambda: 2,
+        datasetGroupMetadata=lambda _index: metadata,
+        datasetCount=lambda _index: 1,
+    )
+    plugin._show_mesh_profile_message = MagicMock()
+    monkeypatch.setattr(qgis.core, "QgsMeshDatasetIndex", _DatasetIndex, raising=False)
+    monkeypatch.setattr(
+        qgis.core,
+        "QgsMeshDatasetGroupMetadata",
+        _DatasetGroupMetadata,
+        raising=False,
+    )
+
+    assert plugin._mesh_profile_temporal_group(layer) is None
+    assert "static" in plugin._show_mesh_profile_message.call_args.args[0].lower()
+
+
+def test_mesh_point_capture_samples_after_one_canvas_click(plugin, monkeypatch):
+    import Delft3DFileManager.Delft3DFileManager as plugin_module
+
+    canvas = MagicMock()
+    previous_tool = object()
+    canvas.mapTool.return_value = previous_tool
+    point = SimpleNamespace(x=lambda: 3.0, y=lambda: 4.0)
+    canvas.getCoordinateTransform.return_value.toMapCoordinates.return_value = point
+    plugin.iface.mapCanvas.return_value = canvas
+    plugin._mesh_profile_source_layers = [MagicMock()]
+    plugin._ensure_mesh_profile_dialog = MagicMock(return_value=MagicMock())
+    plugin._append_mesh_point_series = MagicMock()
+    monkeypatch.setattr(plugin_module, "_left_mouse_button_value", lambda: 1, raising=False)
+
+    plugin._start_mesh_point_capture()
+    tool = plugin._mesh_point_map_tool
+    canvas.mapTool.return_value = tool
+    event = MagicMock()
+    event.button.return_value = 1
+    event.pos.return_value.x.return_value = 6
+    event.pos.return_value.y.return_value = 8
+
+    tool.canvasPressEvent(event)
+
+    plugin._append_mesh_point_series.assert_called_once_with([point], ["Map point"])
+    assert plugin._mesh_point_map_tool is None
+    canvas.setMapTool.assert_called_with(previous_tool)
+
+
+def test_mesh_profile_point_is_transformed_from_canvas_to_mesh_crs(plugin, monkeypatch):
+    import sys
+
+    qgis_core = sys.modules["qgis.core"]
+
+    class _Point:
+        def __init__(self, x, y):
+            self._x = x
+            self._y = y
+
+        def x(self):
+            return self._x
+
+        def y(self):
+            return self._y
+
+    class _Transform:
+        def __init__(self, *_args):
+            pass
+
+        def transform(self, point):
+            return _Point(point.x() + 10, point.y() - 5)
+
+    canvas_crs = MagicMock()
+    canvas_crs.isValid.return_value = True
+    mesh_crs = MagicMock()
+    mesh_crs.isValid.return_value = True
+    plugin.iface.mapCanvas.return_value.mapSettings.return_value.destinationCrs.return_value = canvas_crs
+    layer = MagicMock()
+    layer.crs.return_value = mesh_crs
+    monkeypatch.setattr(qgis_core, "QgsPointXY", _Point, raising=False)
+    monkeypatch.setattr(qgis_core, "QgsCoordinateTransform", _Transform, raising=False)
+    monkeypatch.setattr(
+        qgis_core,
+        "QgsProject",
+        SimpleNamespace(instance=lambda: object()),
+        raising=False,
+    )
+
+    transformed = plugin._mesh_profile_point_in_mesh_crs(_Point(2, 7), layer)
+
+    assert (transformed.x(), transformed.y()) == (12, 2)

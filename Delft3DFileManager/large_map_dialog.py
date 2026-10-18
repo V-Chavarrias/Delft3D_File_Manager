@@ -76,8 +76,10 @@ class LargeMapDialog(QDialog):
         self._on_file_selected = None
         self._on_variable_changed = None
         self._on_plot_requested = None
+        self._on_point_series_requested = None
         self._busy = False
         self._last_directory = ""
+        self._point_series_enabled = False
 
         self._path_edit = QLineEdit()
         self._path_edit.setReadOnly(True)
@@ -106,8 +108,10 @@ class LargeMapDialog(QDialog):
 
         self._plot_button = QPushButton("Plot")
         self._plot_button.setDefault(True)
+        self._point_series_button = QPushButton("Select Point Time Series")
         actions = QHBoxLayout()
         actions.addStretch(1)
+        actions.addWidget(self._point_series_button)
         actions.addWidget(self._plot_button)
 
         self._message_label = QLabel("")
@@ -124,13 +128,21 @@ class LargeMapDialog(QDialog):
         self._browse_button.clicked.connect(self._browse)
         self._variable_combo.currentIndexChanged.connect(self._emit_variable_changed)
         self._plot_button.clicked.connect(self._emit_plot_requested)
+        self._point_series_button.clicked.connect(self._emit_point_series_requested)
         self.set_controls_enabled(False)
 
     # -------------------------------------------------------------- handlers
-    def set_handlers(self, on_file_selected=None, on_variable_changed=None, on_plot_requested=None):
+    def set_handlers(
+        self,
+        on_file_selected=None,
+        on_variable_changed=None,
+        on_plot_requested=None,
+        on_point_series_requested=None,
+    ):
         self._on_file_selected = on_file_selected
         self._on_variable_changed = on_variable_changed
         self._on_plot_requested = on_plot_requested
+        self._on_point_series_requested = on_point_series_requested
 
     def _browse(self):
         start = os.path.dirname(self._path_edit.text()) or self._last_directory
@@ -154,6 +166,14 @@ class LargeMapDialog(QDialog):
     def _emit_plot_requested(self):
         if not self._busy and callable(self._on_plot_requested):
             self._on_plot_requested()
+
+    def _emit_point_series_requested(self):
+        if (
+            not self._busy
+            and self._point_series_enabled
+            and callable(self._on_point_series_requested)
+        ):
+            self._on_point_series_requested()
 
     def _step(self, row, delta):
         if self._busy:
@@ -193,6 +213,10 @@ class LargeMapDialog(QDialog):
         self._time_row.setEnabled(bool(enabled) and not self._busy)
         self._time_row.update_buttons()
 
+    def set_point_series_enabled(self, enabled):
+        self._point_series_enabled = bool(enabled)
+        self._point_series_button.setEnabled(self._point_series_enabled and not self._busy)
+
     def set_extra_dimensions(self, dimensions, selected=None):
         """Rebuild the index rows; ``dimensions`` is a list of (title, labels)."""
         for row, label in zip(self._extra_rows, self._extra_labels):
@@ -215,8 +239,15 @@ class LargeMapDialog(QDialog):
 
     def set_controls_enabled(self, enabled):
         enabled = bool(enabled)
-        for widget in [self._variable_combo, self._plot_button, self._time_row, *self._extra_rows]:
+        for widget in [
+            self._variable_combo,
+            self._plot_button,
+            self._point_series_button,
+            self._time_row,
+            *self._extra_rows,
+        ]:
             widget.setEnabled(enabled)
+        self._point_series_button.setEnabled(enabled and self._point_series_enabled)
         self._time_row.update_buttons()
         for row in self._extra_rows:
             row.update_buttons()

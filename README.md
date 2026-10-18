@@ -35,8 +35,8 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Opens a shared profile chart for cross-section profiles and boundary-condition timeseries, including double-click and selection-driven workflows.
 - Visualizes HIS station and cross-section timeseries in a dedicated explorer with variable selection and New Plot/Add To Plot modes.
 - Visualizes time-dependent mesh1d node and edge results in point and shortest-path track modes, including derived Froude values.
-- Draws scalar dataset slices across 2D mesh edges for imported mesh results.
-- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction.
+- Draws scalar dataset slices across 2D mesh edges for imported mesh results and plots point time series from temporal node/face datasets.
+- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction; extracts all-time point series at selected map locations.
 - Computes a time-dependent node streamfunction from `q1` discharge.
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
@@ -155,6 +155,12 @@ Workflow:
 
 The **Viewer -> 2D Slice** action provides a Crayfish-like scalar profile for imported 2D mesh results:
 
+Point time series are available alongside spatial line profiles:
+1. Click **Draw Point Time Series**, then click once on the map to sample the active scalar dataset through all available times.
+2. To sample existing features, select one or more point features and click **Add Selected Point Time Series**. Point-layer coordinates are transformed to the map CRS before sampling.
+3. Values use the nearest mesh node or face sample for the dataset location. The time series replaces spatial line curves in the chart so chainage and time axes are not mixed; click **Clear Slices** to clear either plot.
+
+The point-series actions require a time-dependent scalar node or face dataset. A static or edge dataset produces a clear status message instead of a time series.
 
 For morphodynamic outputs with sediment fractions, **2D Slice** reads
 `mesh2d_lyrfrac`, `mesh2d_thlyr`, `mesh2d_mor_bl`, and `sedfrac_name` directly
@@ -204,6 +210,11 @@ Workflow:
 4. Click **Plot**. The selected data replaces the plotted dataset on the
    existing mesh layers. Select another variable/time/index and click **Plot**
    again to update.
+5. For a time-dependent variable, click **Select Point Time Series** and then
+   click the map once. The selected variable and extra-dimension indexes are
+   sampled at the nearest node or face through every available time step and
+   shown in a separate chart window. The Large MAP Viewer remains open, and its
+   existing single-time map plot is unchanged.
 
 The ◀ / ▶ buttons next to the time and index selectors plot the previous or
 next entry immediately.

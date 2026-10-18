@@ -458,15 +458,23 @@ def _derived_inputs(dataset, layout):
     }
 
 
-def _read_hyperslab(dataset, layout, name, time_index, extra_indices, spatial_dim):
+def _read_hyperslab(
+    dataset,
+    layout,
+    name,
+    time_index,
+    extra_indices,
+    spatial_dim,
+    spatial_index=None,
+):
     variable = dataset.variables[name]
     extra_indices = list(extra_indices or [])
     index = []
     for dim in variable.dimensions:
         if dim == spatial_dim:
-            index.append(slice(None))
+            index.append(slice(None) if spatial_index is None else int(spatial_index))
         elif dim == layout.time_dim:
-            index.append(int(time_index))
+            index.append(time_index if isinstance(time_index, slice) else int(time_index))
         else:
             if not extra_indices:
                 raise LargeMapError(f"No index selected for dimension '{dim}' of {name}")
@@ -491,6 +499,116 @@ def read_slice(grid, entry, time_index=0, extra_indices=None, sediment_records=N
             values = _derived_slice(dataset, layout, entry.key, time_index, sediment_records)
     index = grid.face_index if entry.location == FACE else grid.node_index
     return values[index]
+
+
+def read_point_series(grid, entry, spatial_index, extra_indices=None, sediment_records=None):
+    """Read one node/face value for every time without loading spatial slices."""
+    if not entry.has_time:
+        raise LargeMapError(f"Variable '{entry.label}' has no time dimension")
+    if entry.key == STREAM_FUNCTION_KEY:
+        raise LargeMapError("Use StreamFunctionGraph for the streamfunction")
+
+    netcdf = _netcdf()
+    with netcdf.Dataset(grid.path, "r") as dataset:
+        layout = _layout(dataset)
+        if not layout.time_dim:
+            raise LargeMapError(f"{os.path.basename(grid.path)} has no time dimension")
+        spatial_dim = layout.face_dim if entry.location == FACE else layout.node_dim
+        if spatial_index < 0 or spatial_index >= len(dataset.dimensions[spatial_dim]):
+            raise LargeMapError(f"Spatial index {spatial_index} is outside {spatial_dim}")
+
+        if not entry.derived:
+            if entry.key not in dataset.variables:
+                raise LargeMapError(f"{os.path.basename(grid.path)} has no variable '{entry.key}'")
+            values = _read_hyperslab(
+                dataset,
+                layout,
+                entry.key,
+                slice(None),
+                extra_indices,
+                spatial_dim,
+                spatial_index,
+            )
+        else:
+            values = _derived_point_series(
+                dataset,
+                layout,
+                entry.key,
+                spatial_index,
+                sediment_records,
+            )
+    return np.asarray(values, dtype=float).reshape(-1)
+
+
+def _derived_point_series(dataset, layout, key, spatial_index, sediment_records=None):
+    names = _derived_inputs(dataset, layout)
+
+    def face_series(name):
+        return _read_hyperslab(
+            dataset,
+            layout,
+            name,
+            slice(None),
+            None,
+            layout.face_dim,
+            spatial_index,
+        )
+
+    def velocity_series():
+        if names["ucmag"]:
+            return face_series(names["ucmag"])
+        return np.hypot(face_series(names["ucx"]), face_series(names["ucy"]))
+
+    if key.startswith(THETA_KEY_PREFIX):
+        try:
+            fraction_index = int(key[len(THETA_KEY_PREFIX):])
+        except ValueError as exc:
+            raise LargeMapError(f"Invalid theta variable '{key}'") from exc
+        records = _valid_theta_records(sediment_records)
+        if fraction_index < 0 or fraction_index >= len(records):
+            raise LargeMapError("Sediment data is unavailable for this theta variable")
+        if not _shear_stress_available(names):
+            raise LargeMapError(
+                f"{os.path.basename(dataset.filepath())} lacks bed shear stress or velocity/Chezy inputs"
+            )
+        if names["taus"]:
+            shear = face_series(names["taus"])
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                shear = (
+                    WATER_DENSITY
+                    * velocity_series() ** 2
+                    * GRAVITY
+                    / face_series(names["chezy"]) ** 2
+                )
+        record = records[fraction_index]
+        delta = (record.density - WATER_DENSITY) / WATER_DENSITY
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return shear / (WATER_DENSITY * GRAVITY * delta * record.diameter)
+
+    if key == FROUDE_KEY and names["depth"] and (
+        names["ucmag"] or (names["ucx"] and names["ucy"])
+    ):
+        depth = face_series(names["depth"])
+        velocity = velocity_series()
+        return compute_froude_number(depth[:, np.newaxis], velocity[:, np.newaxis])[:, 0]
+    if key == VELOCITY_MAGNITUDE_KEY and names["ucx"] and names["ucy"]:
+        return velocity_series()
+    if key == BED_LEVEL_CHANGE_KEY and names["mor_bl"]:
+        current = face_series(names["mor_bl"])
+        initial = _read_hyperslab(
+            dataset,
+            layout,
+            names["mor_bl"],
+            0,
+            None,
+            layout.face_dim,
+            spatial_index,
+        )
+        return current - initial[0]
+    raise LargeMapError(
+        f"{os.path.basename(dataset.filepath())} lacks the inputs for this derived variable"
+    )
 
 
 def _derived_slice(dataset, layout, key, time_index, sediment_records=None):

@@ -197,6 +197,99 @@ def sample_partitioned_mesh(layers, points, dataset_index, point_factory=None, m
     return profile
 
 
+def sample_partitioned_mesh_timeseries(layers, point, dataset_indices, point_factory=None):
+    """Sample one spatial point across dataset indices, preferring finite partitions."""
+    layers = [layer for layer in (layers or []) if layer is not None]
+    if point_factory is None:
+        point_factory = lambda value: value
+    qgis_point = point_factory(point)
+
+    values = []
+    for dataset_index in dataset_indices or []:
+        value = None
+        for layer in layers:
+            candidate = _dataset_value(layer, dataset_index, qgis_point)
+            if candidate is not None:
+                value = candidate
+                break
+        values.append(value)
+    return values
+
+
+def nearest_mesh_sample_candidates(grids, point, location):
+    """Return tied nearest ``(grid_index, local_index, (x, y))`` node/face samples.
+
+    Face samples use the arithmetic center of their valid mesh vertices. Tied
+    node coordinates are retained so partition boundary values can fall back
+    to another copy of the same mesh node.
+    """
+    import numpy as np
+
+    x, y = float(point[0]), float(point[1])
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError("point coordinates must be finite")
+    location = str(location or "").lower()
+    if location not in ("node", "face"):
+        raise ValueError("location must be 'node' or 'face'")
+
+    candidates = []
+    for grid_index, grid in enumerate(grids or []):
+        node_x = np.asarray(grid.node_x, dtype=float).reshape(-1)
+        node_y = np.asarray(grid.node_y, dtype=float).reshape(-1)
+        if len(node_x) != len(node_y):
+            continue
+
+        if location == "node":
+            sample_x, sample_y = node_x, node_y
+            valid = np.isfinite(sample_x) & np.isfinite(sample_y)
+        else:
+            faces = np.asarray(grid.faces, dtype=int)
+            if faces.ndim != 2 or not len(faces):
+                continue
+            valid_nodes = (faces >= 0) & (faces < len(node_x))
+            counts = valid_nodes.sum(axis=1)
+            safe_nodes = np.where(valid_nodes, faces, 0)
+            sample_x = np.full(len(faces), np.nan, dtype=float)
+            sample_y = np.full(len(faces), np.nan, dtype=float)
+            valid_faces = counts >= 3
+            if not np.any(valid_faces):
+                continue
+            sample_x[valid_faces] = (
+                np.where(valid_nodes, node_x[safe_nodes], 0.0).sum(axis=1)[valid_faces]
+                / counts[valid_faces]
+            )
+            sample_y[valid_faces] = (
+                np.where(valid_nodes, node_y[safe_nodes], 0.0).sum(axis=1)[valid_faces]
+                / counts[valid_faces]
+            )
+            valid = valid_faces & np.isfinite(sample_x) & np.isfinite(sample_y)
+
+        indexes = np.flatnonzero(valid)
+        if not len(indexes):
+            continue
+        distances = (sample_x[indexes] - x) ** 2 + (sample_y[indexes] - y) ** 2
+        nearest_position = int(np.argmin(distances))
+        local_index = int(indexes[nearest_position])
+        candidates.append(
+            (
+                float(distances[nearest_position]),
+                grid_index,
+                local_index,
+                (float(sample_x[local_index]), float(sample_y[local_index])),
+            )
+        )
+
+    if not candidates:
+        return []
+    minimum = min(candidate[0] for candidate in candidates)
+    tolerance = max(1e-12, abs(minimum) * 1e-12)
+    return [
+        (grid_index, local_index, sample_point)
+        for distance, grid_index, local_index, sample_point in candidates
+        if abs(distance - minimum) <= tolerance
+    ]
+
+
 def active_scalar_dataset_group(layer):
     """Return the displayed scalar group index, or ``None`` if unavailable."""
     method = getattr(layer, "activeScalarDatasetGroup", None)

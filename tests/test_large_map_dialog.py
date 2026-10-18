@@ -121,8 +121,10 @@ def test_dialog_constructor_wires_controls_and_starts_disabled(dialog_module):
     assert dialog._on_file_selected is None
     assert dialog._on_variable_changed is None
     assert dialog._on_plot_requested is None
+    assert dialog._on_point_series_requested is None
     assert dialog._variable_combo.isEnabled() is False
     assert dialog._plot_button.enabled is False
+    assert dialog._point_series_button.enabled is False
     assert dialog._time_row.isEnabled() is False
 
 
@@ -261,3 +263,21 @@ def test_setters_emit_handlers_and_handle_missing_callbacks(dialog_module):
     dialog._on_plot_requested = None
     dialog._emit_variable_changed()
     dialog._emit_plot_requested()
+
+
+def test_point_series_action_requires_time_enabled_variable(dialog_module):
+    dialog = dialog_module.LargeMapDialog()
+    on_point_series = MagicMock()
+    dialog.set_handlers(on_point_series_requested=on_point_series)
+
+    dialog._emit_point_series_requested()
+    on_point_series.assert_not_called()
+
+    dialog.set_point_series_enabled(True)
+    assert dialog._point_series_button.enabled is True
+    dialog._emit_point_series_requested()
+    on_point_series.assert_called_once_with()
+
+    dialog.set_busy(True)
+    dialog._emit_point_series_requested()
+    on_point_series.assert_called_once_with()

@@ -1,5 +1,6 @@
 """Controller of the Large MAP Viewer: connects reader, in-memory layers and dialog."""
 
+import math
 import os
 import time
 
@@ -68,9 +69,13 @@ class LargeMapViewer:
         self.paths = []
         self.grids = []
         self.entries = {}
+        self.time_values = []
         self.time_labels = []
         self._stream_graph = None
         self._last_plotted_key = None
+        self._point_map_tool = None
+        self._point_previous_map_tool = None
+        self._point_series_dialog = None
 
     # ----------------------------------------------------------------- dialog
     def _ensure_dialog(self):
@@ -83,6 +88,7 @@ class LargeMapViewer:
                 on_file_selected=self.load_file,
                 on_variable_changed=self.on_variable_changed,
                 on_plot_requested=self.plot,
+                on_point_series_requested=self.start_point_series_capture,
             )
         return self.dialog
 
@@ -94,9 +100,17 @@ class LargeMapViewer:
         return dialog
 
     def close(self):
+        self._cancel_point_series_capture()
         if self.layer_set is not None:
             self.layer_set.dispose(remove_layers=False)
             self.layer_set = None
+        if self._point_series_dialog is not None:
+            try:
+                self._point_series_dialog.close()
+                self._point_series_dialog.deleteLater()
+            except RuntimeError:
+                pass
+            self._point_series_dialog = None
         if self.dialog is not None:
             try:
                 self.dialog.close()
@@ -152,6 +166,7 @@ class LargeMapViewer:
     # ---------------------------------------------------------------- loading
     def load_file(self, path):
         """Read the grid of all partitions and display it; populate the selectors."""
+        self._cancel_point_series_capture()
         dialog = self._ensure_dialog()
         progress = self._progress("Loading MAP grid")
         self._set_busy(True)
@@ -168,7 +183,7 @@ class LargeMapViewer:
             self._update_progress(progress, 65, "Reading variables and times...")
             sediment_records = getattr(self.plugin, "_sediment_records", None)
             entries = reader.list_variables(paths[0], sediment_records)
-            _values, time_labels = reader.read_times(paths[0])
+            time_values, time_labels = reader.read_times(paths[0])
             crs = crs_from_info(*reader.read_crs_info(paths[0]))
 
             self._update_progress(progress, 75, "Building mesh layers...")
@@ -182,6 +197,7 @@ class LargeMapViewer:
             self.paths = paths
             self.grids = grids
             self.entries = {entry.key: entry for entry in entries}
+            self.time_values = [float(value) for value in time_values]
             self.time_labels = list(time_labels)
             self.layer_set = layer_set
             self._stream_graph = None
@@ -226,12 +242,14 @@ class LargeMapViewer:
         if entry is None:
             dialog.set_extra_dimensions([])
             dialog.set_controls_enabled(False)
+            dialog.set_point_series_enabled(False)
             return
         previous = dialog.selected_extra_indices()
         dimensions = [(dimension.name, dimension.labels) for dimension in entry.extra_dims]
         dialog.set_extra_dimensions(dimensions, previous)
         dialog.set_controls_enabled(True)
         dialog.set_time_enabled(entry.has_time and len(self.time_labels) > 0)
+        dialog.set_point_series_enabled(True)
 
     # --------------------------------------------------------------- plotting
     def _stream_values(self, time_index):
@@ -249,6 +267,232 @@ class LargeMapViewer:
             reader.read_slice(grid, entry, time_index, extra_indices, sediment_records)
             for grid in self.grids
         ]
+
+    def _cancel_point_series_capture(self):
+        """Restore the prior map tool when point capture is cancelled."""
+        tool = self._point_map_tool
+        if tool is None:
+            return
+        try:
+            canvas = self.iface.mapCanvas()
+            if canvas.mapTool() is tool:
+                canvas.setMapTool(self._point_previous_map_tool)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        self._point_map_tool = None
+        self._point_previous_map_tool = None
+
+    def start_point_series_capture(self):
+        """Arm a one-click map tool for the selected variable's time series."""
+        dialog = self.dialog
+        if dialog is None:
+            return False
+        entry = self.entries.get(dialog.selected_variable())
+        if entry is None or not entry.has_time or not self.time_values:
+            dialog.set_message("Select a time-dependent variable before choosing a point.")
+            return False
+
+        self._cancel_point_series_capture()
+        from qgis.gui import QgsMapTool
+
+        canvas = self.iface.mapCanvas()
+        previous_tool = canvas.mapTool() if hasattr(canvas, "mapTool") else None
+        extra_indices = dialog.selected_extra_indices()
+        viewer = self
+        left_button = getattr(Qt, "LeftButton", None)
+        if left_button is None:
+            left_button = getattr(getattr(Qt, "MouseButton", None), "LeftButton", None)
+
+        class _LargeMapPointMapTool(QgsMapTool):
+            def __init__(self):
+                super().__init__(canvas)
+
+            def canvasPressEvent(self, event):
+                if event.button() != left_button:
+                    return
+                transform = canvas.getCoordinateTransform()
+                point = transform.toMapCoordinates(event.pos().x(), event.pos().y())
+                viewer._cancel_point_series_capture()
+                viewer.plot_point_series(point, entry.key, extra_indices)
+
+        self._point_previous_map_tool = previous_tool
+        self._point_map_tool = _LargeMapPointMapTool()
+        canvas.setMapTool(self._point_map_tool)
+        dialog.set_message(
+            f"Click the map to plot {entry.label} through all available times."
+        )
+        try:
+            self.iface.messageBar().pushInfo(
+                "Large MAP Viewer",
+                "Click the map once to select the time-series location.",
+            )
+        except (AttributeError, RuntimeError):
+            pass
+        return True
+
+    def _point_in_mesh_crs(self, point):
+        """Transform a canvas point into the loaded MAP grid CRS."""
+        from qgis.core import QgsPointXY
+
+        point = QgsPointXY(float(point.x()), float(point.y()))
+        if self.layer_set is None or not self.layer_set.layers:
+            raise reader.LargeMapError("No MAP grid is loaded")
+        try:
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            mesh_crs = self.layer_set.layers[0].crs()
+        except (AttributeError, RuntimeError) as exc:
+            raise reader.LargeMapError(f"Could not determine the map CRS: {exc}") from exc
+        if (
+            not callable(getattr(canvas_crs, "isValid", None))
+            or not canvas_crs.isValid()
+            or not callable(getattr(mesh_crs, "isValid", None))
+            or not mesh_crs.isValid()
+            or canvas_crs == mesh_crs
+        ):
+            return point
+        try:
+            return QgsCoordinateTransform(
+                canvas_crs,
+                mesh_crs,
+                QgsProject.instance(),
+            ).transform(point)
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise reader.LargeMapError(
+                f"Could not transform the point to the MAP grid CRS: {exc}"
+            ) from exc
+
+    def _ensure_point_series_dialog(self):
+        if self._point_series_dialog is None:
+            from .cross_section_profile_dialog import CrossSectionProfileDialog
+
+            parent = self.iface.mainWindow() if self.iface is not None else None
+            self._point_series_dialog = CrossSectionProfileDialog(parent, mesh_mode=False)
+            self._point_series_dialog.setWindowTitle("Large MAP Time Series")
+        return self._point_series_dialog
+
+    def plot_point_series(self, point, variable_key=None, extra_indices=None):
+        """Read and display one nearest mesh sample for every available time."""
+        dialog = self.dialog
+        if dialog is None or self.layer_set is None:
+            return False
+        variable_key = variable_key or dialog.selected_variable()
+        entry = self.entries.get(variable_key)
+        if entry is None:
+            dialog.set_message("Select a variable to plot.")
+            return False
+        if not entry.has_time or not self.time_values:
+            dialog.set_message("The selected variable has no temporal samples.")
+            return False
+        extra_indices = list(
+            dialog.selected_extra_indices() if extra_indices is None else extra_indices
+        )
+
+        from .mesh_profile_sampler import nearest_mesh_sample_candidates
+
+        try:
+            mesh_point = self._point_in_mesh_crs(point)
+            candidates = nearest_mesh_sample_candidates(
+                self.grids,
+                (mesh_point.x(), mesh_point.y()),
+                entry.location,
+            )
+        except (reader.LargeMapError, RuntimeError, TypeError, ValueError) as error:
+            dialog.set_message(f"Point time series failed: {error}")
+            return False
+        if not candidates:
+            dialog.set_message(f"No {entry.location} samples are available in the MAP grid.")
+            return False
+
+        candidate_series = []
+        self._set_busy(True)
+        try:
+            sediment_records = getattr(self.plugin, "_sediment_records", None)
+            if entry.key == reader.STREAM_FUNCTION_KEY:
+                candidate_series = [[] for _ in candidates]
+                for time_index in range(len(self.time_values)):
+                    partition_values = self._stream_values(time_index)
+                    for candidate_index, (grid_index, local_index, _sample_point) in enumerate(candidates):
+                        values = partition_values[grid_index]
+                        candidate_series[candidate_index].append(values[local_index])
+                    self.dialog.set_message(
+                        f"Reading streamfunction time series: {time_index + 1}/{len(self.time_values)}"
+                    )
+                    QApplication.processEvents()
+            else:
+                for grid_index, local_index, _sample_point in candidates:
+                    grid = self.grids[grid_index]
+                    source_index = (
+                        int(grid.node_index[local_index])
+                        if entry.location == reader.NODE
+                        else int(grid.face_index[local_index])
+                    )
+                    candidate_series.append(
+                        reader.read_point_series(
+                            grid,
+                            entry,
+                            source_index,
+                            extra_indices,
+                            sediment_records,
+                        )
+                    )
+
+            values = [None] * len(self.time_values)
+            for series in candidate_series:
+                if len(series) != len(values):
+                    raise reader.LargeMapError(
+                        "The point data length does not match the MAP time coordinate"
+                    )
+                for time_index, value in enumerate(series):
+                    if values[time_index] is not None:
+                        continue
+                    try:
+                        numeric_value = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(numeric_value):
+                        values[time_index] = numeric_value
+        except (
+            reader.LargeMapError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as error:
+            dialog.set_message(f"Point time series failed: {error}")
+            return False
+        finally:
+            self._set_busy(False)
+
+        sample_point = candidates[0][2]
+        extra_labels = [
+            dimension.labels[index]
+            for dimension, index in zip(entry.extra_dims, extra_indices)
+            if 0 <= index < len(dimension.labels)
+        ]
+        title = f"{entry.label} at ({sample_point[0]:g}, {sample_point[1]:g})"
+        if extra_labels:
+            title += " - " + ", ".join(extra_labels)
+        chart = self._ensure_point_series_dialog()
+        chart.set_profile(
+            list(zip(self.time_values, values)),
+            title,
+            {"x_axis_label": "time", "y_axis_label": entry.label},
+            message=(
+                "No finite values were found at the nearest mesh sample."
+                if not any(value is not None for value in values)
+                else ""
+            ),
+        )
+        chart.setWindowTitle("Large MAP Time Series")
+        chart.show()
+        chart.raise_()
+        chart.activateWindow()
+        dialog.set_message(
+            f"Plotted {entry.label} at ({sample_point[0]:g}, {sample_point[1]:g}) "
+            f"for {len(values)} time steps."
+        )
+        return True
 
     def plot(self):
         dialog = self.dialog
