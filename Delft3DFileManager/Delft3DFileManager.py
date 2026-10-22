@@ -8330,10 +8330,14 @@ class Delft3DFileManager:
             return None
         time_dim = time_dimensions[0]
 
-        if "station" in nc_dataset.dimensions:
-            station_dim = "station"
-        else:
-            station_dim = None
+        station_dim = next(
+            (
+                name
+                for name in nc_dataset.dimensions
+                if str(name).lower() in {"station", "stations"}
+            ),
+            None,
+        )
 
         if "cross_section" in nc_dataset.dimensions:
             cross_section_dim = "cross_section"
@@ -8763,6 +8767,8 @@ class Delft3DFileManager:
                 )
                 loaded_layers.append(f"cross_sections({len(cross_rows)})")
 
+            cross_section_count = int(schema.get("cross_section_count") or 0)
+            missing_cross_section_count = max(0, cross_section_count - len(cross_rows))
             self._his_sources[source_path] = {
                 "path": source_path,
                 "base_name": base_name,
@@ -8788,9 +8794,24 @@ class Delft3DFileManager:
 
             if loaded_layers:
                 self._update_progress_dialog(progress_dialog, 100, "HIS import complete")
-                self.iface.messageBar().pushSuccess(
+                message = (
+                    f"Loaded HIS observations from {os.path.basename(source_path)}: "
+                    f"{', '.join(loaded_layers)}"
+                )
+                if missing_cross_section_count:
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"{message}. {missing_cross_section_count} of {cross_section_count} "
+                        "cross-sections were omitted because they have no valid line geometry.",
+                    )
+                else:
+                    self.iface.messageBar().pushSuccess("Delft3D File Manager", message)
+            elif missing_cross_section_count:
+                self.iface.messageBar().pushWarning(
                     "Delft3D File Manager",
-                    f"Loaded HIS observations from {os.path.basename(source_path)}: {', '.join(loaded_layers)}",
+                    f"No cross-section geometries could be loaded from "
+                    f"{os.path.basename(source_path)}: all {cross_section_count} "
+                    "cross-sections lack valid line geometry.",
                 )
             else:
                 self.iface.messageBar().pushWarning(

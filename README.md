@@ -578,6 +578,7 @@ When a selected `.nc` file is detected as a Delft3D FM HIS output, the plugin im
 - `<file_name>_his_cross_sections` (LineString layer)
 
 Each feature stores only lightweight references (`his_source`, `obs_type`, `obs_index`, `obs_name`, `obs_id`) and does not store full timeseries payloads.
+Station dimensions named either `station` or `stations` are supported. Cross-sections without at least two valid geometry coordinates in the HIS file are omitted from the line layer and reported after import.
 
 ### Import: ShorelineS Results (`.mat`)
 

@@ -434,6 +434,72 @@ def test_resolve_his_schema_from_fixture(plugin):
     assert any(v["name"] == "timestep" for v in schema["global_variables"])
 
 
+def test_resolve_his_schema_accepts_plural_station_dimension(plugin, tmp_path):
+    source = tmp_path / "plural_stations_his.nc"
+    with Dataset(str(source), "w") as ds:
+        ds.createDimension("time", 1)
+        ds.createDimension("stations", 2)
+
+        times = ds.createVariable("time", "f8", ("time",))
+        station_x = ds.createVariable("station_x_coordinate", "f8", ("stations",))
+        station_y = ds.createVariable("station_y_coordinate", "f8", ("stations",))
+        waterlevel = ds.createVariable("waterlevel", "f8", ("time", "stations"))
+        times[:] = [0.0]
+        station_x[:] = [10.0, 20.0]
+        station_y[:] = [30.0, 40.0]
+        waterlevel[:] = [[1.0, 2.0]]
+
+        schema = plugin._resolve_his_schema(ds)
+        rows = plugin._his_station_rows(ds, schema)
+
+    assert schema["station_dim"] == "stations"
+    assert schema["station_count"] == 2
+    assert [row["obs_name"] for row in rows] == ["station_1", "station_2"]
+    assert [(row["x"], row["y"]) for row in rows] == [(10.0, 30.0), (20.0, 40.0)]
+    assert any(item["name"] == "waterlevel" for item in schema["station_variables"])
+    assert plugin._is_his_netcdf_file(str(source))
+
+
+def test_load_fm_his_file_warns_about_missing_cross_section_geometry(plugin, tmp_path):
+    source = tmp_path / "partial_his.nc"
+    with Dataset(str(source), "w") as ds:
+        ds.createDimension("time", 1)
+        ds.createDimension("cross_section", 2)
+        ds.createDimension("cross_section_geom_nNodes", 2)
+
+        times = ds.createVariable("time", "f8", ("time",))
+        counts = ds.createVariable(
+            "cross_section_geom_node_count",
+            "i4",
+            ("cross_section",),
+        )
+        coord_x = ds.createVariable(
+            "cross_section_geom_node_coordx",
+            "f8",
+            ("cross_section_geom_nNodes",),
+        )
+        coord_y = ds.createVariable(
+            "cross_section_geom_node_coordy",
+            "f8",
+            ("cross_section_geom_nNodes",),
+        )
+        times[:] = [0.0]
+        counts[:] = [2, 0]
+        coord_x[:] = [10.0, 20.0]
+        coord_y[:] = [30.0, 40.0]
+
+    plugin._create_his_observation_layer = MagicMock()
+    plugin._refresh_his_dialog_state = MagicMock()
+    plugin.load_fm_his_file(str(source))
+
+    plugin._create_his_observation_layer.assert_called_once()
+    plugin.iface.messageBar.return_value.pushWarning.assert_called_once()
+    warning = plugin.iface.messageBar.return_value.pushWarning.call_args.args[1]
+    assert "1 of 2 cross-sections" in warning
+    assert "no valid line geometry" in warning
+    plugin.iface.messageBar.return_value.pushSuccess.assert_not_called()
+
+
 def test_his_cross_section_rows_include_line_points(plugin):
     nc = pytest.importorskip("netCDF4")
 
