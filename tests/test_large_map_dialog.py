@@ -128,9 +128,13 @@ def test_dialog_constructor_wires_controls_and_starts_disabled(dialog_module):
     assert dialog._time_row.isEnabled() is False
 
 
-def test_browse_uses_current_directory_and_ignores_cancel(dialog_module, monkeypatch):
+def test_browse_uses_current_directory_and_ignores_cancel(dialog_module, monkeypatch, tmp_path):
+    current_directory = tmp_path / "models"
+    old_path = current_directory / "old_map.nc"
+    results_directory = tmp_path / "results"
+    selected_path = results_directory / "new_map.nc"
     dialog = dialog_module.LargeMapDialog()
-    dialog._path_edit = _TextControl(r"C:\models\old_map.nc")
+    dialog._path_edit = _TextControl(str(old_path))
     on_file_selected = MagicMock()
     dialog.set_handlers(on_file_selected=on_file_selected)
     selected = []
@@ -144,7 +148,7 @@ def test_browse_uses_current_directory_and_ignores_cancel(dialog_module, monkeyp
 
     dialog._browse()
 
-    assert dialog._path_edit.text() == r"C:\models\old_map.nc"
+    assert dialog._path_edit.text() == str(old_path)
     on_file_selected.assert_not_called()
 
     monkeypatch.setattr(
@@ -152,17 +156,17 @@ def test_browse_uses_current_directory_and_ignores_cancel(dialog_module, monkeyp
         "QFileDialog",
         SimpleNamespace(
             getOpenFileName=lambda _parent, _title, start, _filter: (
-                selected.append(start) or r"C:\results\new_map.nc",
+                selected.append(start) or str(selected_path),
                 "",
             ),
         ),
     )
     dialog._browse()
 
-    assert selected == [r"C:\models"]
-    assert dialog._last_directory == r"C:\results"
-    assert dialog._path_edit.text() == r"C:\results\new_map.nc"
-    on_file_selected.assert_called_once_with(r"C:\results\new_map.nc")
+    assert selected == [str(current_directory)]
+    assert dialog._last_directory == str(results_directory)
+    assert dialog._path_edit.text() == str(selected_path)
+    on_file_selected.assert_called_once_with(str(selected_path))
 
 
 def test_variable_time_and_extra_dimension_selections(dialog_module):
