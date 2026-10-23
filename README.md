@@ -707,11 +707,11 @@ XYN is not a full attribute-table export: it writes only geometry coordinates an
 #### Output Formats
 
 **Polyline (`.pli`, `.ldb`, `.spl`, `.pol`)** — Delft3D block format. For each exported line:
-1. Block name derived from the source line layer name
+1. A non-empty feature attribute named `name` is used as the block name; otherwise the source line layer name is used.
 2. Header line: `<number_of_points> 2`
 3. One line per vertex with `x y`
 
-When a layer contributes multiple exported polylines, block names are suffixed as `_1`, `_2`, etc. to keep names unique within that layer.
+When no feature `name` is available, a layer contributing multiple polylines gets block names suffixed as `_1`, `_2`, etc. Repeated block names across features, multipart geometries, or selected layers keep the first name and suffix later occurrences as `_2`, `_3`, etc.; the exporter warns when it does this.
 All four extensions write the same block format.
 
 **XY (`.xy`)** — Two-column format, compatible with tools that expect plain coordinate lists:
@@ -1033,13 +1033,13 @@ One row per point:
 - `x y name`
 - Coordinates come from the layer geometry, not its `x`/`y` attribute columns, and are written to six decimal places in the layer CRS without reprojection.
 - Only coordinates and names are written; other attributes and Z values are omitted.
-- Multipart features produce one row per point, sharing the feature name when available. Empty geometries are skipped.
+- Multipart features produce one row per point. Empty geometries are skipped.
 
 ### Name Handling
 - The plugin tries to use a name-like field with priority:
-	`weir_name`, `name`, `naam`, `id`, then first available field.
+	`name`, `weir_name`, `naam`, `id`, then first available field.
 - If a name is missing, empty, or non-ASCII, a fallback name such as `obs_1` is used; the counter increments for each generated name.
-- Existing names are not deduplicated.
+- Repeated output names, including names repeated by multipart features, keep the first value and suffix later rows as `_2`, `_3`, etc. The exporter warns when it does this.
 
 ### Typical Workflow
 1. Select the point layer to export.

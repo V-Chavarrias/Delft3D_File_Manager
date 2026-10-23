@@ -7274,11 +7274,18 @@ class Delft3DFileManager:
 
         exported_count = 0
         export_as_xy = output_path.lower().endswith(".xy")
+        used_block_names = set()
+        duplicate_names = set()
 
         with open(output_path, "w", encoding="utf-8") as handle:
             is_first_polyline = True
             for source_layer in source_layers:
                 layer_polylines = []
+                name_field = (
+                    None
+                    if export_as_xy
+                    else self._field_name_lookup(source_layer).get("name")
+                )
                 for feature in source_layer.getFeatures():
                     geometry = feature.geometry()
                     if not geometry or geometry.isEmpty():
@@ -7288,16 +7295,22 @@ class Delft3DFileManager:
                     if not polylines:
                         continue
 
+                    feature_name = None
+                    if name_field:
+                        value = feature[name_field]
+                        if value is not None:
+                            feature_name = str(value).strip() or None
+
                     for polyline in polylines:
                         if len(polyline) < 2:
                             continue
-                        layer_polylines.append(polyline)
+                        layer_polylines.append((feature_name, polyline))
 
                 if not layer_polylines:
                     continue
 
                 if export_as_xy:
-                    for polyline in layer_polylines:
+                    for _, polyline in layer_polylines:
                         if not is_first_polyline:
                             handle.write("NaN NaN\n")
                         is_first_polyline = False
@@ -7308,8 +7321,15 @@ class Delft3DFileManager:
 
                 layer_name = str(source_layer.name() or "").strip() or "layer"
                 use_suffix = len(layer_polylines) > 1
-                for index, polyline in enumerate(layer_polylines, start=1):
-                    block_name = f"{layer_name}_{index}" if use_suffix else layer_name
+                for index, (feature_name, polyline) in enumerate(layer_polylines, start=1):
+                    candidate_name = feature_name or (
+                        f"{layer_name}_{index}" if use_suffix else layer_name
+                    )
+                    block_name = self._unique_export_name(
+                        candidate_name,
+                        used_block_names,
+                        duplicate_names,
+                    )
                     handle.write(f"{block_name}\n")
                     handle.write(f"{len(polyline)} 2\n")
                     for point in polyline:
@@ -7324,10 +7344,18 @@ class Delft3DFileManager:
             )
             return
 
-        self.iface.messageBar().pushSuccess(
-            "Delft3D File Manager",
-            f"Exported {exported_count} line feature(s) to {os.path.basename(output_path)}"
-        )
+        if duplicate_names:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Exported {exported_count} line feature(s) to {os.path.basename(output_path)}; "
+                "duplicate block names were suffixed to keep them unique: "
+                f"{', '.join(sorted(duplicate_names))}",
+            )
+        else:
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Exported {exported_count} line feature(s) to {os.path.basename(output_path)}",
+            )
 
     def export_active_layer(self):
         """Export the active layer to the appropriate Delft3D format."""
@@ -7760,6 +7788,8 @@ class Delft3DFileManager:
         name_field = self._get_name_field(layer)
         exported_count = 0
         generated_name_count = 1
+        used_names = set()
+        duplicate_names = set()
 
         with open(output_path, "w", encoding="ascii") as handle:
             for feature in layer.getFeatures():
@@ -7791,6 +7821,11 @@ class Delft3DFileManager:
                         point_name = f"obs_{generated_name_count}"
                         generated_name_count += 1
 
+                    point_name = self._unique_export_name(
+                    point_name,
+                    used_names,
+                    duplicate_names,
+                    )
                     handle.write(f"{point.x():.6f} {point.y():.6f} {point_name}\n")
                     exported_count += 1
 
@@ -7802,20 +7837,51 @@ class Delft3DFileManager:
             )
             return
 
-        self.iface.messageBar().pushSuccess(
-            "Delft3D File Manager",
-            f"Exported {exported_count} point(s) as XYN (x y name only) to {os.path.basename(output_path)}",
-        )
+        if duplicate_names:
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Exported {exported_count} point(s) as XYN (x y name only) to "
+                f"{os.path.basename(output_path)}; duplicate names were suffixed to keep "
+                f"them unique: {', '.join(sorted(duplicate_names))}",
+            )
+        else:
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Exported {exported_count} point(s) as XYN (x y name only) to {os.path.basename(output_path)}",
+            )
+
+    def _field_name_lookup(self, layer):
+        """Map case-insensitive field names to the layer's actual field names."""
+        return {
+            str(field.name()).casefold(): field.name()
+            for field in layer.fields()
+        }
 
     def _get_name_field(self, layer):
         """Find a likely name field to use in export blocks."""
         field_names = [field.name() for field in layer.fields()]
-        preferred = ["weir_name", "name", "naam", "id"]
+        field_lookup = self._field_name_lookup(layer)
+        preferred = ["name", "weir_name", "naam", "id"]
         for candidate in preferred:
-            for existing in field_names:
-                if existing.lower() == candidate:
-                    return existing
+            if candidate in field_lookup:
+                return field_lookup[candidate]
         return field_names[0] if field_names else None
+
+    def _unique_export_name(self, name, used_names, duplicate_names):
+        """Return a unique export name, suffixing repeats and recording the original name."""
+        if name not in used_names:
+            used_names.add(name)
+            return name
+
+        duplicate_names.add(name)
+        suffix = 2
+        unique_name = f"{name}_{suffix}"
+        while unique_name in used_names:
+            suffix += 1
+            unique_name = f"{name}_{suffix}"
+
+        used_names.add(unique_name)
+        return unique_name
 
     def _feature_name(self, feature, name_field):
         """Resolve export block name from attribute or fallback id."""

@@ -67,13 +67,17 @@ def test_general_export_point_format_and_contents(strict_plugin, tmp_path, schem
     else:
         expected = (
             "120000.000000 450000.000000 station_a\n"
-            "120100.000000 450100.000000 station_a\n"
+            "120100.000000 450100.000000 station_a_2\n"
         )
         extension = ".xyn"
     assert output.with_suffix(extension).read_text(encoding="ascii") == expected
     assert not output.with_suffix(".xyn" if extension == ".pliz" else ".pliz").exists()
-    assert len(plugin.iface.messageBar().success_messages) == 1
-    assert not plugin.iface.messageBar().warning_messages
+    if extension == ".xyn":
+        assert not plugin.iface.messageBar().success_messages
+        assert len(plugin.iface.messageBar().warning_messages) == 1
+    else:
+        assert len(plugin.iface.messageBar().success_messages) == 1
+        assert not plugin.iface.messageBar().warning_messages
 
 
 @pytest.mark.parametrize("names", [
@@ -105,6 +109,28 @@ def test_general_xyn_export_names_and_coordinates(strict_plugin, tmp_path, names
     ]
     assert "x y name" in dialog.call_args.args[1]
     assert "XYN" in plugin.iface.messageBar().success_messages[-1][1]
+
+
+def test_general_xyn_prefers_name_and_suffixes_duplicate_values(strict_plugin, tmp_path):
+    plugin = strict_plugin
+    layer = _point_layer(plugin, {"weir_name": "", "name": ""})
+    for index, legacy_name in enumerate(("legacy_a", "legacy_b")):
+        attributes = {"weir_name": legacy_name, "name": "station_a"}
+        layer.addFeature(
+            _feature(attributes, [(float(index), 2.0)])
+        )
+    output = tmp_path / "stations.xyn"
+    with patch.object(plugin_module.QFileDialog, "getSaveFileName", return_value=(str(output), "")):
+        plugin.export_active_layer()
+
+    assert output.read_text(encoding="ascii").splitlines() == [
+        "0.000000 2.000000 station_a",
+        "1.000000 2.000000 station_a_2",
+    ]
+    assert not plugin.iface.messageBar().success_messages
+    warnings = plugin.iface.messageBar().warning_messages
+    assert len(warnings) == 1
+    assert "station_a" in warnings[0][1]
 
 
 def test_general_xyn_export_cancelled(strict_plugin, tmp_path):
