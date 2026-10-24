@@ -66,6 +66,62 @@ _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION = "Non-dimensional bed shear stress"
 _NON_DIMENSIONAL_BED_SHEAR_STRESS_PREFIX = "mesh2d_theta_"
 _WATER_DENSITY = 1000.0
 _GRAVITY = 9.81
+_MDU_INPUT_FILE_KEYS = {
+    "geometry": frozenset({
+        "netfile",
+        "bathymetryfile",
+        "drypointsfile",
+        "gridenclosurefile",
+        "waterlevinifile",
+        "landboundaryfile",
+        "thindamfile",
+        "fixedweirfile",
+        "pillarfile",
+        "structurefile",
+        "vertplizfile",
+        "proflocfile",
+        "profdeffile",
+        "profdefxyzfile",
+        "manholefile",
+        "partitionfile",
+        "crosslocfile",
+        "crossdeffile",
+        "inifieldfile",
+        "frictfile",
+    }),
+    "restart": frozenset({"restartfile"}),
+    "external forcing": frozenset({"extforcefile", "extforcefilenew"}),
+    "trachytopes": frozenset({"trtdef", "trtl"}),
+    "output": frozenset({"obsfile", "crsfile", "mbafile", "foufile"}),
+    "sediment": frozenset({"sedfile", "morfile"}),
+    "particles": frozenset({
+        "particlefile",
+        "particlesfile",
+        "particlereleasefile",
+        "particlesreleasefile",
+    }),
+    "processes": frozenset({"substancefile"}),
+}
+_MDU_IMPORTABLE_EXTENSIONS = frozenset({
+    ".fxw",
+    ".pliz",
+    ".pli",
+    ".ldb",
+    ".spl",
+    ".pol",
+    ".xyn",
+    ".xyz",
+    ".sed",
+    ".nc",
+    ".mat",
+    ".xml",
+    ".mdu",
+    ".ext",
+    ".bc",
+    ".csl",
+    ".csd",
+    ".ini",
+})
 
 
 def _qt_major_version():
@@ -1796,11 +1852,12 @@ class Delft3DFileManager:
         if filepath:
             self.load_file_by_extension(filepath)
 
-    def load_file_by_extension(self, filepath, spatial_grid_path=None):
+    def load_file_by_extension(self, filepath, spatial_grid_path=None, reference_base_dir=None):
         """Route file to appropriate parser based on extension.
 
         spatial_grid_path is an optional UGRID path propagated by parent imports
         (for example DIMR -> MDU) to avoid repeatedly prompting for a grid file.
+        reference_base_dir overrides the file's own directory for nested inputs.
         """
         _, ext = os.path.splitext(filepath)
         ext_lower = ext.lower()
@@ -1838,7 +1895,14 @@ class Delft3DFileManager:
         elif ext_lower == ".mdu":
             self.load_fm_mdu_file(filepath, import_referenced=True, spatial_grid_path=spatial_grid_path)
         elif ext_lower == ".ext":
-            self.load_ext_file(filepath, grid_path=spatial_grid_path)
+            if reference_base_dir is None:
+                self.load_ext_file(filepath, grid_path=spatial_grid_path)
+            else:
+                self.load_ext_file(
+                    filepath,
+                    grid_path=spatial_grid_path,
+                    reference_base_dir=reference_base_dir,
+                )
         elif ext_lower == ".bc":
             self.load_bc_file(filepath)
         elif ext_lower in [".csl", ".csd"]:
@@ -1848,13 +1912,27 @@ class Delft3DFileManager:
             if ini_kind in ("crossloc", "crossdef"):
                 self.load_cross_sections_from_selection(filepath)
             elif ini_kind == "extforce":
-                self.load_ext_file(filepath, grid_path=spatial_grid_path)
+                if reference_base_dir is None:
+                    self.load_ext_file(filepath, grid_path=spatial_grid_path)
+                else:
+                    self.load_ext_file(
+                        filepath,
+                        grid_path=spatial_grid_path,
+                        reference_base_dir=reference_base_dir,
+                    )
             elif ini_kind == "boundconds":
                 self.load_bc_file(filepath)
             elif ini_kind == "structure":
                 self.load_structures_spatial_file(filepath, grid_path=spatial_grid_path)
             elif ini_kind == "inifield":
-                self.load_ini_field_spatial_file(filepath, grid_path=spatial_grid_path)
+                if reference_base_dir is None:
+                    self.load_ini_field_spatial_file(filepath, grid_path=spatial_grid_path)
+                else:
+                    self.load_ini_field_spatial_file(
+                        filepath,
+                        grid_path=spatial_grid_path,
+                        reference_base_dir=reference_base_dir,
+                    )
             elif ini_kind == "1dfield":
                 self.load_1d_field_spatial_file(filepath, grid_path=spatial_grid_path)
             elif ini_kind == "roughness":
@@ -4945,6 +5023,39 @@ class Delft3DFileManager:
                 parts.append(item)
         return parts
 
+    def _split_file_path_values(self, text):
+        """Split quoted, whitespace- or semicolon-separated file path values."""
+        raw = "" if text is None else str(text).strip()
+        if not raw:
+            return []
+
+        paths = []
+        token = []
+        quote = None
+        for character in raw:
+            if quote is not None:
+                if character == quote:
+                    quote = None
+                else:
+                    token.append(character)
+            elif character in ("'", '"'):
+                quote = character
+            elif character == ";" or character.isspace():
+                if token:
+                    paths.append("".join(token))
+                    token = []
+            else:
+                token.append(character)
+
+        if token:
+            paths.append("".join(token))
+        return paths
+
+    def _first_file_path(self, text):
+        """Return the first path from a scalar or delimited file path value."""
+        paths = self._split_file_path_values(text)
+        return paths[0] if paths else ""
+
     def _value_case_insensitive(self, mapping, *keys):
         """Get first matching value from dict using case-insensitive key lookup."""
         if not mapping:
@@ -5071,7 +5182,7 @@ class Delft3DFileManager:
         )
 
     def _read_mdu_primary_files(self, filepath):
-        """Read key file references from an FM .mdu file."""
+        """Read supported input references from an FM .mdu file."""
         sections = self._parse_repeated_ini_sections(filepath)
         primary = {
             "net_file": "",
@@ -5084,28 +5195,86 @@ class Delft3DFileManager:
             "thin_dam_file": "",
             "fixed_weir_file": "",
             "pillar_file": "",
+            "paths_relative_to_parent": False,
+            "input_file_references": [],
         }
+
+        uses_new_ext_force = any(
+            block["section"].strip().lower() == "external forcing"
+            and self._first_file_path(
+                self._value_case_insensitive(block["values"], "ExtForceFileNew")
+            )
+            for block in sections
+        )
 
         for block in sections:
             section = block["section"].strip().lower()
             values = block["values"]
 
             if section == "geometry":
-                primary["net_file"] = self._value_case_insensitive(values, "NetFile")
-                primary["crossloc_file"] = self._value_case_insensitive(values, "CrossLocFile")
-                primary["crossdef_file"] = self._value_case_insensitive(values, "CrossDefFile")
-                primary["structure_file"] = self._value_case_insensitive(values, "StructureFile")
-                primary["ini_field_file"] = self._value_case_insensitive(values, "IniFieldFile")
-                primary["thin_dam_file"] = self._value_case_insensitive(values, "ThinDamFile")
-                primary["fixed_weir_file"] = self._value_case_insensitive(values, "FixedWeirFile")
-                primary["pillar_file"] = self._value_case_insensitive(values, "PillarFile")
-                primary["frict_files"] = self._split_semicolon_paths(
+                primary["net_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "NetFile")
+                )
+                primary["crossloc_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "CrossLocFile")
+                )
+                primary["crossdef_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "CrossDefFile")
+                )
+                primary["structure_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "StructureFile")
+                )
+                primary["ini_field_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "IniFieldFile")
+                )
+                primary["thin_dam_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "ThinDamFile")
+                )
+                primary["fixed_weir_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "FixedWeirFile")
+                )
+                primary["pillar_file"] = self._first_file_path(
+                    self._value_case_insensitive(values, "PillarFile")
+                )
+                primary["frict_files"] = self._split_file_path_values(
                     self._value_case_insensitive(values, "FrictFile")
                 )
             elif section == "external forcing":
-                ext_new = self._value_case_insensitive(values, "ExtForceFileNew")
-                ext_old = self._value_case_insensitive(values, "ExtForceFile")
+                ext_new = self._first_file_path(
+                    self._value_case_insensitive(values, "ExtForceFileNew")
+                )
+                ext_old = self._first_file_path(
+                    self._value_case_insensitive(values, "ExtForceFile")
+                )
                 primary["ext_force_file"] = ext_new or ext_old
+            elif section == "general":
+                relative_value = self._value_case_insensitive(
+                    values, "PathsRelativeToParent"
+                ).strip().lower()
+                primary["paths_relative_to_parent"] = relative_value in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+
+            input_keys = _MDU_INPUT_FILE_KEYS.get(section, ())
+            for key, value in values.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key not in input_keys:
+                    continue
+                if (
+                    section == "external forcing"
+                    and normalized_key == "extforcefile"
+                    and uses_new_ext_force
+                ):
+                    continue
+                for path in self._split_file_path_values(value):
+                    primary["input_file_references"].append({
+                        "section": section,
+                        "key": str(key).strip(),
+                        "path": path,
+                    })
 
         return primary
 
@@ -5135,6 +5304,7 @@ class Delft3DFileManager:
         summary_layer.updateFields()
 
         summary_rows = []
+        summarized_paths = set()
 
         def add_row(group, key, value):
             resolved = self._resolve_candidate_path(base_dir, value)
@@ -5142,6 +5312,8 @@ class Delft3DFileManager:
             feature = QgsFeature(summary_layer.fields())
             feature.setAttributes([group, key, resolved, exists])
             summary_rows.append(feature)
+            if resolved:
+                summarized_paths.add(os.path.normcase(os.path.abspath(resolved)))
             return resolved, bool(exists)
 
         net_path, net_ok = add_row("geometry", "NetFile", primary["net_file"])
@@ -5157,6 +5329,37 @@ class Delft3DFileManager:
         for frict_file in primary["frict_files"]:
             add_row("geometry", "FrictFile", frict_file)
 
+        input_references = primary.get("input_file_references")
+        if input_references is None:
+            input_references = [
+                {"section": "geometry", "key": "NetFile", "path": primary["net_file"]},
+                {"section": "geometry", "key": "CrossLocFile", "path": primary["crossloc_file"]},
+                {"section": "geometry", "key": "CrossDefFile", "path": primary["crossdef_file"]},
+                {"section": "geometry", "key": "StructureFile", "path": primary["structure_file"]},
+                {"section": "external forcing", "key": "ExtForceFileNew", "path": primary["ext_force_file"]},
+                {"section": "geometry", "key": "IniFieldFile", "path": primary["ini_field_file"]},
+                {"section": "geometry", "key": "ThinDamFile", "path": primary["thin_dam_file"]},
+                {"section": "geometry", "key": "FixedWeirFile", "path": primary["fixed_weir_file"]},
+                {"section": "geometry", "key": "PillarFile", "path": primary["pillar_file"]},
+            ]
+            input_references.extend(
+                {"section": "geometry", "key": "FrictFile", "path": value}
+                for value in primary["frict_files"]
+            )
+        for reference in input_references:
+            value = reference.get("path", "")
+            resolved = self._resolve_candidate_path(base_dir, value)
+            if not resolved:
+                continue
+            normalized_path = os.path.normcase(os.path.abspath(resolved))
+            if normalized_path in summarized_paths:
+                continue
+            add_row(
+                reference.get("section", ""),
+                reference.get("key", ""),
+                value,
+            )
+
         if summary_rows:
             provider.addFeatures(summary_rows)
             summary_layer.updateExtents()
@@ -5169,28 +5372,90 @@ class Delft3DFileManager:
             )
             return
 
+        attempted_paths = set()
+
+        def mark_attempted(path):
+            if path:
+                attempted_paths.add(os.path.normcase(os.path.abspath(path)))
+
+        def nested_reference_base(path):
+            if primary.get("paths_relative_to_parent", False):
+                return None
+            if os.path.normcase(os.path.dirname(os.path.abspath(path))) == os.path.normcase(base_dir):
+                return None
+            return base_dir
+
+        def load_input_by_extension(path, grid=None):
+            if not path or not os.path.exists(path):
+                return
+            mark_attempted(path)
+            reference_base = nested_reference_base(path)
+            if reference_base is None:
+                self.load_file_by_extension(path, spatial_grid_path=grid)
+            else:
+                self.load_file_by_extension(
+                    path,
+                    spatial_grid_path=grid,
+                    reference_base_dir=reference_base,
+                )
+
         if net_ok:
+            mark_attempted(net_path)
             self.load_ugrid_mesh_file(net_path)
         if csl_ok and csd_ok and net_ok:
+            mark_attempted(csl_path)
+            mark_attempted(csd_path)
             self.load_cross_sections_files(csl_path, csd_path, net_path)
         effective_grid_path = net_path if net_ok else spatial_grid_path
 
         if ext_ok:
-            self.load_ext_file(ext_path, grid_path=effective_grid_path)
+            mark_attempted(ext_path)
+            reference_base = nested_reference_base(ext_path)
+            if reference_base is None:
+                self.load_ext_file(ext_path, grid_path=effective_grid_path)
+            else:
+                self.load_ext_file(
+                    ext_path,
+                    grid_path=effective_grid_path,
+                    reference_base_dir=reference_base,
+                )
         if struct_ok:
-            self.load_file_by_extension(struct_path, spatial_grid_path=effective_grid_path)
+            load_input_by_extension(struct_path, grid=effective_grid_path)
         if ini_field_ok:
-            self.load_file_by_extension(ini_field_path, spatial_grid_path=effective_grid_path)
+            load_input_by_extension(ini_field_path, grid=effective_grid_path)
         for frict_file in primary["frict_files"]:
             frict_path = self._resolve_candidate_path(base_dir, frict_file)
-            if frict_path and os.path.exists(frict_path):
-                self.load_file_by_extension(frict_path, spatial_grid_path=effective_grid_path)
+            load_input_by_extension(frict_path, grid=effective_grid_path)
         if thin_dam_ok:
+            mark_attempted(thin_dam_path)
             self.load_polyline_file(thin_dam_path)
         if fixed_weir_ok:
+            mark_attempted(fixed_weir_path)
             self.load_fixed_weir_file(fixed_weir_path)
         if pillar_ok:
-            self.load_file_by_extension(pillar_path, spatial_grid_path=effective_grid_path)
+            load_input_by_extension(pillar_path, grid=effective_grid_path)
+
+        handled_keys = {
+            ("geometry", "crosslocfile"),
+            ("geometry", "crossdeffile"),
+        }
+        for reference in input_references:
+            value = reference.get("path", "")
+            resolved = self._resolve_candidate_path(base_dir, value)
+            if not resolved or not os.path.exists(resolved):
+                continue
+            key = (
+                str(reference.get("section", "")).strip().lower(),
+                str(reference.get("key", "")).strip().lower(),
+            )
+            if key in handled_keys:
+                continue
+            if os.path.splitext(resolved)[1].lower() not in _MDU_IMPORTABLE_EXTENSIONS:
+                continue
+            normalized_path = os.path.normcase(os.path.abspath(resolved))
+            if normalized_path in attempted_paths:
+                continue
+            load_input_by_extension(resolved, grid=effective_grid_path)
 
     def _parse_bc_forcing_file(self, filepath):
         """Parse Delft3D FM boundary-condition forcing blocks from a .bc file."""
@@ -5337,6 +5602,7 @@ class Delft3DFileManager:
                     "id": self._value_case_insensitive(values, "nodeId", "node", "node_id"),
                     "quantity": self._value_case_insensitive(values, "quantity"),
                     "nodeId": self._value_case_insensitive(values, "nodeId", "node", "node_id"),
+                    "locationFile": self._value_case_insensitive(values, "locationFile", "location_file"),
                     "branchId": "",
                     "chainage": "",
                     "forcingfile": self._value_case_insensitive(values, "forcingfile", "forcingFile"),
@@ -5353,10 +5619,15 @@ class Delft3DFileManager:
                 })
         return rows
 
-    def load_ext_file(self, filepath, grid_path=None):
+    def load_ext_file(self, filepath, grid_path=None, reference_base_dir=None):
         """Import FM external forcing as spatial features and link BC forcing series."""
         ext_path = os.path.abspath(filepath)
         base_dir = os.path.dirname(ext_path)
+        linked_base_dir = (
+            os.path.abspath(reference_base_dir)
+            if reference_base_dir is not None
+            else base_dir
+        )
 
         try:
             rows = self._parse_ext_file(ext_path)
@@ -5368,8 +5639,46 @@ class Delft3DFileManager:
             )
             return
 
+        has_location_file = False
+        loaded_linked_files = set()
+        for row in rows:
+            location_files = self._split_file_path_values(row.get("locationFile", ""))
+            if not location_files:
+                continue
+            has_location_file = True
+
+            forcing_files = self._split_file_path_values(row.get("forcingfile", ""))
+            for linked_file in location_files + forcing_files:
+                resolved_link = self._resolve_candidate_path(linked_base_dir, linked_file)
+                if not resolved_link or not os.path.exists(resolved_link):
+                    continue
+                extension = os.path.splitext(resolved_link)[1].lower()
+                if extension not in _MDU_IMPORTABLE_EXTENSIONS:
+                    continue
+                normalized_path = os.path.normcase(os.path.abspath(resolved_link))
+                if normalized_path in loaded_linked_files:
+                    continue
+                self.load_file_by_extension(resolved_link)
+                loaded_linked_files.add(normalized_path)
+
+        needs_spatial_context = any(
+            (
+                row.get("kind") == "boundary"
+                and row.get("nodeId", "").strip()
+            )
+            or (
+                row.get("kind") == "lateral"
+                and row.get("branchId", "").strip()
+            )
+            for row in rows
+        )
+        if not needs_spatial_context:
+            return
+
         context, resolved_grid = self._resolve_spatial_context(grid_path, base_dir)
         if context is None:
+            if has_location_file:
+                return
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -5380,9 +5689,10 @@ class Delft3DFileManager:
         bc_records_by_file = {}
         bc_files = []
         for row in rows:
-            resolved_bc = self._resolve_candidate_path(base_dir, row.get("forcingfile", ""))
-            if resolved_bc and os.path.exists(resolved_bc) and resolved_bc.lower().endswith(".bc"):
-                bc_files.append(resolved_bc)
+            for forcing_file in self._split_file_path_values(row.get("forcingfile", "")):
+                resolved_bc = self._resolve_candidate_path(linked_base_dir, forcing_file)
+                if resolved_bc and os.path.exists(resolved_bc) and resolved_bc.lower().endswith(".bc"):
+                    bc_files.append(resolved_bc)
 
         for bc_path in sorted(set(bc_files)):
             try:
@@ -5447,11 +5757,15 @@ class Delft3DFileManager:
                     point_xy = self._interpolate_point_on_branch(profile, chainage_val)
 
             if point_xy is None:
-                unresolved += 1
+                if not row.get("locationFile", "").strip():
+                    unresolved += 1
                 continue
 
             forcing_file = str(row.get("forcingfile", "")).strip()
-            resolved_bc = self._resolve_candidate_path(base_dir, forcing_file)
+            resolved_bc = self._resolve_candidate_path(
+                linked_base_dir,
+                self._first_file_path(forcing_file),
+            )
             bc_rows = bc_records_by_file.get(resolved_bc, [])
             bc_lookup = self._bc_name_lookup(bc_rows)
             bc_record = bc_lookup.get(row_id.lower())
@@ -5493,6 +5807,8 @@ class Delft3DFileManager:
             features.append(feature)
 
         if not features:
+            if has_location_file:
+                return
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -5982,23 +6298,31 @@ class Delft3DFileManager:
                 f"Unknown structure type(s) imported with raw attributes: {unknown_text}.",
             )
 
-    def load_ini_field_spatial_file(self, filepath, grid_path=None):
+    def load_ini_field_spatial_file(
+        self, filepath, grid_path=None, reference_base_dir=None
+    ):
         """Import iniField data files referenced by Initial and Parameter blocks."""
         ini_path = os.path.abspath(filepath)
         base_dir = os.path.dirname(ini_path)
+        data_base_dir = (
+            os.path.abspath(reference_base_dir)
+            if reference_base_dir is not None
+            else base_dir
+        )
 
         sections = self._parse_repeated_ini_sections(ini_path)
-        initial_data_file = ""
+        initial_data_files = []
         parameter_data_files = []
         for block in sections:
             section = block["section"].strip().lower()
             data_file = self._value_case_insensitive(block["values"], "dataFile", "data_file")
-            if section == "initial" and data_file and not initial_data_file:
-                initial_data_file = data_file
+            data_files = self._split_file_path_values(data_file)
+            if section == "initial" and data_files:
+                initial_data_files.extend(data_files)
             elif section == "parameter" and data_file:
-                parameter_data_files.append(data_file)
+                parameter_data_files.extend(data_files)
 
-        if not initial_data_file and not parameter_data_files:
+        if not initial_data_files and not parameter_data_files:
             QMessageBox.warning(
                 self.iface.mainWindow(),
                 "Delft3D File Manager",
@@ -6006,8 +6330,8 @@ class Delft3DFileManager:
             )
             return
 
-        if initial_data_file:
-            resolved_data = self._resolve_candidate_path(base_dir, initial_data_file)
+        for initial_data_file in initial_data_files:
+            resolved_data = self._resolve_candidate_path(data_base_dir, initial_data_file)
             if os.path.exists(resolved_data):
                 self.load_1d_field_spatial_file(resolved_data, grid_path=grid_path)
             else:
@@ -6018,7 +6342,7 @@ class Delft3DFileManager:
                 )
 
         for data_file in parameter_data_files:
-            resolved_data = self._resolve_candidate_path(base_dir, data_file)
+            resolved_data = self._resolve_candidate_path(data_base_dir, data_file)
             if not os.path.exists(resolved_data):
                 QMessageBox.warning(
                     self.iface.mainWindow(),
@@ -6026,7 +6350,14 @@ class Delft3DFileManager:
                     f"Referenced dataFile does not exist: {resolved_data}",
                 )
                 continue
-            self.load_file_by_extension(resolved_data, spatial_grid_path=grid_path)
+            if reference_base_dir is None:
+                self.load_file_by_extension(resolved_data, spatial_grid_path=grid_path)
+            else:
+                self.load_file_by_extension(
+                    resolved_data,
+                    spatial_grid_path=grid_path,
+                    reference_base_dir=reference_base_dir,
+                )
 
     def load_1d_field_spatial_file(self, filepath, grid_path=None):
         """Import 1dField branch chainage/value arrays as spatial points."""
@@ -6480,7 +6811,18 @@ class Delft3DFileManager:
                 lines = handle.readlines()
 
         for raw_line in lines:
-            line = raw_line.strip()
+            quote = None
+            line_chars = []
+            for character in raw_line:
+                if quote is not None:
+                    if character == quote:
+                        quote = None
+                elif character in ("'", '"'):
+                    quote = character
+                elif character == "#":
+                    break
+                line_chars.append(character)
+            line = "".join(line_chars).strip()
             if not line or line.startswith(";") or line.startswith("#"):
                 continue
 

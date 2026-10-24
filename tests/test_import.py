@@ -2951,6 +2951,80 @@ def test_read_mdu_primary_files_accepts_mixed_case_keys(plugin, tmp_path):
     assert primary["frict_files"] == ["roughness-main.ini", "roughness-floodplain.ini"]
 
 
+def test_parse_repeated_ini_sections_strips_inline_hash_comments(plugin, tmp_path):
+    mdu = tmp_path / "comments.mdu"
+    mdu.write_text(
+        "[geometry]\n"
+        'NetFile = "mesh #1.nc" # inline comment\n'
+        "FrictFile = roughness-main.ini;roughness-floodplain.ini # inline comment\n",
+        encoding="utf-8",
+    )
+
+    sections = plugin._parse_repeated_ini_sections(str(mdu))
+
+    assert sections == [{
+        "section": "geometry",
+        "values": {
+            "NetFile": '"mesh #1.nc"',
+            "FrictFile": "roughness-main.ini;roughness-floodplain.ini",
+        },
+    }]
+
+
+def test_read_mdu_primary_files_collects_input_references_only(plugin, tmp_path):
+    mdu = tmp_path / "FlowFM_inputs.mdu"
+    mdu.write_text(
+        "[General]\n"
+        "PathsRelativeToParent = 1 # use the parent file directory\n"
+        "[geometry]\n"
+        'NetFile = "mesh #1.nc" # unstructured grid\n'
+        "LandBoundaryFile = land.ldb # land boundary\n"
+        'FrictFile = roughness-main.ini;"roughness floodplain.ini" # roughness\n'
+        "[restart]\n"
+        "RestartFile = restart_map.nc # restart input\n"
+        "[external forcing]\n"
+        "ExtForceFile = legacy.ext # legacy format\n"
+        "ExtForceFileNew = external.ext # active format\n"
+        "[output]\n"
+        'ObsFile = stations.xyn "north stations.xyn" # input stations\n'
+        "CrsFile = sections.pli # input cross sections\n"
+        "MbaFile = balance_areas.ini # input areas\n"
+        "FouFile = analysis.fou # input Fourier analysis\n"
+        "OutputDir = output # result directory\n"
+        "FlowGeomFile = output/flow_geometry.nc # generated output\n"
+        "HisFile = output/history.nc # generated output\n"
+        "MapFile = output/map.nc # generated output\n",
+        encoding="utf-8",
+    )
+
+    primary = plugin._read_mdu_primary_files(str(mdu))
+
+    references = {
+        (item["section"], item["key"].lower(), item["path"])
+        for item in primary["input_file_references"]
+    }
+    assert primary["net_file"] == "mesh #1.nc"
+    assert primary["frict_files"] == [
+        "roughness-main.ini",
+        "roughness floodplain.ini",
+    ]
+    assert primary["ext_force_file"] == "external.ext"
+    assert primary["paths_relative_to_parent"] is True
+    assert references == {
+        ("geometry", "netfile", "mesh #1.nc"),
+        ("geometry", "landboundaryfile", "land.ldb"),
+        ("geometry", "frictfile", "roughness-main.ini"),
+        ("geometry", "frictfile", "roughness floodplain.ini"),
+        ("restart", "restartfile", "restart_map.nc"),
+        ("external forcing", "extforcefilenew", "external.ext"),
+        ("output", "obsfile", "stations.xyn"),
+        ("output", "obsfile", "north stations.xyn"),
+        ("output", "crsfile", "sections.pli"),
+        ("output", "mbafile", "balance_areas.ini"),
+        ("output", "foufile", "analysis.fou"),
+    }
+
+
 def test_load_fm_mdu_file_passes_netfile_to_spatial_imports(plugin, tmp_path):
     mdu = tmp_path / "FlowFM.mdu"
     mdu.write_text("[model]\nname = test\n", encoding="utf-8")
@@ -3038,6 +3112,152 @@ def test_load_fm_mdu_model_01_attempts_all_primary_imports(plugin):
 
     mock_mb.warning.assert_not_called()
     mock_mb.critical.assert_not_called()
+
+
+def test_load_fm_mdu_imports_observation_inputs_but_not_outputs(plugin, tmp_path):
+    mdu = tmp_path / "FlowFM_output_paths.mdu"
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    mesh = tmp_path / "mesh.nc"
+    observations = tmp_path / "stations.xyn"
+    cross_sections = tmp_path / "sections.pli"
+    output_map = output_dir / "map.nc"
+    output_history = output_dir / "history.nc"
+    flow_geometry = output_dir / "flow_geometry.nc"
+    for path in (mesh, observations, cross_sections, output_map, output_history, flow_geometry):
+        path.write_text("", encoding="utf-8")
+
+    mdu.write_text(
+        "[geometry]\n"
+        "NetFile = mesh.nc\n"
+        "[output]\n"
+        "ObsFile = stations.xyn\n"
+        "CrsFile = sections.pli\n"
+        "OutputDir = output\n"
+        "MapFile = output/map.nc\n"
+        "HisFile = output/history.nc\n"
+        "FlowGeomFile = output/flow_geometry.nc\n",
+        encoding="utf-8",
+    )
+
+    plugin.load_ugrid_mesh_file = MagicMock()
+    plugin.load_xyn_file = MagicMock()
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_netcdf_file = MagicMock()
+
+    plugin.load_fm_mdu_file(str(mdu), import_referenced=True)
+
+    plugin.load_ugrid_mesh_file.assert_called_once_with(str(mesh.resolve()))
+    plugin.load_xyn_file.assert_called_once_with(str(observations.resolve()))
+    plugin.load_polyline_file.assert_called_once_with(str(cross_sections.resolve()))
+    plugin.load_netcdf_file.assert_not_called()
+
+
+@pytest.mark.parametrize("paths_relative_to_parent", [False, True])
+def test_load_mdu_resolves_nested_ext_and_inifield_paths(
+    plugin, tmp_path, paths_relative_to_parent
+):
+    mdu = tmp_path / "FlowFM_nested.mdu"
+    linked_dir = tmp_path / "inputs"
+    linked_dir.mkdir()
+    child_dir = linked_dir if paths_relative_to_parent else tmp_path
+    ext = linked_dir / "boundary.ext"
+    ini_field = linked_dir / "initialFields.ini"
+    location = child_dir / "Upstream.pli"
+    forcing = child_dir / "Discharge.bc"
+    area = child_dir / "zone.pol"
+
+    ext.write_text(
+        "[Boundary]\n"
+        "quantity = dischargebnd\n"
+        "locationFile = Upstream.pli\n"
+        "forcingFile = Discharge.bc\n",
+        encoding="utf-8",
+    )
+    ini_field.write_text(
+        "[General]\n"
+        "fileType = iniField\n"
+        "[Parameter]\n"
+        "quantity = frictioncoefficient\n"
+        "dataFile = zone.pol\n"
+        "dataFileType = polygon\n",
+        encoding="utf-8",
+    )
+    for path in (location, forcing, area):
+        path.write_text("", encoding="utf-8")
+    mdu.write_text(
+        "[General]\n"
+        f"PathsRelativeToParent = {int(paths_relative_to_parent)}\n"
+        "[geometry]\n"
+        "IniFieldFile = inputs/initialFields.ini\n"
+        "[external forcing]\n"
+        "ExtForceFileNew = inputs/boundary.ext\n",
+        encoding="utf-8",
+    )
+
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_bc_file = MagicMock()
+
+    with patch.object(
+        plugin, "_resolve_spatial_context", return_value=(None, None)
+    ) as spatial_context:
+        plugin.load_fm_mdu_file(str(mdu), import_referenced=True)
+
+    imported_polylines = {
+        pathlib.Path(item.args[0]).resolve()
+        for item in plugin.load_polyline_file.call_args_list
+    }
+    assert imported_polylines == {location.resolve(), area.resolve()}
+    plugin.load_bc_file.assert_called_once_with(str(forcing.resolve()))
+    spatial_context.assert_not_called()
+
+
+def test_load_waal_mdu_imports_referenced_inputs_and_not_output_directory(plugin):
+    mdu = pathlib.Path(__file__).parent.parent / "data_tmp" / "r002" / "Waal.mdu"
+    model_dir = mdu.parent.resolve()
+
+    plugin.load_ugrid_mesh_file = MagicMock()
+    plugin.load_polyline_file = MagicMock()
+    plugin.load_fixed_weir_file = MagicMock()
+    plugin.load_xyn_file = MagicMock()
+    plugin.load_bc_file = MagicMock()
+    plugin.load_netcdf_file = MagicMock()
+
+    with patch.object(
+        plugin, "_resolve_spatial_context", return_value=(None, None)
+    ) as spatial_context:
+        plugin.load_fm_mdu_file(str(mdu), import_referenced=True)
+
+    plugin.load_ugrid_mesh_file.assert_called_once_with(
+        str((model_dir / "saved_grid_net.nc").resolve())
+    )
+    plugin.load_fixed_weir_file.assert_called_once_with(
+        str((model_dir / "WL_cut_fixed_weirs_fxw.pliz").resolve())
+    )
+    plugin.load_xyn_file.assert_called_once_with(
+        str((model_dir / "WL_cut_observation_points_obs.xyn").resolve())
+    )
+    imported_polylines = {
+        pathlib.Path(item.args[0]).resolve()
+        for item in plugin.load_polyline_file.call_args_list
+    }
+    assert {
+        (model_dir / "Waal_land_boundary.ldb").resolve(),
+        (model_dir / "WL_cut_thin_dams_thd.pli").resolve(),
+        (model_dir / "Waal_crs.pli").resolve(),
+        (model_dir / "Boundary01.pli").resolve(),
+        (model_dir / "Boundary02.pli").resolve(),
+    }.issubset(imported_polylines)
+    imported_forcing_files = {
+        pathlib.Path(item.args[0]).resolve()
+        for item in plugin.load_bc_file.call_args_list
+    }
+    assert imported_forcing_files == {
+        (model_dir / "Discharge.bc").resolve(),
+        (model_dir / "WaterLevel.bc").resolve(),
+    }
+    assert not spatial_context.called
+    plugin.load_netcdf_file.assert_not_called()
 
 
 def test_parse_bc_forcing_file(plugin, tmp_path):
@@ -3153,6 +3373,7 @@ def test_parse_ext_file_accepts_mixed_case_keys(plugin, tmp_path):
         "[Boundary]\n"
         "NodeID = bnd_01\n"
         "Quantity = dischargebnd\n"
+        "LocationFile = Upstream.pli\n"
         "ForcingFile = bc.bc\n"
         "[Lateral]\n"
         "Name = lat_01\n"
@@ -3167,12 +3388,40 @@ def test_parse_ext_file_accepts_mixed_case_keys(plugin, tmp_path):
     assert len(rows) == 2
     assert rows[0]["kind"] == "boundary"
     assert rows[0]["nodeId"] == "bnd_01"
+    assert rows[0]["locationFile"] == "Upstream.pli"
     assert rows[0]["forcingfile"] == "bc.bc"
     assert rows[1]["kind"] == "lateral"
     assert rows[1]["id"] == "lat_01"
     assert rows[1]["branchId"] == "B1"
     assert rows[1]["chainage"] == "25"
     assert rows[1]["forcingfile"] == "lat.bc"
+
+
+def test_load_ext_file_imports_locationfile_inputs_without_grid(plugin, tmp_path):
+    ext = tmp_path / "forcing.ext"
+    location = tmp_path / "Upstream.pli"
+    forcing = tmp_path / "Discharge.bc"
+    ext.write_text(
+        "[Boundary]\n"
+        "quantity = dischargebnd\n"
+        "locationFile = Upstream.pli\n"
+        "forcingFile = Discharge.bc\n",
+        encoding="utf-8",
+    )
+    location.write_text("", encoding="utf-8")
+    forcing.write_text("", encoding="utf-8")
+    plugin.load_file_by_extension = MagicMock()
+
+    with patch.object(plugin, "_resolve_spatial_context") as spatial_context, \
+         patch("Delft3DFileManager.Delft3DFileManager.QMessageBox") as mock_mb:
+        plugin.load_ext_file(str(ext))
+
+    assert plugin.load_file_by_extension.call_args_list == [
+        call(str(location.resolve())),
+        call(str(forcing.resolve())),
+    ]
+    spatial_context.assert_not_called()
+    mock_mb.warning.assert_not_called()
 
 
 def test_load_structures_spatial_file_creates_points(plugin, tmp_path):

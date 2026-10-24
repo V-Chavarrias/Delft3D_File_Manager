@@ -351,14 +351,18 @@ This allows one-click loading of model configuration and linked Delft3D FM input
 
 ### Import: Delft3D FM Model Definition (`.mdu`)
 
-Load a Delft3D FM model definition and its primary linked inputs.
+Load a Delft3D FM model definition and its linked input files without adding a
+Hydrolib-core dependency.
 
 #### Behavior
-- Creates an `*_mdu_files` summary table with resolved paths and existence flags.
+- Creates an `*_mdu_files` summary table with resolved input paths and existence flags.
 - Loads linked mesh (`NetFile`) when available.
 - Loads cross-sections when `CrossLocFile`, `CrossDefFile`, and mesh are all available.
-- Loads linked external forcing (`ExtForceFileNew`/`ExtForceFile`) and boundary forcing files.
-- Loads linked structures/iniField/1dField/roughness files as spatial features (when branch/node references can be resolved with the selected grid).
+- Loads supported geometry, restart, external-forcing, observation, mass-balance, and other input references, including `LandBoundaryFile`, `ObsFile`, and `CrsFile`.
+- Follows `locationFile` and `forcingFile` links in EXT files, plus nested `dataFile` links in iniField files.
+- Resolves nested links relative to their parent file when `PathsRelativeToParent=1`, or relative to the MDU directory otherwise.
+- Imports supported referenced files independently of whether they can be resolved to 1D branch/node features.
+- Does not load generated outputs such as `MapFile`, `HisFile`, or `FlowGeomFile`, and does not scan `OutputDir`.
 
 ### Import: External Forcing (`.ext`) and Boundary Forcing (`.bc`)
 
@@ -366,6 +370,7 @@ Load a Delft3D FM model definition and its primary linked inputs.
 - Imports boundary/lateral link entries into an `*_ext_spatial` point layer.
 - Resolves geometry from `nodeId` (boundaries) and `branchId + chainage` (laterals).
 - Links referenced `.bc` series by forcing identifier so features are clickable and plottable.
+- For boundaries with `locationFile`, imports the referenced location geometry and forcing file without requiring a mesh; point features continue to use node/branch references when present.
 
 #### `.bc`
 - Imports each `[forcing]` block into an `*_bc` table.
