@@ -3212,8 +3212,55 @@ def test_load_mdu_resolves_nested_ext_and_inifield_paths(
     spatial_context.assert_not_called()
 
 
-def test_load_waal_mdu_imports_referenced_inputs_and_not_output_directory(plugin):
-    mdu = pathlib.Path(__file__).parent.parent / "data_tmp" / "r002" / "Waal.mdu"
+def test_load_waal_mdu_imports_referenced_inputs_and_not_output_directory(plugin, tmp_path):
+    model_dir = tmp_path / "r002"
+    output_dir = model_dir / "output"
+    output_dir.mkdir(parents=True)
+    mdu = model_dir / "Waal.mdu"
+    for filename in (
+        "saved_grid_net.nc",
+        "Waal_land_boundary.ldb",
+        "WL_cut_thin_dams_thd.pli",
+        "WL_cut_fixed_weirs_fxw.pliz",
+        "WL_cut_observation_points_obs.xyn",
+        "Waal_crs.pli",
+        "Boundary01.pli",
+        "Boundary02.pli",
+        "Discharge.bc",
+        "WaterLevel.bc",
+    ):
+        (model_dir / filename).write_text("", encoding="utf-8")
+    for filename in ("flowfm_map.nc", "flowfm_his.nc"):
+        (output_dir / filename).write_text("", encoding="utf-8")
+    (model_dir / "Waal_bnd.ext").write_text(
+        "[boundary]\n"
+        "quantity = dischargebnd\n"
+        "locationFile = Boundary01.pli\n"
+        "forcingFile = Discharge.bc\n\n"
+        "[boundary]\n"
+        "quantity = waterlevelbnd\n"
+        "locationFile = Boundary02.pli\n"
+        "forcingFile = WaterLevel.bc\n",
+        encoding="utf-8",
+    )
+    mdu.write_text(
+        "[General]\n"
+        "PathsRelativeToParent = 1\n"
+        "[Geometry]\n"
+        "NetFile = saved_grid_net.nc\n"
+        "LandBoundaryFile = Waal_land_boundary.ldb\n"
+        "ThinDamFile = WL_cut_thin_dams_thd.pli\n"
+        "FixedWeirFile = WL_cut_fixed_weirs_fxw.pliz\n"
+        "[External Forcing]\n"
+        "ExtForceFileNew = Waal_bnd.ext\n"
+        "[Output]\n"
+        "ObsFile = WL_cut_observation_points_obs.xyn\n"
+        "CrsFile = Waal_crs.pli\n"
+        "OutputDir = output\n"
+        "MapFile = output/flowfm_map.nc\n"
+        "HisFile = output/flowfm_his.nc\n",
+        encoding="utf-8",
+    )
     model_dir = mdu.parent.resolve()
 
     plugin.load_ugrid_mesh_file = MagicMock()

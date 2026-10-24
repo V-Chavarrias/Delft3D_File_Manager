@@ -1,20 +1,36 @@
 ---
 name: feature-delivery
-description: Implement new plugin functionality with mandatory README, metadata/changelog, tests, and passing testbench
-disable-model-invocation: true
+description: "Use when adding or modifying Delft3D File Manager functionality, implementing or extending a feature, or refactoring feature logic. Plan, implement, document, test, and validate the change end-to-end."
 argument-hint: "Describe the feature to add or modify"
 ---
-Implement the requested plugin functionality end-to-end.
 
-Requirements:
-- Create a concrete implementation plan first.
-- Implement only the necessary code changes.
-- Update README.md for any user-facing behavior change.
-- Update Delft3DFileManager/metadata.txt changelog and bump version when appropriate.
-- Add or update tests in tests/ that cover new behavior and regressions.
-- When adding postprocessing for a variable, support both 1D and 2D data, and computation both on the fly for large files without loading the entire file and from an already-loaded mesh layer. Test the supported dimension and data-source combinations.
-- Keep reusable test fixtures in `data/` and generated test files in `tmp_path`; never put test data in or depend on `data_tmp/`.
-- Run full testbench with pytest tests/ -v and fix failures.
+Implement requested plugin functionality end-to-end. Plan first, then continue into implementation unless the user explicitly asks for a plan only.
+
+## Workflow
+
+1. **Scope and acceptance criteria**
+   - Clarify the requested behavior, identify impacted modules, interfaces, and tests, and resolve material ambiguities before editing.
+   - Record assumptions and open questions when details remain uncertain.
+   - Define observable acceptance criteria and note relevant risks.
+2. **Plan**
+   - Provide an ordered, concrete plan with file-level changes for code, documentation, metadata, tests, and validation.
+   - Keep the plan focused; do not stop at the plan unless the user requested plan-only work.
+3. **Implement**
+   - Make only the necessary changes, following existing patterns and avoiding unrelated refactors.
+   - Update `README.md` for user-facing behavior changes.
+   - Update the changelog in `Delft3DFileManager/metadata.txt`; recommend a version bump when appropriate.
+   - Add or update meaningful tests for new behavior and regressions.
+   - Keep reusable, checked-in test fixtures in `data/`. Create generated test inputs and outputs under pytest `tmp_path`. Never put test data in, read from, or otherwise depend on `data_tmp/`; tests must work from a fresh checkout.
+   - When adding postprocessing for a variable, support both 1D and 2D data, both on-the-fly computation for large files without loading the entire file and computation from an already-loaded mesh layer. Test each supported dimension and data-source combination.
+4. **Validate**
+   - Run focused tests for the change, then the full testbench with `python -m pytest tests/ -v`.
+   - Run any additional repository CI gates that apply, including coverage thresholds, and fix failures before concluding.
+   - Report skipped or environment-dependent checks explicitly; do not claim a test passed unless it was run.
+5. **Report**
+   - Summarize the plan and acceptance criteria.
+   - List code and documentation changes by file.
+   - Report testbench commands and results, including relevant skips or limitations.
+   - End with concise, release-note-ready bullets.
 
 Return format:
 1. Plan
