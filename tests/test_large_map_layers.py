@@ -183,6 +183,9 @@ class FakeProject:
     def layerTreeRoot(self):
         return self.root
 
+    def mapLayers(self):
+        return dict(self.map_layers)
+
     def addMapLayer(self, layer, add_to_legend):
         self.map_layers[layer.id()] = layer
 
@@ -303,6 +306,47 @@ def test_plot_uses_shared_range_and_keeps_style_for_same_variable(layer_set):
         assert layer.groups == ["bl"]
         assert _active_scalar(layer).ramp == "viridis"
         assert (_active_scalar(layer).minimum, _active_scalar(layer).maximum) == (-1.0, 0.7)
+
+
+def test_persistent_symbology_links_restore_after_project_reload(layer_set):
+    result, project = layer_set
+    result.plot([np.array([1.0, 2.0]), np.array([3.0, 4.0])], "s1 t0", FACE, variable_changed=True)
+    first, second = result.layers
+    sync_id = first.customProperty("delft3d_large_map_sync_id")
+    assert sync_id
+    assert second.customProperty("delft3d_large_map_sync_id") == sync_id
+
+    unrelated_set = layers_module.LargeMapLayerSet(
+        [_grid(2), _grid(3, 1.0)],
+        "unrelated (Large MAP)",
+        project=project,
+        layer_name="unrelated",
+    )
+    unrelated_set.plot(
+        [np.array([1.0, 2.0]), np.array([3.0, 4.0])],
+        "s1 t0",
+        FACE,
+        variable_changed=True,
+    )
+    unrelated_first, unrelated_second = unrelated_set.layers
+
+    result.dispose()
+    unrelated_set.dispose()
+    layers_module.restore_persistent_symbology_links(project)
+    layers_module.restore_persistent_symbology_links(project)
+
+    settings = first.rendererSettings()
+    scalar = settings.scalarSettings(settings.active)
+    scalar.ramp = "viridis"
+    settings.setScalarSettings(settings.active, scalar)
+    first.setRendererSettings(settings)
+
+    assert _active_scalar(second).ramp == "viridis"
+    assert _active_scalar(unrelated_first).ramp == "default"
+    assert _active_scalar(unrelated_second).ramp == "default"
+    assert len(first.rendererChanged.callbacks) == 1
+
+    project.removeMapLayers([layer.id() for layer in project.map_layers.values()])
 
 
 def test_plot_recreates_layers_without_dataset_removal_support(monkeypatch, layer_set):

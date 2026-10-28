@@ -222,13 +222,16 @@ next entry immediately.
 Colour scale: use the layer **Symbology** as usual. Editing one partition layer
 applies the same settings to all partitions. Stepping through time or indices
 keeps your colour settings and range; selecting another variable keeps the
-colour ramp and resets the range to the data range of all partitions.
+colour ramp and resets the range to the data range of all partitions. The
+partition link is stored with the project layers and restored when the project
+is reopened.
 
 Limitations:
 - Edge variables and mesh1d variables are not listed.
-- The layers are in-memory: they are not restored from a saved project, and
-  saving the project stores the mesh in the project file (which can make it
-  large). Reselect the MAP file in the viewer to rebuild them.
+- The viewer's file-reading state is not restored from the project. QGIS saves
+  the plotted mesh layers (which can make the project file large), and their
+  symbology link is restored, but reselect the MAP file in the viewer to resume
+  plotting other variables, times, or indexes.
 - The streamfunction graph is built the first time the streamfunction is
   plotted, which takes a few seconds for large models.
 
@@ -531,7 +534,7 @@ For large datasets, the plugin now shows a live progress bar (plus status text) 
 	- **Mask ghost cells (default)**: creates/reuses owner-filter sidecars (`*_qgis_owner.nc`) per partition and masks non-owner (ghost) face values using `mesh2d_flowelem_domain` and the partition id from the filename.
 	- **Load original partition files**: loads partition files directly and keeps overlap visible in ghost regions.
 - If owner masking is selected but `mesh2d_flowelem_domain` is missing, the plugin falls back to loading that partition without owner filtering and reports a warning.
-- Loaded partition meshes are grouped under one layer-tree group and synchronized for dataset-group/renderer updates to provide one logical mesh experience during time navigation.
+- Loaded partition meshes are grouped under one layer-tree group and synchronized for dataset-group/renderer updates to provide one logical mesh experience during time navigation. The synchronization link is saved with the layers and restored when the project is reopened. Older projects are also re-linked when their partition source filenames identify a common partition family.
 
 #### Supported Components
 

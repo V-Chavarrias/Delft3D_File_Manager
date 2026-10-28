@@ -5,6 +5,8 @@ Plotting replaces the single dataset group of every layer; styling is shared
 across partitions (one colour range) and Symbology edits are mirrored.
 """
 
+import uuid
+
 import numpy as np
 
 try:
@@ -20,6 +22,12 @@ try:
     )
 except ImportError:  # pragma: no cover - only outside QGIS
     QgsMeshDatasetIndex = QgsMeshLayer = QgsProject = None
+
+
+_LARGE_MAP_SYNC_PROPERTY = "delft3d_large_map_sync_id"
+_LARGE_MAP_DATASET_PROPERTY = "delft3d_large_map_dataset_group"
+_PERSISTENT_SYNC_LINKS = {}
+_PERSISTENT_SYNCING = set()
 
 
 def _join_columns(columns):
@@ -107,6 +115,154 @@ def _group_index_by_name(layer, name):
     return indexes[-1] if indexes else None
 
 
+def _disconnect_persistent_sync(project, sync_id):
+    registration = _PERSISTENT_SYNC_LINKS.pop((id(project), sync_id), None)
+    if registration is None:
+        return
+    for layer, callback in registration["layers"].values():
+        try:
+            layer.rendererChanged.disconnect(callback)
+        except (TypeError, RuntimeError):
+            pass
+    try:
+        project.layersWillBeRemoved.disconnect(registration["remove_callback"])
+    except (AttributeError, TypeError, RuntimeError):
+        pass
+
+
+def _layer_tree_group_path(project, layer):
+    root = project.layerTreeRoot()
+    node = root.findLayer(layer.id())
+    if node is None:
+        return ""
+    names = []
+    parent = node.parent()
+    while parent is not None and parent != root:
+        name = getattr(parent, "name", None)
+        if callable(name) and name():
+            names.append(str(name()))
+        parent = parent.parent()
+    return "/".join(reversed(names))
+
+
+def _active_dataset_group_name(layer):
+    settings = layer.rendererSettings()
+    active = settings.activeScalarDatasetGroup()
+    if active is None and hasattr(layer, "activeScalarDatasetGroup"):
+        active = layer.activeScalarDatasetGroup()
+    indexes = list(layer.datasetGroupsIndexes())
+    for index in indexes:
+        if active is not None and int(index) != int(active):
+            continue
+        name = layer.datasetGroupMetadata(QgsMeshDatasetIndex(index)).name()
+        if name:
+            return name
+    return ""
+
+
+def _mirror_persistent_renderer(source, project, sync_id):
+    if sync_id in _PERSISTENT_SYNCING:
+        return
+    dataset_name = source.customProperty(_LARGE_MAP_DATASET_PROPERTY, "")
+    if not dataset_name:
+        return
+    source_index = _group_index_by_name(source, dataset_name)
+    if source_index is None:
+        return
+
+    source_settings = source.rendererSettings()
+    scalar = source_settings.scalarSettings(source_index)
+    native = source_settings.nativeMeshSettings()
+    _PERSISTENT_SYNCING.add(sync_id)
+    try:
+        for target in project.mapLayers().values():
+            if target is source or target.customProperty(_LARGE_MAP_SYNC_PROPERTY, "") != sync_id:
+                continue
+            target_name = target.customProperty(_LARGE_MAP_DATASET_PROPERTY, "")
+            target_index = _group_index_by_name(target, target_name)
+            if target_index is None:
+                continue
+            settings = target.rendererSettings()
+            settings.setScalarSettings(target_index, scalar)
+            settings.setNativeMeshSettings(native)
+            target.setRendererSettings(settings)
+            target.triggerRepaint()
+    finally:
+        _PERSISTENT_SYNCING.remove(sync_id)
+
+
+def restore_persistent_symbology_links(project):
+    """Reconnect saved Large MAP partition layers after a project is loaded."""
+    for project_id, sync_id in tuple(_PERSISTENT_SYNC_LINKS):
+        if project_id == id(project):
+            _disconnect_persistent_sync(project, sync_id)
+
+    grouped = {}
+    legacy_groups = {}
+    for layer in project.mapLayers().values():
+        sync_id = str(layer.customProperty(_LARGE_MAP_SYNC_PROPERTY, "") or "")
+        if sync_id:
+            grouped.setdefault(sync_id, []).append(layer)
+            continue
+        group_path = _layer_tree_group_path(project, layer)
+        if "(large map)" in group_path.lower():
+            legacy_groups.setdefault(group_path, []).append(layer)
+
+    for layers in legacy_groups.values():
+        if len(layers) < 2:
+            continue
+        sync_id = uuid.uuid4().hex
+        for layer in layers:
+            layer.setCustomProperty(_LARGE_MAP_SYNC_PROPERTY, sync_id)
+            dataset_name = _active_dataset_group_name(layer)
+            if dataset_name:
+                layer.setCustomProperty(_LARGE_MAP_DATASET_PROPERTY, dataset_name)
+        grouped[sync_id] = layers
+
+    for sync_id, layers in grouped.items():
+        if len(layers) < 2:
+            continue
+        callbacks = {}
+        for layer in layers:
+            callback = lambda *_args, layer=layer, sync_id=sync_id: _mirror_persistent_renderer(
+                layer, project, sync_id
+            )
+            layer.rendererChanged.connect(callback)
+            callbacks[str(layer.id())] = (layer, callback)
+
+        def on_layers_will_be_removed(layer_ids, sync_id=sync_id):
+            registration = _PERSISTENT_SYNC_LINKS.get((id(project), sync_id))
+            if registration is None:
+                return
+            removed_ids = {
+                str(layer.id()) if callable(getattr(layer, "id", None)) else str(layer)
+                for layer in layer_ids
+            }
+            for layer_id in removed_ids:
+                registered = registration["layers"].pop(layer_id, None)
+                if registered is not None:
+                    layer, callback = registered
+                    try:
+                        layer.rendererChanged.disconnect(callback)
+                    except (TypeError, RuntimeError):
+                        pass
+            if len(registration["layers"]) < 2:
+                _disconnect_persistent_sync(project, sync_id)
+
+        project.layersWillBeRemoved.connect(on_layers_will_be_removed)
+        _PERSISTENT_SYNC_LINKS[(id(project), sync_id)] = {
+            "layers": callbacks,
+            "remove_callback": on_layers_will_be_removed,
+        }
+
+
+def clear_persistent_symbology_links(project):
+    """Disconnect restored renderer links when the plugin is unloaded."""
+    for project_id, sync_id in tuple(_PERSISTENT_SYNC_LINKS):
+        if project_id == id(project):
+            _disconnect_persistent_sync(project, sync_id)
+
+
 class _LayerSlot:
     def __init__(self, grid, uri, name):
         self.grid = grid
@@ -127,6 +283,7 @@ class LargeMapLayerSet:
         self._group_name = group_name
         self._group = None
         self._crs = crs
+        self._sync_id = uuid.uuid4().hex
         self._syncing = False
         self._busy = False
         self._plotted = False
@@ -163,6 +320,7 @@ class LargeMapLayerSet:
         if not layer.isValid():
             raise RuntimeError(f"Could not create the mesh layer for {slot.name}")
         layer.setCustomProperty("delft3d_mesh_source", slot.grid.path)
+        layer.setCustomProperty(_LARGE_MAP_SYNC_PROPERTY, self._sync_id)
         if self._crs is not None and self._crs.isValid():
             layer.setCrs(self._crs)
         temporal = layer.temporalProperties()
@@ -303,6 +461,7 @@ class LargeMapLayerSet:
                     raise RuntimeError(f"Could not add the plotted values to {slot.name}")
                 slot.dataset_name = dataset_group_name(dataset_name)
                 slot.group_index = _group_index_by_name(layer, slot.dataset_name)
+                layer.setCustomProperty(_LARGE_MAP_DATASET_PROPERTY, slot.dataset_name)
 
             for slot in self._slots:
                 layer = slot.layer

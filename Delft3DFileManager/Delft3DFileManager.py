@@ -49,6 +49,7 @@ import re
 import shutil
 import sys
 import glob
+import uuid
 from urllib.parse import unquote, urlsplit
 from .sediment import SedimentRecord, read_sediment_file
 try:
@@ -64,6 +65,7 @@ _CUMULATIVE_BED_LEVEL_CHANGE_OPTION = "Cumulative bed level change"
 _CUMULATIVE_BED_LEVEL_CHANGE_VARIABLE = "mesh2d_mor_bl_change"
 _NON_DIMENSIONAL_BED_SHEAR_STRESS_OPTION = "Non-dimensional bed shear stress"
 _NON_DIMENSIONAL_BED_SHEAR_STRESS_PREFIX = "mesh2d_theta_"
+_PARTITION_MESH_SYNC_PROPERTY = "delft3d_partition_mesh_sync_id"
 _WATER_DENSITY = 1000.0
 _GRAVITY = 9.81
 _MDU_INPUT_FILE_KEYS = {
@@ -574,6 +576,8 @@ class Delft3DFileManager:
         self._mesh_properties_context = None
         self._mesh_properties_selection = None
         self._partition_mesh_sync_sessions = {}
+        self._partition_sync_read_signal = None
+        self._partition_sync_read_callback = None
         self._his_sources = {}
         self._his_series_cache = {}
         self._required_packages = ["netCDF4", "pyproj", "scipy", "defusedxml"]
@@ -582,6 +586,7 @@ class Delft3DFileManager:
 
     def initGui(self):
         """Create toolbar button and menu item"""
+        self._connect_partition_mesh_sync_restore()
         if not _HAS_DEFUSEDXML and not self._warned_missing_defusedxml:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
@@ -829,6 +834,8 @@ class Delft3DFileManager:
 
     def unload(self):
         """Remove the plugin menu item and icon"""
+        self._disconnect_partition_mesh_sync_restore()
+        self._disconnect_partition_mesh_sync_sessions()
         if self._mesh_polyline_map_tool is not None:
             self._mesh_polyline_map_tool.cancel()
         self._cancel_mesh_profile_capture()
@@ -854,6 +861,9 @@ class Delft3DFileManager:
         if self._large_map_viewer is not None:
             self._large_map_viewer.close()
             self._large_map_viewer = None
+        from .large_map_layers import clear_persistent_symbology_links
+
+        clear_persistent_symbology_links(QgsProject.instance())
         if self.bed_level_action:
             self.iface.removePluginMenu("&Delft3D File Manager", self.bed_level_action)
         if self.create_trachytopes_action:
@@ -9944,14 +9954,113 @@ class Delft3DFileManager:
         except (RuntimeError, AttributeError):
             pass
 
-    def _setup_partition_mesh_sync(self, mesh_layers):
-        """Best-effort synchronization of dataset-group and renderer settings across partition layers."""
-        if len(mesh_layers) < 2:
+    def _connect_partition_mesh_sync_restore(self):
+        if self._partition_sync_read_callback is not None:
+            return
+        signal = getattr(self.iface, "projectRead", None)
+        if not callable(getattr(signal, "connect", None)):
+            signal = getattr(QgsProject.instance(), "readProject", None)
+        if callable(getattr(signal, "connect", None)):
+            callback = self._restore_partition_mesh_syncs
+            signal.connect(callback)
+            self._partition_sync_read_signal = signal
+            self._partition_sync_read_callback = callback
+        self._restore_partition_mesh_syncs()
+
+    def _disconnect_partition_mesh_sync_restore(self):
+        signal = self._partition_sync_read_signal
+        callback = self._partition_sync_read_callback
+        if signal is not None and callback is not None:
+            try:
+                signal.disconnect(callback)
+            except (TypeError, RuntimeError):
+                pass
+        self._partition_sync_read_signal = None
+        self._partition_sync_read_callback = None
+
+    def _disconnect_partition_mesh_sync_sessions(self, sync_id=None):
+        for key, session in tuple(self._partition_mesh_sync_sessions.items()):
+            if sync_id is not None and key != sync_id:
+                continue
+            for signal, callback in session.get("callbacks", []):
+                try:
+                    signal.disconnect(callback)
+                except (TypeError, RuntimeError):
+                    pass
+            self._partition_mesh_sync_sessions.pop(key, None)
+
+    def _partition_sync_group_path(self, layer, project):
+        root = project.layerTreeRoot()
+        node = root.findLayer(layer.id())
+        if node is None:
+            return ""
+        names = []
+        parent = node.parent()
+        while parent is not None and parent != root:
+            name = getattr(parent, "name", None)
+            if callable(name) and name():
+                names.append(str(name()))
+            parent = parent.parent()
+        return "/".join(reversed(names))
+
+    def _legacy_partition_sync_key(self, layer, project):
+        source = str(layer.customProperty("delft3d_mesh_source", "") or "")
+        if not source:
+            source_method = getattr(layer, "source", None)
+            source = str(source_method() if callable(source_method) else "")
+        source = source.split("|", 1)[0].replace("\\", "/")
+        match = re.match(
+            r"^(.*_)\d{4}(_(?:map|fou|his|rst)(?:_.*)?\.nc)$",
+            source,
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        group_path = self._partition_sync_group_path(layer, project)
+        if "(large map)" in group_path.lower():
+            return None
+        family = f"{match.group(1)}####{match.group(2)}".lower()
+        return f"{os.path.dirname(source).lower()}|{family}|{group_path.lower()}"
+
+    def _restore_partition_mesh_syncs(self, *_args):
+        self._disconnect_partition_mesh_sync_sessions()
+        project = QgsProject.instance()
+        from .large_map_layers import restore_persistent_symbology_links
+
+        restore_persistent_symbology_links(project)
+        layers = list(project.mapLayers().values())
+        tagged_groups = {}
+        untagged_groups = {}
+        for layer in layers:
+            sync_id = str(layer.customProperty(_PARTITION_MESH_SYNC_PROPERTY, "") or "")
+            if sync_id:
+                tagged_groups.setdefault(sync_id, []).append(layer)
+                continue
+            legacy_key = self._legacy_partition_sync_key(layer, project)
+            if legacy_key is not None:
+                untagged_groups.setdefault(legacy_key, []).append(layer)
+
+        for sync_id, group_layers in tagged_groups.items():
+            self._setup_partition_mesh_sync(group_layers, sync_id=sync_id)
+        for group_layers in untagged_groups.values():
+            self._setup_partition_mesh_sync(group_layers)
+
+    def _setup_partition_mesh_sync(self, mesh_layers, sync_id=None):
+        """Synchronize partition renderers and persist their membership in the project."""
+        layers = [layer for layer in mesh_layers if layer is not None]
+        if len(layers) < 2:
             return
 
-        session_key = ",".join(sorted([str(layer.id()) for layer in mesh_layers if layer is not None]))
-        session = {"updating": False, "layers": [layer for layer in mesh_layers if layer is not None]}
-        self._partition_mesh_sync_sessions[session_key] = session
+        sync_id = str(sync_id or uuid.uuid4().hex)
+        self._disconnect_partition_mesh_sync_sessions(sync_id)
+        for layer in layers:
+            layer.setCustomProperty(_PARTITION_MESH_SYNC_PROPERTY, sync_id)
+        session = {
+            "updating": False,
+            "layers": layers,
+            "callbacks": [],
+        }
+        self._partition_mesh_sync_sessions[sync_id] = session
 
         def _broadcast(source_layer):
             if session["updating"]:
@@ -10014,9 +10123,11 @@ class Delft3DFileManager:
             ):
                 signal = getattr(layer, signal_name, None)
                 if hasattr(signal, "connect"):
-                    signal.connect(lambda *args, _layer=layer: _broadcast(_layer))
+                    callback = lambda *args, _layer=layer: _broadcast(_layer)
+                    signal.connect(callback)
+                    session["callbacks"].append((signal, callback))
 
-        _broadcast(session["layers"][0])
+        _broadcast(layers[0])
 
     def _prompt_for_layer_names(self, base_name, has_mesh2d, mesh1d_data, geom_data, mesh1d2d_data=None):
         """Prompt user for layer names."""
