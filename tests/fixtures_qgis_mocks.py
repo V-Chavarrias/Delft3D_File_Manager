@@ -11,6 +11,10 @@ _QGIS_MODULE_NAMES = (
     "qgis.PyQt.QtWidgets",
     "qgis.PyQt.QtGui",
 )
+_QGIS_IMPORT_SYMBOLS = {
+    "qgis.core": ("QgsProject", "QgsMeshDatasetGroupMetadata"),
+    "qgis.PyQt.QtWidgets": ("QDialog",),
+}
 _qgis_mocks_installed = False
 
 
@@ -36,6 +40,20 @@ def install_qgis_mocks():
         qgis_gui.QgsRubberBand = MagicMock(name="qgis.gui.QgsRubberBand")
         sys.modules["qgis.gui"] = qgis_gui
         _qgis_mocks_installed = True
+
+    for module_name, symbol_names in _QGIS_IMPORT_SYMBOLS.items():
+        module = sys.modules[module_name]
+        if not isinstance(module, MagicMock):
+            continue
+        for symbol_name in symbol_names:
+            try:
+                getattr(module, symbol_name)
+            except AttributeError:
+                setattr(
+                    module,
+                    symbol_name,
+                    MagicMock(name=f"{module_name}.{symbol_name}"),
+                )
 
 
 def qgis_mocks_installed():

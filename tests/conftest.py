@@ -7,6 +7,11 @@ from tests.fixtures_qgis_mocks import install_qgis_mocks
 install_qgis_mocks()
 
 
+@pytest.fixture(autouse=True)
+def ensure_qgis_mocks():
+    install_qgis_mocks()
+
+
 @pytest.fixture
 def plugin():
     from Delft3DFileManager.Delft3DFileManager import Delft3DFileManager

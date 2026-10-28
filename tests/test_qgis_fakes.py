@@ -4,6 +4,7 @@ import sys
 import pytest
 
 import Delft3DFileManager.one_d_results_dialog as one_d_dialog_module
+from tests.fixtures_qgis_mocks import install_qgis_mocks
 from tests.fixtures_qgis_fakes import (
     FakeAction,
     FakeComboBox,
@@ -16,6 +17,22 @@ from tests.fixtures_qgis_fakes import (
     FakeQgsProject,
     FakeVectorLayer,
 )
+
+
+def test_qgis_mock_installer_restores_required_import_symbols(monkeypatch):
+    symbols = [
+        (sys.modules["qgis.core"], "QgsProject"),
+        (sys.modules["qgis.core"], "QgsMeshDatasetGroupMetadata"),
+        (sys.modules["qgis.PyQt.QtWidgets"], "QDialog"),
+    ]
+    for module, name in symbols:
+        monkeypatch.setattr(module, name, getattr(module, name))
+        delattr(module, name)
+
+    install_qgis_mocks()
+
+    for module, name in symbols:
+        assert getattr(module, name) is not None
 
 
 def test_action_menu_and_combo_box_fakes_are_strict():
