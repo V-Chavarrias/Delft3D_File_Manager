@@ -138,6 +138,73 @@ def test_plot_reads_values_updates_layers_and_refreshes_canvas():
     assert "Plotted Velocity" in viewer.dialog.set_message.call_args.args[0]
 
 
+def test_load_file_removes_previous_viewer_layers_after_new_grid_is_ready(monkeypatch):
+    viewer = module.LargeMapViewer(MagicMock())
+    viewer.dialog = MagicMock()
+    viewer.dialog.selected_variable.return_value = None
+    viewer._set_busy = MagicMock()
+    viewer._zoom_to_layers = MagicMock()
+    events = []
+    previous_layer_set = MagicMock()
+    previous_layer_set.dispose.side_effect = lambda remove_layers=False: events.append(
+        ("previous_disposed", remove_layers)
+    )
+    viewer.layer_set = previous_layer_set
+    entry = SimpleNamespace(
+        key="mesh2d_s1",
+        label="Water level",
+        derived=False,
+        has_time=True,
+        extra_dims=[],
+    )
+    grid = SimpleNamespace(face_count=1, node_x=[0.0, 1.0], node_y=[0.0, 1.0])
+
+    class _LayerSet:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def create_layers(self):
+            events.append("created")
+
+        def dispose(self, remove_layers=False):
+            events.append(("disposed", remove_layers))
+
+    monkeypatch.setattr(module.reader, "discover_partitions", lambda _path: ["map.nc"])
+    monkeypatch.setattr(module.reader, "read_partition_grid", lambda _path: grid)
+    monkeypatch.setattr(module.reader, "list_variables", lambda *_args: [entry])
+    monkeypatch.setattr(module.reader, "read_times", lambda _path: ([0.0], ["t0"]))
+    monkeypatch.setattr(module.reader, "read_crs_info", lambda _path: (None, None))
+    monkeypatch.setattr(module.reader, "model_base_name", lambda _path: "new_map")
+    monkeypatch.setattr(
+        module,
+        "crs_from_info",
+        lambda *_args: SimpleNamespace(authid=lambda: ""),
+    )
+    monkeypatch.setattr(module, "LargeMapLayerSet", _LayerSet)
+
+    assert viewer.load_file("map.nc") is True
+    assert events == ["created", ("previous_disposed", True)]
+    previous_layer_set.dispose.assert_called_once_with(remove_layers=True)
+    assert viewer.layer_set is not previous_layer_set
+
+
+def test_load_file_keeps_previous_viewer_layers_when_grid_read_fails(monkeypatch):
+    viewer = module.LargeMapViewer(MagicMock())
+    viewer.dialog = MagicMock()
+    viewer._set_busy = MagicMock()
+    previous_layer_set = MagicMock()
+    viewer.layer_set = previous_layer_set
+    monkeypatch.setattr(module.reader, "discover_partitions", lambda _path: ["map.nc"])
+    monkeypatch.setattr(
+        module.reader,
+        "read_partition_grid",
+        MagicMock(side_effect=OSError("network unavailable")),
+    )
+
+    assert viewer.load_file("map.nc") is False
+    previous_layer_set.dispose.assert_not_called()
+
+
 def test_point_series_reads_all_times_and_opens_separate_chart(monkeypatch):
     from Delft3DFileManager import mesh_profile_sampler
 

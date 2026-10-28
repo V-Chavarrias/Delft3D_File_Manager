@@ -170,6 +170,7 @@ class LargeMapViewer:
         dialog = self._ensure_dialog()
         progress = self._progress("Loading MAP grid")
         self._set_busy(True)
+        layer_set = None
         try:
             paths = reader.discover_partitions(path)
             grids = []
@@ -187,13 +188,12 @@ class LargeMapViewer:
             crs = crs_from_info(*reader.read_crs_info(paths[0]))
 
             self._update_progress(progress, 75, "Building mesh layers...")
-            if self.layer_set is not None:
-                self.layer_set.dispose(remove_layers=False)
-                self.layer_set = None
             base = reader.model_base_name(path)
             layer_set = LargeMapLayerSet(grids, self._group_name(base), crs=crs, layer_name=base)
             layer_set.create_layers()
 
+            if self.layer_set is not None:
+                self.layer_set.dispose(remove_layers=True)
             self.paths = paths
             self.grids = grids
             self.entries = {entry.key: entry for entry in entries}
@@ -204,6 +204,8 @@ class LargeMapViewer:
             self._last_plotted_key = None
             self._zoom_to_layers()
         except Exception as error:  # noqa: BLE001 - reported in the window
+            if layer_set is not None:
+                layer_set.dispose(remove_layers=True)
             dialog.set_message(f"Could not load {os.path.basename(str(path))}: {error}")
             return False
         finally:

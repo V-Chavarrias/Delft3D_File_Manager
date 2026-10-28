@@ -36,7 +36,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Visualizes HIS station and cross-section timeseries in a dedicated explorer with variable selection and New Plot/Add To Plot modes.
 - Visualizes time-dependent mesh1d node and edge results in point and shortest-path track modes, including derived Froude values.
 - Draws scalar dataset slices across 2D mesh edges for imported mesh results and plots point time series from temporal node/face datasets.
-- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction; extracts all-time point series at selected map locations.
+- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction; replaces the previous viewer layers when a new MAP file is loaded; extracts all-time point series at selected map locations.
 - Computes a time-dependent node streamfunction from `q1` discharge.
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
