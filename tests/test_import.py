@@ -13,7 +13,12 @@ from Delft3DFileManager.Delft3DFileManager import (
     _mesh_property_should_compute_connectivity,
     _mesh_source_path,
 )
-from Delft3DFileManager.large_map_reader import ExtraDimension, POINT, VariableEntry
+from Delft3DFileManager.large_map_reader import (
+    ExtraDimension,
+    LINK,
+    POINT,
+    VariableEntry,
+)
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
@@ -445,8 +450,16 @@ def test_load_restart_file_creates_grouped_point_layer(plugin, monkeypatch):
     )
     entry = VariableEntry("s1", "Water level", POINT, True)
     monkeypatch.setattr(reader, "discover_partitions", lambda _path: ["restart_0000_rst.nc"])
-    monkeypatch.setattr(reader, "read_partition_grid", lambda _path: grid)
-    monkeypatch.setattr(reader, "list_variables", lambda *_args: [entry])
+    monkeypatch.setattr(
+        reader,
+        "read_partition_grid",
+        lambda _path, owner_filter=True: grid,
+    )
+    monkeypatch.setattr(
+        reader,
+        "list_variables",
+        lambda *_args, **_kwargs: [entry],
+    )
     monkeypatch.setattr(reader, "read_times", lambda _path: ([0.0], ["t0"]))
     monkeypatch.setattr(reader, "read_crs_info", lambda _path: (None, None))
     monkeypatch.setattr(reader, "model_base_name", lambda _path: "restart")
@@ -466,6 +479,124 @@ def test_load_restart_file_creates_grouped_point_layer(plugin, monkeypatch):
         "restart_0000_rst.nc",
     )
     plugin.iface.messageBar().pushSuccess.assert_called_once()
+
+
+def test_load_restart_file_creates_center_and_link_layers(plugin, monkeypatch):
+    from Delft3DFileManager import large_map_reader as reader
+
+    grid = SimpleNamespace(
+        point_mode=True,
+        partition_id=0,
+        node_x=[10.0, 20.0],
+        node_y=[30.0, 40.0],
+        face_index=[4, 9],
+    )
+    link_grid = SimpleNamespace(
+        edge_index=[2],
+        face_a=[0],
+        face_b=[1],
+        node_a=[7],
+        node_b=[8],
+        edge_x=[15.0],
+        edge_y=[35.0],
+    )
+    center_entry = VariableEntry("s1", "Water level", POINT, True)
+    link_entry = VariableEntry("q1", "Discharge", LINK, True)
+    monkeypatch.setattr(reader, "discover_partitions", lambda _path: ["restart_0000_rst.nc"])
+    monkeypatch.setattr(
+        reader,
+        "read_partition_grid",
+        lambda _path, owner_filter=True: grid,
+    )
+    monkeypatch.setattr(
+        reader,
+        "read_restart_link_grid",
+        lambda _path, owner_filter=True: link_grid,
+    )
+    monkeypatch.setattr(
+        reader,
+        "list_variables",
+        lambda *_args, **_kwargs: [center_entry, link_entry],
+    )
+    monkeypatch.setattr(reader, "read_times", lambda _path: ([0.0], ["t0"]))
+    monkeypatch.setattr(reader, "read_crs_info", lambda _path: (None, None))
+    monkeypatch.setattr(reader, "model_base_name", lambda _path: "restart")
+    monkeypatch.setattr(reader, "read_slice", lambda *_args: [1.5, 2.5])
+    monkeypatch.setattr(reader, "read_link_slice", lambda *_args: [8.5])
+    monkeypatch.setattr(plugin, "_create_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_update_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_close_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_clear_status_message", lambda: None)
+    monkeypatch.setattr(plugin, "_unique_group_name", lambda name: name)
+
+    loaded = plugin.load_restart_file("/fake/restart_0000_rst.nc")
+
+    assert len(loaded) == 2
+    loaded[0].setCustomProperty.assert_any_call(
+        "delft3d_restart_location",
+        "cell_center",
+    )
+    loaded[1].setCustomProperty.assert_any_call(
+        "delft3d_restart_location",
+        "flow_link",
+    )
+
+
+def test_restart_selected_partition_import_keeps_raw_partition(monkeypatch, plugin):
+    from Delft3DFileManager import large_map_reader as reader
+
+    calls = []
+    selected_path = str(pathlib.Path("restart_0001_rst.nc").resolve())
+    grid = SimpleNamespace(
+        point_mode=True,
+        partition_id=1,
+        node_x=[10.0],
+        node_y=[30.0],
+        face_index=[4],
+    )
+    entry = VariableEntry("s1", "Water level", POINT, True)
+    monkeypatch.setattr(
+        reader,
+        "discover_partitions",
+        lambda _path: ["restart_0000_rst.nc", "restart_0001_rst.nc"],
+    )
+    monkeypatch.setattr(
+        reader,
+        "read_partition_grid",
+        lambda path, owner_filter=True: (
+            calls.append(("center", path, owner_filter)) or grid
+        ),
+    )
+    monkeypatch.setattr(
+        reader,
+        "read_restart_link_grid",
+        lambda path, owner_filter=True: (
+            calls.append(("link", path, owner_filter)) or None
+        ),
+    )
+    monkeypatch.setattr(
+        reader,
+        "list_variables",
+        lambda *_args, **_kwargs: [entry],
+    )
+    monkeypatch.setattr(reader, "read_times", lambda _path: ([0.0], ["t0"]))
+    monkeypatch.setattr(reader, "read_crs_info", lambda _path: (None, None))
+    monkeypatch.setattr(reader, "model_base_name", lambda _path: "restart")
+    monkeypatch.setattr(reader, "read_slice", lambda *_args: [1.5])
+    monkeypatch.setattr(plugin, "_prompt_for_restart_partition_scope", lambda _paths: "selected")
+    monkeypatch.setattr(plugin, "_create_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_update_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_close_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_clear_status_message", lambda: None)
+    monkeypatch.setattr(plugin, "_unique_group_name", lambda name: name)
+
+    loaded = plugin.load_restart_file(selected_path)
+
+    assert len(loaded) == 1
+    assert calls == [
+        ("center", selected_path, False),
+        ("link", selected_path, False),
+    ]
 
 
 def test_load_netcdf_file_routes_mesh_when_not_his(plugin):

@@ -142,8 +142,50 @@ def _write_partition(path, part, local_faces, owner, reverse_edges=False):
 
 def _write_restart(path, part):
     point_count = 4
+    faces = np.asarray(
+        [
+            [0, 1, 4, 3],
+            [1, 2, 5, 4],
+            [3, 4, 7, 6],
+            [4, 5, 8, 7],
+        ],
+        dtype=np.int32,
+    )
+    flow_links = np.asarray(
+        [
+            [0, 1],
+            [0, 2],
+            [1, 3],
+            [2, 3],
+        ],
+        dtype=np.int32,
+    )
+    net_links = np.asarray(
+        [
+            [0, 1],
+            [1, 2],
+            [2, 5],
+            [5, 8],
+            [8, 7],
+            [7, 6],
+            [6, 3],
+            [3, 0],
+            [1, 4],
+            [4, 3],
+            [2, 5],
+            [5, 4],
+        ],
+        dtype=np.int32,
+    )
     with netCDF4.Dataset(path, "w") as ds:
         ds.createDimension("nFlowElem", point_count)
+        ds.createDimension("nNetElem", point_count)
+        ds.createDimension("nNetElemMaxNode", 4)
+        ds.createDimension("nNetNode", 9)
+        ds.createDimension("nNetLink", len(net_links))
+        ds.createDimension("nNetLinkPts", 2)
+        ds.createDimension("nFlowLink", len(flow_links))
+        ds.createDimension("nFlowLinkPts", 2)
         ds.createDimension("time", None)
         ds.createDimension("nBedLayers", 2)
         ds.createDimension("nSedTot", 2)
@@ -154,12 +196,46 @@ def _write_restart(path, part):
 
         x = ds.createVariable("FlowElem_xzw", "f8", ("nFlowElem",))
         y = ds.createVariable("FlowElem_yzw", "f8", ("nFlowElem",))
-        x[:] = np.arange(point_count, dtype=float)
-        y[:] = np.arange(point_count, dtype=float) + 10.0
+        x[:] = [0.0, 1.0, 0.0, 1.0]
+        y[:] = [0.0, 0.0, 1.0, 1.0]
         ds.createVariable("FlowElem_xcc", "f8", ("nFlowElem",))[:] = x[:]
         ds.createVariable("FlowElem_ycc", "f8", ("nFlowElem",))[:] = y[:]
         ds.createVariable("FlowElemDomain", "i4", ("nFlowElem",))[:] = [0, 0, 1, 1]
         ds.createVariable("FlowElemGlobalNr", "i4", ("nFlowElem",))[:] = [101, 102, 103, 104]
+        net_elem_node = ds.createVariable(
+            "NetElemNode",
+            "i4",
+            ("nNetElem", "nNetElemMaxNode"),
+            fill_value=-999,
+        )
+        net_elem_node.start_index = 1
+        net_elem_node[:] = faces + 1
+        net_link = ds.createVariable(
+            "NetLink",
+            "i4",
+            ("nNetLink", "nNetLinkPts"),
+        )
+        net_link.start_index = 1
+        net_link[:] = net_links + 1
+        flow_link = ds.createVariable(
+            "FlowLink",
+            "i4",
+            ("nFlowLink", "nFlowLinkPts"),
+        )
+        flow_link.start_index = 1
+        flow_link[:] = flow_links + 1
+        ds.createVariable("FlowLink_xu", "f8", ("nFlowLink",))[:] = [
+            0.5,
+            0.0,
+            1.0,
+            0.5,
+        ]
+        ds.createVariable("FlowLink_yu", "f8", ("nFlowLink",))[:] = [
+            0.0,
+            0.5,
+            0.5,
+            1.0,
+        ]
 
         def write_cell_variable(name, values, units="m"):
             variable = ds.createVariable(
@@ -175,13 +251,22 @@ def _write_restart(path, part):
         write_cell_variable("ucx", [[0.3, 0.4, 0.5, 0.6], [1.3, 1.4, 1.5, 1.6]], "m s-1")
         write_cell_variable("ucy", [[0.4, 0.5, 0.6, 0.7], [1.4, 1.5, 1.6, 1.7]], "m s-1")
         write_cell_variable("mor_bl", [[5.0, 6.0, 7.0, 8.0], [5.5, 6.5, 7.5, 8.5]])
+        def write_link_variable(name, values, units="m3 s-1"):
+            variable = ds.createVariable(
+                name,
+                "f8",
+                ("time", "nFlowLink"),
+            )
+            variable.units = units
+            variable[:] = values
+
+        write_link_variable("q1", [[1.0, 2.0, 3.0, 4.0], [11.0, 12.0, 13.0, 14.0]])
         lyrfrac = ds.createVariable(
             "lyrfrac",
             "f8",
             ("time", "nFlowElem", "nBedLayers", "nSedTot"),
         )
         lyrfrac[:] = np.arange(2 * point_count * 2 * 2, dtype=float).reshape(2, point_count, 2, 2)
-        ds.createVariable("NetElemNode", "i4", ("nFlowElem", "nBedLayers"))[:] = 1
 
 
 @pytest.fixture
@@ -464,6 +549,12 @@ def test_restart_partitions_use_owned_flow_element_centers(tmp_path):
     assert entries["lyrfrac"].extra_dims[0].name == "nBedLayers"
     assert entries["lyrfrac"].extra_dims[1].name == "nSedTot"
     assert reader.VELOCITY_MAGNITUDE_KEY in entries
+    link_entries = {
+        entry.key: entry
+        for entry in reader.list_variables(path, include_links=True)
+        if entry.location == reader.LINK
+    }
+    assert link_entries["q1"].location == reader.LINK
     for excluded in (
         "FlowElem_xzw",
         "FlowElem_yzw",
@@ -487,5 +578,14 @@ def test_restart_partitions_use_owned_flow_element_centers(tmp_path):
         reader.read_point_series(grids[0], entries["s1"], 0),
         [1.0, 11.0],
     )
+    link_grid = reader.read_restart_link_grid(paths[0])
+    assert link_grid.edge_count == 3
+    assert link_grid.edge_index.tolist() == [0, 1, 2]
+    np.testing.assert_allclose(
+        reader.read_link_slice(link_grid, link_entries["q1"], 1),
+        [11.0, 12.0, 13.0],
+    )
+    raw_link_grid = reader.read_restart_link_grid(paths[0], owner_filter=False)
+    assert raw_link_grid.edge_count == 4
     assert reader.is_restart_file(path)
     assert not reader.is_restart_file(tmp_path / "missing.nc")

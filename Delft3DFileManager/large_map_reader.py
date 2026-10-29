@@ -21,6 +21,7 @@ from .stream_function import compute_stream_function
 FACE = "face"
 NODE = "node"
 POINT = "point"
+LINK = "link"
 
 FROUDE_KEY = "derived:froude_number"
 VELOCITY_MAGNITUDE_KEY = "derived:velocity_magnitude"
@@ -72,6 +73,26 @@ class PartitionGrid:
     @property
     def face_count(self):
         return int(len(self.face_index))
+
+
+@dataclass
+class RestartLinkGrid:
+    """Flow-link locations and topology for one restart partition."""
+
+    path: str
+    partition_id: object
+    edge_index: np.ndarray
+    face_a: np.ndarray
+    face_b: np.ndarray
+    node_a: np.ndarray
+    node_b: np.ndarray
+    edge_x: np.ndarray
+    edge_y: np.ndarray
+    ghost_filtered: bool
+
+    @property
+    def edge_count(self):
+        return int(len(self.edge_index))
 
 
 def _netcdf():
@@ -150,6 +171,9 @@ class _Layout:
     time_var: str
     excluded: set
     geometry: str = "mesh"
+    edge_connectivity: str = None
+    edge_x: str = None
+    edge_y: str = None
 
 
 def _restart_layout(dataset):
@@ -176,6 +200,9 @@ def _restart_layout(dataset):
         (name for name in ("nFlowLink", "nNetLink") if name in dataset.dimensions),
         None,
     )
+    edge_connectivity = _find_variable(dataset, "flowlink")
+    edge_x = _find_variable(dataset, "flowlink_xu")
+    edge_y = _find_variable(dataset, "flowlink_yu")
     excluded = {node_x, node_y}
     for suffix in (
         "flowelem_xzw",
@@ -210,6 +237,9 @@ def _restart_layout(dataset):
         time_var=time_var,
         excluded=excluded,
         geometry="points",
+        edge_connectivity=edge_connectivity,
+        edge_x=edge_x,
+        edge_y=edge_y,
     )
 
 
@@ -302,7 +332,7 @@ def _domain_values(dataset, face_dim):
     return np.ma.filled(np.ma.asarray(dataset.variables[name][:]), -1).astype(np.int64)
 
 
-def read_partition_grid(path):
+def read_partition_grid(path, owner_filter=True):
     """Read one partition's owned mesh faces or restart flow-element centers."""
     netcdf = _netcdf()
     path = os.path.abspath(str(path))
@@ -312,7 +342,11 @@ def read_partition_grid(path):
         if layout.geometry == "points":
             point_x = np.asarray(np.ma.filled(dataset.variables[layout.node_x][:], np.nan), dtype=float)
             point_y = np.asarray(np.ma.filled(dataset.variables[layout.node_y][:], np.nan), dtype=float)
-            domains = _domain_values(dataset, layout.face_dim) if part is not None else None
+            domains = (
+                _domain_values(dataset, layout.face_dim)
+                if part is not None and owner_filter
+                else None
+            )
             if domains is not None:
                 face_index = np.nonzero(domains == part)[0]
             else:
@@ -360,6 +394,105 @@ def read_partition_grid(path):
         faces=compact,
         face_index=face_index,
         node_index=node_index,
+        ghost_filtered=domains is not None,
+    )
+
+
+def read_restart_link_grid(path, owner_filter=True):
+    """Read restart flow-link locations and their adjacent-cell topology."""
+    netcdf = _netcdf()
+    path = os.path.abspath(str(path))
+    part = partition_id(path)
+    with netcdf.Dataset(path, "r") as dataset:
+        layout = _layout(dataset)
+        if (
+            layout.geometry != "points"
+            or not layout.edge_connectivity
+            or not layout.edge_x
+            or not layout.edge_y
+        ):
+            raise LargeMapError(
+                f"{os.path.basename(path)} has no restart flow-link topology"
+            )
+        edge_variable = dataset.variables[layout.edge_connectivity]
+        edges = _connectivity(edge_variable, edge_variable.dimensions[0])
+        if edges.shape[1] != 2:
+            raise LargeMapError(
+                f"{os.path.basename(path)} has invalid flow-link connectivity"
+            )
+        edge_x = np.asarray(
+            np.ma.filled(dataset.variables[layout.edge_x][:], np.nan),
+            dtype=float,
+        )
+        edge_y = np.asarray(
+            np.ma.filled(dataset.variables[layout.edge_y][:], np.nan),
+            dtype=float,
+        )
+        if len(edge_x) != len(edges) or len(edge_y) != len(edges):
+            raise LargeMapError(
+                f"{os.path.basename(path)} has mismatched flow-link coordinates"
+            )
+        net_elem_name = _find_variable(dataset, "netelemnode")
+        if not net_elem_name:
+            raise LargeMapError(
+                f"{os.path.basename(path)} has no NetElemNode connectivity"
+            )
+        net_elem_variable = dataset.variables[net_elem_name]
+        net_elements = _connectivity(
+            net_elem_variable,
+            net_elem_variable.dimensions[0],
+        )
+        face_count = len(dataset.dimensions[layout.face_dim])
+        if len(net_elements) < face_count:
+            raise LargeMapError(
+                f"{os.path.basename(path)} has fewer NetElemNode rows than flow elements"
+            )
+        domains = (
+            _domain_values(dataset, layout.face_dim)
+            if part is not None and owner_filter
+            else None
+        )
+
+        edge_indices = []
+        face_a = []
+        face_b = []
+        node_a = []
+        node_b = []
+        for edge_index, (first_face, second_face) in enumerate(edges):
+            first_face = int(first_face)
+            second_face = int(second_face)
+            if not (
+                0 <= first_face < len(net_elements)
+                and 0 <= second_face < len(net_elements)
+            ):
+                continue
+            shared = sorted(
+                set(net_elements[first_face][net_elements[first_face] >= 0])
+                & set(net_elements[second_face][net_elements[second_face] >= 0])
+            )
+            if domains is not None:
+                first_domain = int(domains[first_face])
+                second_domain = int(domains[second_face])
+                if min(first_domain, second_domain) != part:
+                    continue
+            if not (np.isfinite(edge_x[edge_index]) and np.isfinite(edge_y[edge_index])):
+                continue
+            edge_indices.append(edge_index)
+            face_a.append(first_face)
+            face_b.append(second_face)
+            node_a.append(int(shared[0]) if len(shared) == 2 else -1)
+            node_b.append(int(shared[1]) if len(shared) == 2 else -1)
+
+    return RestartLinkGrid(
+        path=path,
+        partition_id=part,
+        edge_index=np.asarray(edge_indices, dtype=np.int64),
+        face_a=np.asarray(face_a, dtype=np.int64),
+        face_b=np.asarray(face_b, dtype=np.int64),
+        node_a=np.asarray(node_a, dtype=np.int64),
+        node_b=np.asarray(node_b, dtype=np.int64),
+        edge_x=edge_x[np.asarray(edge_indices, dtype=np.int64)],
+        edge_y=edge_y[np.asarray(edge_indices, dtype=np.int64)],
         ghost_filtered=domains is not None,
     )
 
@@ -446,8 +579,8 @@ def _plain_2d(dataset, layout, name):
     return set(dataset.variables[name].dimensions) == {layout.time_dim, layout.face_dim}
 
 
-def list_variables(path, sediment_records=None):
-    """Return the plottable face/node variables plus available derived variables."""
+def list_variables(path, sediment_records=None, include_links=False):
+    """Return plottable variables plus available derived variables."""
     netcdf = _netcdf()
     entries = []
     with netcdf.Dataset(str(path), "r") as dataset:
@@ -456,14 +589,18 @@ def list_variables(path, sediment_records=None):
             if name in layout.excluded or variable.dtype.kind not in "fiu":
                 continue
             dims = variable.dimensions
-            spatial = [dim for dim in dims if dim in (layout.face_dim, layout.node_dim)]
+            spatial_dimensions = (layout.face_dim, layout.node_dim)
+            if include_links:
+                spatial_dimensions += (layout.edge_dim,)
+            spatial = [dim for dim in dims if dim in spatial_dimensions and dim is not None]
             if len(spatial) != 1:
                 continue
             if name.lower().endswith(("_bnd", "_x", "_y")) and layout.time_dim not in dims:
                 continue
-            location = POINT if layout.geometry == "points" else (
-                FACE if spatial[0] == layout.face_dim else NODE
-            )
+            if layout.geometry == "points":
+                location = LINK if spatial[0] == layout.edge_dim else POINT
+            else:
+                location = FACE if spatial[0] == layout.face_dim else NODE
             extra = [
                 ExtraDimension(dim, len(dataset.dimensions[dim]), _dimension_labels(dataset, dim, len(dataset.dimensions[dim])))
                 for dim in dims
@@ -593,6 +730,8 @@ def read_slice(grid, entry, time_index=0, extra_indices=None, sediment_records=N
     """Read one plotted slice of ``entry`` for ``grid`` (owned faces / used nodes)."""
     if entry.key == STREAM_FUNCTION_KEY:
         raise LargeMapError("Use StreamFunctionGraph for the streamfunction")
+    if entry.location == LINK:
+        raise LargeMapError("Use read_link_slice for flow-link variables")
     netcdf = _netcdf()
     with netcdf.Dataset(grid.path, "r") as dataset:
         layout = _layout(dataset)
@@ -607,12 +746,45 @@ def read_slice(grid, entry, time_index=0, extra_indices=None, sediment_records=N
     return values[index]
 
 
+def read_link_slice(
+    link_grid,
+    entry,
+    time_index=0,
+    extra_indices=None,
+):
+    """Read one plotted flow-link slice for a restart partition."""
+    if entry.location != LINK:
+        raise LargeMapError("read_link_slice requires a flow-link variable")
+    netcdf = _netcdf()
+    with netcdf.Dataset(link_grid.path, "r") as dataset:
+        layout = _layout(dataset)
+        if not layout.edge_dim:
+            raise LargeMapError(
+                f"{os.path.basename(link_grid.path)} has no flow-link dimension"
+            )
+        if entry.key not in dataset.variables:
+            raise LargeMapError(
+                f"{os.path.basename(link_grid.path)} has no variable '{entry.key}'"
+            )
+        values = _read_hyperslab(
+            dataset,
+            layout,
+            entry.key,
+            time_index,
+            extra_indices,
+            layout.edge_dim,
+        )
+    return values[link_grid.edge_index]
+
+
 def read_point_series(grid, entry, spatial_index, extra_indices=None, sediment_records=None):
     """Read one node/face value for every time without loading spatial slices."""
     if not entry.has_time:
         raise LargeMapError(f"Variable '{entry.label}' has no time dimension")
     if entry.key == STREAM_FUNCTION_KEY:
         raise LargeMapError("Use StreamFunctionGraph for the streamfunction")
+    if entry.location == LINK:
+        raise LargeMapError("Use read_link_slice for flow-link variables")
 
     netcdf = _netcdf()
     with netcdf.Dataset(grid.path, "r") as dataset:

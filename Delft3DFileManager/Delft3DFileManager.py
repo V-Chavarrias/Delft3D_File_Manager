@@ -8600,14 +8600,15 @@ class Delft3DFileManager:
 
         return large_map_reader.is_restart_file(filepath)
 
-    def _restart_import_field_specs(self, entries):
-        """Return unique point-layer field specs for restart variables."""
+    def _restart_import_field_specs(self, entries, location=None):
+        """Return unique field specs for one restart variable location."""
         from . import large_map_reader
 
+        location = location or large_map_reader.POINT
         used_names = {"source_index"}
         specs = []
         for entry in entries:
-            if entry.location != large_map_reader.POINT:
+            if entry.location != location:
                 continue
             index_ranges = [range(dimension.size) for dimension in entry.extra_dims]
             combinations = itertools.product(*index_ranges) if index_ranges else [()]
@@ -8644,8 +8645,56 @@ class Delft3DFileManager:
                 return crs
         return QgsCoordinateReferenceSystem("EPSG:28992")
 
+    def _prompt_for_restart_partition_scope(self, partition_files):
+        """Choose whether regular restart import loads all or one partition."""
+        if len(partition_files or []) <= 1:
+            return "all"
+
+        dialog = QMessageBox(self.iface.mainWindow())
+        icon_question = _qmessagebox_icon_question()
+        if icon_question is not None:
+            dialog.setIcon(icon_question)
+        dialog.setWindowTitle("Partitioned Restart Import")
+        dialog.setText(
+            f"Detected {len(partition_files)} restart partition files.\n\n"
+            "Choose which files to import:"
+        )
+
+        accept_role = _qmessagebox_button_role("AcceptRole")
+        action_role = _qmessagebox_button_role("ActionRole")
+        reject_role = _qmessagebox_button_role("RejectRole")
+        cancel_standard = _qmessagebox_standard_button("Cancel")
+
+        all_role = accept_role or _qmessagebox_button_role("YesRole") or action_role
+        all_button = (
+            dialog.addButton("Load all matching partitions", all_role)
+            if all_role is not None
+            else dialog.addButton("Load all matching partitions")
+        )
+        selected_role = action_role or _qmessagebox_button_role("NoRole") or accept_role
+        selected_button = (
+            dialog.addButton("Load selected partition only", selected_role)
+            if selected_role is not None
+            else dialog.addButton("Load selected partition only")
+        )
+        if cancel_standard is not None:
+            cancel_button = dialog.addButton(cancel_standard)
+        elif reject_role is not None:
+            cancel_button = dialog.addButton("Cancel", reject_role)
+        else:
+            cancel_button = dialog.addButton("Cancel")
+        dialog.setDefaultButton(all_button)
+        _dialog_exec(dialog)
+
+        clicked = dialog.clickedButton()
+        if clicked is cancel_button:
+            return None
+        if clicked is selected_button:
+            return "selected"
+        return "all"
+
     def load_restart_file(self, filepath):
-        """Import restart flow-element values as grouped point layers."""
+        """Import restart centre and flow-link values as grouped point layers."""
         from . import large_map_reader as reader
 
         progress = self._create_progress_dialog(
@@ -8655,28 +8704,61 @@ class Delft3DFileManager:
         project = QgsProject.instance()
         group = None
         try:
-            paths = reader.discover_partitions(filepath)
+            discovered_paths = reader.discover_partitions(filepath)
+            scope = self._prompt_for_restart_partition_scope(discovered_paths)
+            if scope is None:
+                return []
+            owner_filter = scope == "all"
+            paths = (
+                discovered_paths
+                if owner_filter
+                else [os.path.abspath(str(filepath))]
+            )
             grids = []
+            link_grids = []
             for number, path in enumerate(paths):
                 self._update_progress_dialog(
                     progress,
-                    5 + 35 * number / max(len(paths), 1),
-                    f"Reading restart grid {number + 1}/{len(paths)}: {os.path.basename(path)}",
+                    5 + 30 * number / max(len(paths), 1),
+                    f"Reading restart locations {number + 1}/{len(paths)}: {os.path.basename(path)}",
                 )
-                grid = reader.read_partition_grid(path)
+                grid = reader.read_partition_grid(path, owner_filter=owner_filter)
                 if not grid.point_mode:
                     raise reader.LargeMapError(
                         f"{os.path.basename(path)} is not a classic restart file"
                     )
                 grids.append(grid)
+                try:
+                    link_grids.append(
+                        reader.read_restart_link_grid(
+                            path,
+                            owner_filter=owner_filter,
+                        )
+                    )
+                except (reader.LargeMapError, OSError) as exc:
+                    link_grids.append(None)
+                    self.iface.messageBar().pushWarning(
+                        "Delft3D File Manager",
+                        f"Could not load restart links from {os.path.basename(path)}: {exc}",
+                    )
 
             entries = reader.list_variables(
                 paths[0],
                 getattr(self, "_sediment_records", None),
+                include_links=True,
             )
-            field_specs = self._restart_import_field_specs(entries)
-            if not field_specs:
-                raise reader.LargeMapError("The restart file has no cell-centered variables")
+            center_specs = self._restart_import_field_specs(
+                entries,
+                reader.POINT,
+            )
+            link_specs = self._restart_import_field_specs(
+                entries,
+                reader.LINK,
+            )
+            if not center_specs and not link_specs:
+                raise reader.LargeMapError(
+                    "The restart file has no cell-centered or flow-link variables"
+                )
             _time_values, time_labels = reader.read_times(paths[0])
             epsg, wkt = reader.read_crs_info(paths[0])
             crs = self._restart_crs(epsg, wkt)
@@ -8685,71 +8767,146 @@ class Delft3DFileManager:
             group = project.layerTreeRoot().addGroup(group_name)
             time_label = time_labels[0] if time_labels else "first time step"
 
-            for number, (path, grid) in enumerate(zip(paths, grids)):
+            for number, (path, grid, link_grid) in enumerate(
+                zip(paths, grids, link_grids)
+            ):
                 self._update_progress_dialog(
                     progress,
                     40 + 55 * number / max(len(paths), 1),
-                    f"Reading restart values {number + 1}/{len(paths)}: {os.path.basename(path)}",
+                    f"Reading restart variables {number + 1}/{len(paths)}: {os.path.basename(path)}",
                 )
-                values = [
-                    reader.read_slice(
-                        grid,
-                        entry,
-                        0,
-                        extra_indices,
-                        getattr(self, "_sediment_records", None),
-                    )
-                    for _field_name, entry, extra_indices in field_specs
-                ]
                 partition_id = grid.partition_id
-                layer_name = (
+                layer_prefix = (
                     f"{base_name}_p{int(partition_id):04d}"
                     if partition_id is not None
                     else base_name
                 )
-                layer = QgsVectorLayer("Point", layer_name, "memory")
-                if not layer.isValid():
-                    raise RuntimeError(f"Could not create restart layer {layer_name}")
-                layer.setCrs(crs)
-                provider = layer.dataProvider()
-                fields = [QgsField("source_index", QVariant.Int)]
-                fields.extend(
-                    QgsField(field_name, QVariant.Double)
-                    for field_name, _entry, _extra_indices in field_specs
-                )
-                if not provider.addAttributes(fields):
-                    raise RuntimeError(f"Could not create fields for restart layer {layer_name}")
-                layer.updateFields()
 
-                features = []
-                for local_index, (x_coord, y_coord) in enumerate(
-                    zip(grid.node_x, grid.node_y)
-                ):
-                    attributes = [int(grid.face_index[local_index])]
-                    for series in values:
-                        value = float(series[local_index])
-                        attributes.append(value if math.isfinite(value) else None)
-                    feature = QgsFeature(layer.fields())
-                    feature.setGeometry(
-                        QgsGeometry.fromPointXY(
-                            QgsPointXY(float(x_coord), float(y_coord))
+                if center_specs:
+                    center_values = [
+                        reader.read_slice(
+                            grid,
+                            entry,
+                            0,
+                            extra_indices,
+                            getattr(self, "_sediment_records", None),
                         )
+                        for _field_name, entry, extra_indices in center_specs
+                    ]
+                    center_name = f"{layer_prefix}_centers"
+                    layer = QgsVectorLayer("Point", center_name, "memory")
+                    if not layer.isValid():
+                        raise RuntimeError(
+                            f"Could not create restart layer {center_name}"
+                        )
+                    layer.setCrs(crs)
+                    provider = layer.dataProvider()
+                    fields = [QgsField("source_index", QVariant.Int)]
+                    fields.extend(
+                        QgsField(field_name, QVariant.Double)
+                        for field_name, _entry, _extra_indices in center_specs
                     )
-                    feature.setAttributes(attributes)
-                    features.append(feature)
-                provider.addFeatures(features)
-                layer.updateExtents()
-                layer.setCustomProperty("delft3d_restart_source", path)
-                layer.setCustomProperty("delft3d_restart_time", time_label)
-                project.addMapLayer(layer, False)
-                group.addLayer(layer)
-                loaded_layers.append(layer)
+                    if not provider.addAttributes(fields):
+                        raise RuntimeError(
+                            f"Could not create fields for restart layer {center_name}"
+                        )
+                    layer.updateFields()
+                    features = []
+                    for local_index, (x_coord, y_coord) in enumerate(
+                        zip(grid.node_x, grid.node_y)
+                    ):
+                        attributes = [int(grid.face_index[local_index])]
+                        for series in center_values:
+                            value = float(series[local_index])
+                            attributes.append(value if math.isfinite(value) else None)
+                        feature = QgsFeature(layer.fields())
+                        feature.setGeometry(
+                            QgsGeometry.fromPointXY(
+                                QgsPointXY(float(x_coord), float(y_coord))
+                            )
+                        )
+                        feature.setAttributes(attributes)
+                        features.append(feature)
+                    provider.addFeatures(features)
+                    layer.updateExtents()
+                    layer.setCustomProperty("delft3d_restart_source", path)
+                    layer.setCustomProperty("delft3d_restart_time", time_label)
+                    layer.setCustomProperty("delft3d_restart_location", "cell_center")
+                    project.addMapLayer(layer, False)
+                    group.addLayer(layer)
+                    loaded_layers.append(layer)
+
+                if link_grid is not None and link_specs:
+                    link_values = [
+                        reader.read_link_slice(
+                            link_grid,
+                            entry,
+                            0,
+                            extra_indices,
+                        )
+                        for _field_name, entry, extra_indices in link_specs
+                    ]
+                    link_name = f"{layer_prefix}_links"
+                    layer = QgsVectorLayer("Point", link_name, "memory")
+                    if not layer.isValid():
+                        raise RuntimeError(
+                            f"Could not create restart link layer {link_name}"
+                        )
+                    layer.setCrs(crs)
+                    provider = layer.dataProvider()
+                    fields = [
+                        QgsField("source_index", QVariant.Int),
+                        QgsField("flow_face_a", QVariant.Int),
+                        QgsField("flow_face_b", QVariant.Int),
+                        QgsField("net_node_a", QVariant.Int),
+                        QgsField("net_node_b", QVariant.Int),
+                    ]
+                    fields.extend(
+                        QgsField(field_name, QVariant.Double)
+                        for field_name, _entry, _extra_indices in link_specs
+                    )
+                    if not provider.addAttributes(fields):
+                        raise RuntimeError(
+                            f"Could not create fields for restart link layer {link_name}"
+                        )
+                    layer.updateFields()
+                    features = []
+                    for local_index, (x_coord, y_coord) in enumerate(
+                        zip(link_grid.edge_x, link_grid.edge_y)
+                    ):
+                        attributes = [
+                            int(link_grid.edge_index[local_index]),
+                            int(link_grid.face_a[local_index]),
+                            int(link_grid.face_b[local_index]),
+                            int(link_grid.node_a[local_index]),
+                            int(link_grid.node_b[local_index]),
+                        ]
+                        for series in link_values:
+                            value = float(series[local_index])
+                            attributes.append(value if math.isfinite(value) else None)
+                        feature = QgsFeature(layer.fields())
+                        feature.setGeometry(
+                            QgsGeometry.fromPointXY(
+                                QgsPointXY(float(x_coord), float(y_coord))
+                            )
+                        )
+                        feature.setAttributes(attributes)
+                        features.append(feature)
+                    provider.addFeatures(features)
+                    layer.updateExtents()
+                    layer.setCustomProperty("delft3d_restart_source", path)
+                    layer.setCustomProperty("delft3d_restart_time", time_label)
+                    layer.setCustomProperty("delft3d_restart_location", "flow_link")
+                    project.addMapLayer(layer, False)
+                    group.addLayer(layer)
+                    loaded_layers.append(layer)
 
             self._update_progress_dialog(progress, 100, "Restart import complete")
             self.iface.messageBar().pushSuccess(
                 "Delft3D File Manager",
                 f"Loaded restart data from {os.path.basename(str(filepath))}: "
-                f"{len(loaded_layers)} point layer(s), {len(field_specs)} variable field(s), "
+                f"{len(loaded_layers)} layer(s), {len(center_specs)} cell-centre field(s), "
+                f"{len(link_specs)} flow-link field(s), "
                 f"{time_label}.",
             )
             return loaded_layers

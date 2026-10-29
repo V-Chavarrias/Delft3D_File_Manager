@@ -27,7 +27,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked meshes, forcing, cross-sections, structures, 1D fields, and roughness data.
 - Imports external-forcing link files (`.ext`) as spatial boundary/lateral features and boundary-condition forcing files (`.bc`) as timeseries records linked to those features.
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
-- Imports classic Delft3D FM restart NetCDF files as grouped flow-element-center point layers, including partitioned restart output with owner-cell filtering.
+- Imports classic Delft3D FM restart NetCDF files as grouped flow-element-center and flow-link point layers, including partitioned restart output with selectable all-partition or selected-partition loading.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
 - Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
 - Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change for side-car flattening. Substrate patch data is read from the source MAP output on demand.
@@ -588,17 +588,22 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 
 Classic D-Flow FM restart files can be selected from the regular **Import**
 action. The importer detects their `nFlowElem` cell-center layout and creates
-one point layer per partition inside a `<name> (Restart)` layer group. For
-partitioned files such as `<name>_0000_<timestamp>_rst.nc`, all matching
-siblings are discovered automatically and `FlowElemDomain` keeps only the
-owner cells in each layer.
+separate center and flow-link layers inside a `<name> (Restart)` layer group.
+For partitioned files such as `<name>_0000_<timestamp>_rst.nc`, matching
+siblings are discovered automatically and Import asks whether to load all
+partitions or only the selected file. Loading all partitions keeps only
+`FlowElemDomain` owner cells/links to avoid duplicate coverage; loading only
+the selected partition preserves its raw ghost overlap.
 
-The point layers contain the first restart time step as numeric attributes.
+The center layer (`*_centers`) contains flow-element points and the first
+restart time step as numeric attributes. The link layer (`*_links`) contains
+points at `FlowLink_xu`/`FlowLink_yu`, with adjacent flow-element IDs, shared
+`NetElemNode` IDs where available, and the first-time-step flow-link variables.
 Variables with bed-layer or sediment-fraction dimensions are flattened into
 separate fields with dimension labels in their names. A `source_index` field
-stores the source flow-element index, and the original restart path and time
-are stored as layer properties. Restart files do not contain UGRID node
-coordinates, so regular Import renders their values at flow-element centers;
+stores the source flow-element or flow-link index, and the original restart
+path and time are stored as layer properties. Restart files do not contain
+UGRID node coordinates, so regular Import does not reconstruct a native mesh;
 use **Viewer -> Large MAP Viewer** to select another time or variable
 interactively.
 
