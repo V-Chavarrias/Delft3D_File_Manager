@@ -22,7 +22,7 @@ from qgis.core import (
     QgsMapLayerType, QgsWkbTypes, QgsSpatialIndex,
     QgsCategorizedSymbolRenderer, QgsRendererCategory, QgsSymbol,
     QgsMeshLayer, QgsGraduatedSymbolRenderer, QgsRendererRange,
-    QgsCoordinateTransform, QgsDistanceArea,
+    QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsDistanceArea,
 )
 from qgis.PyQt.QtCore import (
     QDateTime,
@@ -776,7 +776,7 @@ class Delft3DFileManager:
             QIcon(icon_paths["large_map"]), "Large MAP Viewer", self.iface.mainWindow()
         )
         self.large_map_action.setStatusTip(
-            "Plot variables of large (partitioned) MAP files by loading only the selected time/index"
+            "Plot variables of large (partitioned) MAP or restart files by loading only the selected time/index"
         )
         self.large_map_action.triggered.connect(self.open_large_map_viewer)
 
@@ -4507,7 +4507,7 @@ class Delft3DFileManager:
         return True
 
     def open_large_map_viewer(self):
-        """Open/focus the Large MAP Viewer for large (partitioned) MAP files."""
+        """Open/focus the Large MAP Viewer for large MAP or restart files."""
         if self._large_map_viewer is None:
             from .large_map_viewer import LargeMapViewer
 
@@ -8567,13 +8567,15 @@ class Delft3DFileManager:
             pass
 
     def load_netcdf_file(self, filepath):
-        """Route NetCDF files to HIS importer or existing UGRID mesh importer."""
+        """Route NetCDF files to M2D, restart, HIS, or UGRID importers."""
         try:
             from .m2d_cell_vector import is_m2d_cell_vector_file
 
             if is_m2d_cell_vector_file(filepath):
                 self.load_m2d_cell_vector_file(filepath)
                 return
+            if self._is_restart_netcdf_file(filepath):
+                return self.load_restart_file(filepath)
             if self._is_his_netcdf_file(filepath):
                 self.load_fm_his_file(filepath)
                 return
@@ -8587,10 +8589,197 @@ class Delft3DFileManager:
         except Exception as exc:
             self.iface.messageBar().pushWarning(
                 "Delft3D File Manager",
-                f"HIS detection failed, trying UGRID mesh import: {exc}",
+                f"NetCDF type detection failed, trying UGRID mesh import: {exc}",
             )
 
         self.load_ugrid_mesh_file(filepath)
+
+    def _is_restart_netcdf_file(self, filepath):
+        """Return whether a NetCDF file has the classic D-Flow FM restart layout."""
+        from . import large_map_reader
+
+        return large_map_reader.is_restart_file(filepath)
+
+    def _restart_import_field_specs(self, entries):
+        """Return unique point-layer field specs for restart variables."""
+        from . import large_map_reader
+
+        used_names = {"source_index"}
+        specs = []
+        for entry in entries:
+            if entry.location != large_map_reader.POINT:
+                continue
+            index_ranges = [range(dimension.size) for dimension in entry.extra_dims]
+            combinations = itertools.product(*index_ranges) if index_ranges else [()]
+            for extra_indices in combinations:
+                labels = []
+                for dimension, index in zip(entry.extra_dims, extra_indices):
+                    label = dimension.labels[index] if index < len(dimension.labels) else index
+                    label = str(label).split(":", 1)[-1].strip()
+                    labels.append(self._sanitize_netcdf_token(label, f"index_{index}"))
+                base_name = self._sanitize_netcdf_token(entry.key, "value")
+                candidate = base_name
+                if labels:
+                    candidate += "_" + "_".join(labels)
+                candidate = candidate[:180]
+                field_name = candidate
+                suffix = 2
+                while field_name in used_names:
+                    field_name = f"{candidate[:175]}_{suffix}"
+                    suffix += 1
+                used_names.add(field_name)
+                specs.append((field_name, entry, tuple(extra_indices)))
+        return specs
+
+    @staticmethod
+    def _restart_crs(epsg, wkt):
+        """Build the CRS for a regular restart point-layer import."""
+        if epsg:
+            crs = QgsCoordinateReferenceSystem(f"EPSG:{epsg}")
+            if crs.isValid():
+                return crs
+        if wkt:
+            crs = QgsCoordinateReferenceSystem.fromWkt(wkt)
+            if crs.isValid():
+                return crs
+        return QgsCoordinateReferenceSystem("EPSG:28992")
+
+    def load_restart_file(self, filepath):
+        """Import restart flow-element values as grouped point layers."""
+        from . import large_map_reader as reader
+
+        progress = self._create_progress_dialog(
+            f"Loading {os.path.basename(str(filepath))}"
+        )
+        loaded_layers = []
+        project = QgsProject.instance()
+        group = None
+        try:
+            paths = reader.discover_partitions(filepath)
+            grids = []
+            for number, path in enumerate(paths):
+                self._update_progress_dialog(
+                    progress,
+                    5 + 35 * number / max(len(paths), 1),
+                    f"Reading restart grid {number + 1}/{len(paths)}: {os.path.basename(path)}",
+                )
+                grid = reader.read_partition_grid(path)
+                if not grid.point_mode:
+                    raise reader.LargeMapError(
+                        f"{os.path.basename(path)} is not a classic restart file"
+                    )
+                grids.append(grid)
+
+            entries = reader.list_variables(
+                paths[0],
+                getattr(self, "_sediment_records", None),
+            )
+            field_specs = self._restart_import_field_specs(entries)
+            if not field_specs:
+                raise reader.LargeMapError("The restart file has no cell-centered variables")
+            _time_values, time_labels = reader.read_times(paths[0])
+            epsg, wkt = reader.read_crs_info(paths[0])
+            crs = self._restart_crs(epsg, wkt)
+            base_name = reader.model_base_name(filepath)
+            group_name = self._unique_group_name(f"{base_name} (Restart)")
+            group = project.layerTreeRoot().addGroup(group_name)
+            time_label = time_labels[0] if time_labels else "first time step"
+
+            for number, (path, grid) in enumerate(zip(paths, grids)):
+                self._update_progress_dialog(
+                    progress,
+                    40 + 55 * number / max(len(paths), 1),
+                    f"Reading restart values {number + 1}/{len(paths)}: {os.path.basename(path)}",
+                )
+                values = [
+                    reader.read_slice(
+                        grid,
+                        entry,
+                        0,
+                        extra_indices,
+                        getattr(self, "_sediment_records", None),
+                    )
+                    for _field_name, entry, extra_indices in field_specs
+                ]
+                partition_id = grid.partition_id
+                layer_name = (
+                    f"{base_name}_p{int(partition_id):04d}"
+                    if partition_id is not None
+                    else base_name
+                )
+                layer = QgsVectorLayer("Point", layer_name, "memory")
+                if not layer.isValid():
+                    raise RuntimeError(f"Could not create restart layer {layer_name}")
+                layer.setCrs(crs)
+                provider = layer.dataProvider()
+                fields = [QgsField("source_index", QVariant.Int)]
+                fields.extend(
+                    QgsField(field_name, QVariant.Double)
+                    for field_name, _entry, _extra_indices in field_specs
+                )
+                if not provider.addAttributes(fields):
+                    raise RuntimeError(f"Could not create fields for restart layer {layer_name}")
+                layer.updateFields()
+
+                features = []
+                for local_index, (x_coord, y_coord) in enumerate(
+                    zip(grid.node_x, grid.node_y)
+                ):
+                    attributes = [int(grid.face_index[local_index])]
+                    for series in values:
+                        value = float(series[local_index])
+                        attributes.append(value if math.isfinite(value) else None)
+                    feature = QgsFeature(layer.fields())
+                    feature.setGeometry(
+                        QgsGeometry.fromPointXY(
+                            QgsPointXY(float(x_coord), float(y_coord))
+                        )
+                    )
+                    feature.setAttributes(attributes)
+                    features.append(feature)
+                provider.addFeatures(features)
+                layer.updateExtents()
+                layer.setCustomProperty("delft3d_restart_source", path)
+                layer.setCustomProperty("delft3d_restart_time", time_label)
+                project.addMapLayer(layer, False)
+                group.addLayer(layer)
+                loaded_layers.append(layer)
+
+            self._update_progress_dialog(progress, 100, "Restart import complete")
+            self.iface.messageBar().pushSuccess(
+                "Delft3D File Manager",
+                f"Loaded restart data from {os.path.basename(str(filepath))}: "
+                f"{len(loaded_layers)} point layer(s), {len(field_specs)} variable field(s), "
+                f"{time_label}.",
+            )
+            return loaded_layers
+        except ModuleNotFoundError:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Delft3D File Manager",
+                "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS.",
+            )
+        except (
+            reader.LargeMapError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+        ) as exc:
+            for layer in loaded_layers:
+                try:
+                    project.removeMapLayer(layer.id())
+                except (AttributeError, RuntimeError):
+                    pass
+            self.iface.messageBar().pushWarning(
+                "Delft3D File Manager",
+                f"Could not import restart file {os.path.basename(str(filepath))}: {exc}",
+            )
+        finally:
+            self._close_progress_dialog(progress)
+            self._clear_status_message()
+        return []
 
     def load_m2d_cell_vector_file(self, filepath):
         """Render a per-face M2D value array on the active 2D mesh."""

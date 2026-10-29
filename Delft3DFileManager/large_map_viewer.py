@@ -1,4 +1,4 @@
-"""Controller of the Large MAP Viewer: connects reader, in-memory layers and dialog."""
+"""Controller of the Large MAP Viewer: connects reader, layers and dialog."""
 
 import math
 import os
@@ -6,10 +6,10 @@ import time
 
 try:
     from . import large_map_reader as reader
-    from .large_map_layers import LargeMapLayerSet
+    from .large_map_layers import LargeMapLayerSet, LargeMapPointLayerSet
 except ImportError:  # pragma: no cover - direct module usage
     import large_map_reader as reader
-    from large_map_layers import LargeMapLayerSet
+    from large_map_layers import LargeMapLayerSet, LargeMapPointLayerSet
 
 from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject
 from qgis.PyQt.QtCore import Qt
@@ -59,7 +59,7 @@ def _wait_cursor():
 
 
 class LargeMapViewer:
-    """State and actions of one Large MAP Viewer window."""
+    """State and actions of one Large MAP / restart viewer window."""
 
     def __init__(self, iface, plugin=None):
         self.iface = iface
@@ -168,7 +168,7 @@ class LargeMapViewer:
         """Read the grid of all partitions and display it; populate the selectors."""
         self._cancel_point_series_capture()
         dialog = self._ensure_dialog()
-        progress = self._progress("Loading MAP grid")
+        progress = self._progress("Loading MAP/restart grid")
         self._set_busy(True)
         layer_set = None
         try:
@@ -189,7 +189,14 @@ class LargeMapViewer:
 
             self._update_progress(progress, 75, "Building mesh layers...")
             base = reader.model_base_name(path)
-            layer_set = LargeMapLayerSet(grids, self._group_name(base), crs=crs, layer_name=base)
+            point_mode = any(getattr(grid, "point_mode", False) for grid in grids)
+            layer_class = LargeMapPointLayerSet if point_mode else LargeMapLayerSet
+            layer_set = layer_class(
+                grids,
+                self._group_name(base, point_mode),
+                crs=crs,
+                layer_name=base,
+            )
             layer_set.create_layers()
 
             if self.layer_set is not None:
@@ -226,9 +233,9 @@ class LargeMapViewer:
         dialog.set_message("Grid loaded. Select a variable, time and index, then click Plot.")
         return True
 
-    def _group_name(self, base):
+    def _group_name(self, base, point_mode=False):
         unique = getattr(self.plugin, "_unique_group_name", None)
-        name = f"{base} (Large MAP)"
+        name = f"{base} (Large MAP / Restart)" if point_mode else f"{base} (Large MAP)"
         if callable(unique):
             try:
                 return unique(name)

@@ -1,11 +1,12 @@
 import copy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from Delft3DFileManager import large_map_layers as layers_module
 from Delft3DFileManager.large_map_dialog import step_index
-from Delft3DFileManager.large_map_reader import FACE, NODE, PartitionGrid, VariableEntry
+from Delft3DFileManager.large_map_reader import FACE, NODE, POINT, PartitionGrid, VariableEntry
 from Delft3DFileManager.large_map_viewer import dataset_name, default_variable_key
 
 
@@ -198,6 +199,139 @@ class FakeProject:
             self.map_layers.pop(layer_id, None)
 
 
+class FakeVectorFields:
+    def indexOf(self, name):
+        return 0 if name == "delft3d_value" else -1
+
+
+class FakeVectorFeature:
+    counter = 0
+
+    def __init__(self, _fields=None):
+        FakeVectorFeature.counter += 1
+        self._id = FakeVectorFeature.counter
+        self.attributes = {}
+        self.geometry = None
+
+    def id(self):
+        return self._id
+
+    def setGeometry(self, geometry):
+        self.geometry = geometry
+
+    def setAttribute(self, index, value):
+        self.attributes[index] = value
+
+
+class FakeVectorProvider:
+    def __init__(self, layer):
+        self.layer = layer
+
+    def addAttributes(self, _fields):
+        return True
+
+    def addFeatures(self, features):
+        self.layer.features.extend(features)
+        return True, features
+
+    def changeAttributeValues(self, updates):
+        by_id = {feature.id(): feature for feature in self.layer.features}
+        for feature_id, attributes in updates.items():
+            for index, value in attributes.items():
+                by_id[feature_id].attributes[index] = value
+        return True
+
+
+class FakeVectorLayer:
+    counter = 0
+
+    def __init__(self, _uri, name, _provider):
+        FakeVectorLayer.counter += 1
+        self._id = f"point{FakeVectorLayer.counter}"
+        self.name = name
+        self.features = []
+        self.properties = {}
+        self.rendererChanged = FakeSignal()
+        self._renderer = None
+        self._provider = FakeVectorProvider(self)
+
+    def id(self):
+        return self._id
+
+    def isValid(self):
+        return True
+
+    def setCrs(self, crs):
+        self.crs = crs
+
+    def dataProvider(self):
+        return self._provider
+
+    def updateFields(self):
+        pass
+
+    def fields(self):
+        return FakeVectorFields()
+
+    def getFeatures(self):
+        return list(self.features)
+
+    def updateExtents(self):
+        pass
+
+    def extent(self):
+        return SimpleNamespace(combineExtentWith=lambda _other: None)
+
+    def setCustomProperty(self, key, value):
+        self.properties[key] = value
+
+    def customProperty(self, key, default=None):
+        return self.properties.get(key, default)
+
+    def setRenderer(self, renderer):
+        self._renderer = renderer
+        self.rendererChanged.emit()
+
+    def renderer(self):
+        return self._renderer
+
+    def triggerRepaint(self):
+        pass
+
+
+class FakePoint:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class FakeGeometry:
+    @staticmethod
+    def fromPointXY(point):
+        return point
+
+
+class FakeSymbol:
+    @staticmethod
+    def defaultSymbol(_geometry_type):
+        return FakeSymbol()
+
+    def setColor(self, color):
+        self.color = color
+
+
+class FakeRendererRange:
+    def __init__(self, lower, upper, symbol, label):
+        self.lower, self.upper, self.symbol, self.label = lower, upper, symbol, label
+
+
+class FakeGraduatedRenderer:
+    def __init__(self, field, ranges):
+        self.field, self.ranges = field, ranges
+
+    def clone(self):
+        return copy.deepcopy(self)
+
+
 def _grid(part, offset=0.0):
     return PartitionGrid(
         path=f"p{part}.nc",
@@ -211,6 +345,20 @@ def _grid(part, offset=0.0):
     )
 
 
+def _point_grid(part, offset=0.0):
+    return PartitionGrid(
+        path=f"r{part}.nc",
+        partition_id=part,
+        node_x=np.array([0.0, 1.0]) + offset,
+        node_y=np.array([0.0, 1.0]),
+        faces=np.empty((0, 0), dtype=np.int64),
+        face_index=np.array([0, 1]),
+        node_index=np.array([0, 1]),
+        ghost_filtered=True,
+        point_mode=True,
+    )
+
+
 @pytest.fixture
 def layer_set(monkeypatch):
     monkeypatch.setattr(layers_module, "QgsMeshLayer", FakeLayer)
@@ -218,6 +366,30 @@ def layer_set(monkeypatch):
     FakeLayer.support_removal = True
     project = FakeProject()
     result = layers_module.LargeMapLayerSet([_grid(0), _grid(1, 1.0)], "model (Large MAP)", project=project, layer_name="model")
+    result.create_layers()
+    return result, project
+
+
+@pytest.fixture
+def point_layer_set(monkeypatch):
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", FakeVectorLayer)
+    monkeypatch.setattr(layers_module, "QgsFeature", FakeVectorFeature)
+    monkeypatch.setattr(layers_module, "QgsField", lambda *_args: object())
+    monkeypatch.setattr(layers_module, "QgsGeometry", FakeGeometry)
+    monkeypatch.setattr(layers_module, "QgsPointXY", FakePoint)
+    monkeypatch.setattr(layers_module, "QgsSymbol", FakeSymbol)
+    monkeypatch.setattr(layers_module, "QgsRendererRange", FakeRendererRange)
+    monkeypatch.setattr(layers_module, "QgsGraduatedSymbolRenderer", FakeGraduatedRenderer)
+    monkeypatch.setattr(layers_module, "QgsWkbTypes", SimpleNamespace(PointGeometry=1))
+    monkeypatch.setattr(layers_module, "QVariant", SimpleNamespace(Double="double"))
+    monkeypatch.setattr(layers_module, "QColor", lambda value: value)
+    project = FakeProject()
+    result = layers_module.LargeMapPointLayerSet(
+        [_point_grid(0), _point_grid(1, 10.0)],
+        "restart (Large MAP / Restart)",
+        project=project,
+        layer_name="restart",
+    )
     result.create_layers()
     return result, project
 
@@ -378,6 +550,33 @@ def test_plot_requires_one_array_per_partition(layer_set):
     result, _project = layer_set
     with pytest.raises(ValueError):
         result.plot([np.array([1.0, 2.0])], "a", FACE, variable_changed=True)
+
+
+def test_restart_point_layers_store_values_and_share_renderer(point_layer_set):
+    result, project = point_layer_set
+
+    assert [layer.name for layer in result.layers] == ["restart [0]", "restart [1]"]
+    assert all(len(layer.features) == 2 for layer in result.layers)
+    value_range = result.plot(
+        [np.array([1.0, 2.0]), np.array([3.0, np.nan])],
+        "s1_t0",
+        POINT,
+        variable_changed=True,
+    )
+
+    assert value_range == (1.0, 3.0)
+    assert [feature.attributes[0] for feature in result.layers[0].features] == [1.0, 2.0]
+    assert [feature.attributes[0] for feature in result.layers[1].features] == [3.0, None]
+    assert result.layers[0].renderer().field == "delft3d_value"
+    assert result.layers[1].renderer().ranges[-1].upper == 3.0
+    assert project.root.groups[0].name() == "restart (Large MAP / Restart)"
+
+
+def test_restart_point_layers_reject_value_count_mismatch(point_layer_set):
+    result, _project = point_layer_set
+
+    with pytest.raises(ValueError, match="Expected 2 restart values"):
+        result.plot([np.array([1.0]), np.array([2.0, 3.0])], "s1", POINT, True)
 
 
 def test_step_index_clamps_at_the_ends():

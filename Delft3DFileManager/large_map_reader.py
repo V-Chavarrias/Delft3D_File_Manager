@@ -1,8 +1,10 @@
-"""On-demand reading of large (partitioned) Delft3D FM MAP files.
+"""On-demand reading of large (partitioned) Delft3D FM MAP and restart files.
 
-Only the 2D grid is read once; afterwards each request reads one hyperslab
-(variable, time, extra-dimension indices) from every partition. Nothing is
-written to disk.
+For UGRID MAP files the 2D mesh is read once. Classic D-Flow FM restart files
+do not contain node coordinates, so their owned flow-element centers are read
+as point grids instead. Afterwards each request reads one hyperslab (variable,
+time, extra-dimension indices) from every partition. Nothing is written to
+disk.
 """
 
 import glob
@@ -18,6 +20,7 @@ from .stream_function import compute_stream_function
 
 FACE = "face"
 NODE = "node"
+POINT = "point"
 
 FROUDE_KEY = "derived:froude_number"
 VELOCITY_MAGNITUDE_KEY = "derived:velocity_magnitude"
@@ -31,7 +34,7 @@ _PARTITION_PATTERN = re.compile(r"^(?P<prefix>.*_)(?P<part>\d{4})(?P<suffix>_.*\
 
 
 class LargeMapError(RuntimeError):
-    """Raised when a MAP file cannot be read by the large MAP viewer."""
+    """Raised when a MAP or restart file cannot be read by the large viewer."""
 
 
 @dataclass
@@ -54,7 +57,7 @@ class VariableEntry:
 
 @dataclass
 class PartitionGrid:
-    """Owned (non-ghost) part of one partition's 2D mesh, with compacted nodes."""
+    """Owned (non-ghost) part of one partition's mesh or restart point grid."""
 
     path: str
     partition_id: object
@@ -64,6 +67,7 @@ class PartitionGrid:
     face_index: np.ndarray
     node_index: np.ndarray
     ghost_filtered: bool
+    point_mode: bool = False
 
     @property
     def face_count(self):
@@ -145,6 +149,68 @@ class _Layout:
     time_dim: str
     time_var: str
     excluded: set
+    geometry: str = "mesh"
+
+
+def _restart_layout(dataset):
+    """Return a point-grid layout for a classic D-Flow FM restart dataset."""
+    face_dim = next(
+        (name for name in ("nFlowElem", "nNetElem") if name in dataset.dimensions),
+        None,
+    )
+    node_x = _find_variable(dataset, "flowelem_xzw", "flowelem_xcc")
+    node_y = _find_variable(dataset, "flowelem_yzw", "flowelem_ycc")
+    if not face_dim or not node_x or not node_y:
+        return None
+    if dataset.variables[node_x].dimensions != (face_dim,) or dataset.variables[node_y].dimensions != (face_dim,):
+        return None
+
+    time_var = "time" if "time" in dataset.variables else None
+    if time_var is None:
+        time_var = next(
+            (name for name, var in dataset.variables.items() if getattr(var, "standard_name", "") == "time" and var.ndim == 1),
+            None,
+        )
+    time_dim = dataset.variables[time_var].dimensions[0] if time_var else None
+    edge_dim = next(
+        (name for name in ("nFlowLink", "nNetLink") if name in dataset.dimensions),
+        None,
+    )
+    excluded = {node_x, node_y}
+    for suffix in (
+        "flowelem_xzw",
+        "flowelem_yzw",
+        "flowelem_xcc",
+        "flowelem_ycc",
+        "flowelem_domain",
+        "flowelemdomain",
+        "flowelem_globalnr",
+        "flowelemglobalnr",
+        "flowelem",
+        "netelemnode",
+        "flowlink",
+        "netlink",
+        "flowlink_xu",
+        "flowlink_yu",
+        "netlink_xu",
+        "netlink_yu",
+    ):
+        name = _find_variable(dataset, suffix)
+        if name:
+            excluded.add(name)
+    return _Layout(
+        topology=None,
+        node_x=node_x,
+        node_y=node_y,
+        face_nodes=None,
+        face_dim=face_dim,
+        node_dim=None,
+        edge_dim=edge_dim,
+        time_dim=time_dim,
+        time_var=time_var,
+        excluded=excluded,
+        geometry="points",
+    )
 
 
 def _layout(dataset):
@@ -161,6 +227,9 @@ def _layout(dataset):
     node_y = node_y if node_y in dataset.variables else _find_variable(dataset, "node_y")
     face_nodes = face_nodes if face_nodes in dataset.variables else _find_variable(dataset, "face_nodes")
     if not node_x or not node_y or not face_nodes:
+        restart_layout = _restart_layout(dataset)
+        if restart_layout is not None:
+            return restart_layout
         raise LargeMapError(f"{os.path.basename(dataset.filepath())} has no 2D mesh topology")
 
     node_dim = dataset.variables[node_x].dimensions[0]
@@ -200,6 +269,16 @@ def _layout(dataset):
     )
 
 
+def is_restart_file(path):
+    """Return whether ``path`` contains a classic D-Flow FM restart layout."""
+    netcdf = _netcdf()
+    try:
+        with netcdf.Dataset(str(path), "r") as dataset:
+            return _layout(dataset).geometry == "points"
+    except (LargeMapError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _connectivity(variable, spatial_dim):
     variable.set_auto_mask(False)
     values = np.asarray(variable[:])
@@ -217,19 +296,43 @@ def _connectivity(variable, spatial_dim):
 
 
 def _domain_values(dataset, face_dim):
-    name = _find_variable(dataset, "flowelem_domain")
+    name = _find_variable(dataset, "flowelem_domain", "flowelemdomain")
     if not name or dataset.variables[name].dimensions != (face_dim,):
         return None
     return np.ma.filled(np.ma.asarray(dataset.variables[name][:]), -1).astype(np.int64)
 
 
 def read_partition_grid(path):
-    """Read the owned faces and used nodes of one partition."""
+    """Read one partition's owned mesh faces or restart flow-element centers."""
     netcdf = _netcdf()
     path = os.path.abspath(str(path))
     part = partition_id(path)
     with netcdf.Dataset(path, "r") as dataset:
         layout = _layout(dataset)
+        if layout.geometry == "points":
+            point_x = np.asarray(np.ma.filled(dataset.variables[layout.node_x][:], np.nan), dtype=float)
+            point_y = np.asarray(np.ma.filled(dataset.variables[layout.node_y][:], np.nan), dtype=float)
+            domains = _domain_values(dataset, layout.face_dim) if part is not None else None
+            if domains is not None:
+                face_index = np.nonzero(domains == part)[0]
+            else:
+                face_index = np.arange(len(point_x))
+            valid = (
+                np.isfinite(point_x[face_index])
+                & np.isfinite(point_y[face_index])
+            )
+            face_index = face_index[valid]
+            return PartitionGrid(
+                path=path,
+                partition_id=part,
+                node_x=point_x[face_index],
+                node_y=point_y[face_index],
+                faces=np.empty((0, 0), dtype=np.int64),
+                face_index=face_index,
+                node_index=face_index.copy(),
+                ghost_filtered=domains is not None,
+                point_mode=True,
+            )
         node_x = np.asarray(np.ma.filled(dataset.variables[layout.node_x][:], np.nan), dtype=float)
         node_y = np.asarray(np.ma.filled(dataset.variables[layout.node_y][:], np.nan), dtype=float)
         faces = _connectivity(dataset.variables[layout.face_nodes], layout.face_dim)
@@ -358,7 +461,9 @@ def list_variables(path, sediment_records=None):
                 continue
             if name.lower().endswith(("_bnd", "_x", "_y")) and layout.time_dim not in dims:
                 continue
-            location = FACE if spatial[0] == layout.face_dim else NODE
+            location = POINT if layout.geometry == "points" else (
+                FACE if spatial[0] == layout.face_dim else NODE
+            )
             extra = [
                 ExtraDimension(dim, len(dataset.dimensions[dim]), _dimension_labels(dataset, dim, len(dataset.dimensions[dim])))
                 for dim in dims
@@ -378,16 +483,17 @@ def list_variables(path, sediment_records=None):
             )
 
         names = _derived_inputs(dataset, layout)
+        derived_location = POINT if layout.geometry == "points" else FACE
         derived = []
         if names["depth"] and (names["ucmag"] or (names["ucx"] and names["ucy"])):
-            derived.append(VariableEntry(FROUDE_KEY, "Froude number (derived) [-]", FACE, True, derived=True, units="-"))
+            derived.append(VariableEntry(FROUDE_KEY, "Froude number (derived) [-]", derived_location, True, derived=True, units="-"))
         if not names["ucmag"] and names["ucx"] and names["ucy"]:
             derived.append(
-                VariableEntry(VELOCITY_MAGNITUDE_KEY, "Velocity magnitude (derived) [m/s]", FACE, True, derived=True, units="m s-1")
+                VariableEntry(VELOCITY_MAGNITUDE_KEY, "Velocity magnitude (derived) [m/s]", derived_location, True, derived=True, units="m s-1")
             )
         if names["mor_bl"]:
             derived.append(
-                VariableEntry(BED_LEVEL_CHANGE_KEY, "Cumulative bed level change (derived) [m]", FACE, True, derived=True, units="m")
+                VariableEntry(BED_LEVEL_CHANGE_KEY, "Cumulative bed level change (derived) [m]", derived_location, True, derived=True, units="m")
             )
         if _shear_stress_available(names):
             for index, record in enumerate(_valid_theta_records(sediment_records)):
@@ -395,7 +501,7 @@ def list_variables(path, sediment_records=None):
                     VariableEntry(
                         f"{THETA_KEY_PREFIX}{index}",
                         f"Non-dimensional bed shear stress - {record.name} (derived) [-]",
-                        FACE,
+                        derived_location,
                         True,
                         derived=True,
                         units="-",
@@ -493,7 +599,7 @@ def read_slice(grid, entry, time_index=0, extra_indices=None, sediment_records=N
         if not entry.derived:
             if entry.key not in dataset.variables:
                 raise LargeMapError(f"{os.path.basename(grid.path)} has no variable '{entry.key}'")
-            spatial_dim = layout.face_dim if entry.location == FACE else layout.node_dim
+            spatial_dim = layout.face_dim if entry.location in (FACE, POINT) else layout.node_dim
             values = _read_hyperslab(dataset, layout, entry.key, time_index, extra_indices, spatial_dim)
         else:
             values = _derived_slice(dataset, layout, entry.key, time_index, sediment_records)
@@ -513,7 +619,7 @@ def read_point_series(grid, entry, spatial_index, extra_indices=None, sediment_r
         layout = _layout(dataset)
         if not layout.time_dim:
             raise LargeMapError(f"{os.path.basename(grid.path)} has no time dimension")
-        spatial_dim = layout.face_dim if entry.location == FACE else layout.node_dim
+        spatial_dim = layout.face_dim if entry.location in (FACE, POINT) else layout.node_dim
         if spatial_index < 0 or spatial_index >= len(dataset.dimensions[spatial_dim]):
             raise LargeMapError(f"Spatial index {spatial_index} is outside {spatial_dim}")
 

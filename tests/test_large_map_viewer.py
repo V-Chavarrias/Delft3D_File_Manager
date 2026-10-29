@@ -205,6 +205,56 @@ def test_load_file_keeps_previous_viewer_layers_when_grid_read_fails(monkeypatch
     previous_layer_set.dispose.assert_not_called()
 
 
+def test_load_file_uses_restart_point_layers(monkeypatch):
+    viewer = module.LargeMapViewer(MagicMock())
+    viewer.dialog = MagicMock()
+    viewer.dialog.selected_variable.return_value = None
+    viewer._set_busy = MagicMock()
+    viewer._zoom_to_layers = MagicMock()
+    events = []
+    entry = SimpleNamespace(
+        key="s1",
+        label="Water level",
+        derived=False,
+        has_time=True,
+        extra_dims=[],
+        location=module.reader.POINT,
+    )
+    grid = SimpleNamespace(
+        point_mode=True,
+        partition_id=0,
+        face_count=2,
+        node_x=[0.0, 1.0],
+        node_y=[0.0, 1.0],
+    )
+
+    class _PointLayerSet:
+        def __init__(self, *_args, **_kwargs):
+            events.append(("point", _args[1]))
+
+        def create_layers(self):
+            events.append("created")
+
+        def dispose(self, remove_layers=False):
+            events.append(("disposed", remove_layers))
+
+    monkeypatch.setattr(module.reader, "discover_partitions", lambda _path: ["restart_0000_rst.nc"])
+    monkeypatch.setattr(module.reader, "read_partition_grid", lambda _path: grid)
+    monkeypatch.setattr(module.reader, "list_variables", lambda *_args: [entry])
+    monkeypatch.setattr(module.reader, "read_times", lambda _path: ([0.0], ["t0"]))
+    monkeypatch.setattr(module.reader, "read_crs_info", lambda _path: (None, None))
+    monkeypatch.setattr(module.reader, "model_base_name", lambda _path: "restart_rst")
+    monkeypatch.setattr(
+        module,
+        "crs_from_info",
+        lambda *_args: SimpleNamespace(authid=lambda: ""),
+    )
+    monkeypatch.setattr(module, "LargeMapPointLayerSet", _PointLayerSet)
+
+    assert viewer.load_file("restart_0000_rst.nc") is True
+    assert events == [("point", "restart_rst (Large MAP / Restart)"), "created"]
+
+
 def test_point_series_reads_all_times_and_opens_separate_chart(monkeypatch):
     from Delft3DFileManager import mesh_profile_sampler
 

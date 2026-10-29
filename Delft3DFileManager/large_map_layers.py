@@ -16,12 +16,27 @@ except ImportError:  # pragma: no cover - direct module usage
 
 try:
     from qgis.core import (
+        QgsFeature,
+        QgsField,
+        QgsGeometry,
         QgsMeshDatasetIndex,
         QgsMeshLayer,
+        QgsGraduatedSymbolRenderer,
+        QgsPointXY,
         QgsProject,
+        QgsRendererRange,
+        QgsSymbol,
+        QgsVectorLayer,
+        QgsWkbTypes,
     )
+    from qgis.PyQt.QtCore import QVariant
+    from qgis.PyQt.QtGui import QColor
 except ImportError:  # pragma: no cover - only outside QGIS
+    QgsFeature = QgsField = QgsGeometry = None
     QgsMeshDatasetIndex = QgsMeshLayer = QgsProject = None
+    QgsGraduatedSymbolRenderer = QgsPointXY = None
+    QgsRendererRange = QgsSymbol = QgsVectorLayer = QgsWkbTypes = None
+    QVariant = QColor = None
 
 
 _LARGE_MAP_SYNC_PROPERTY = "delft3d_large_map_sync_id"
@@ -503,6 +518,246 @@ class LargeMapLayerSet:
                 settings.setScalarSettings(slot.group_index, scalar)
                 settings.setNativeMeshSettings(native)
                 slot.layer.setRendererSettings(settings)
+                slot.layer.triggerRepaint()
+        finally:
+            self._syncing = False
+
+
+_POINT_VALUE_FIELD = "delft3d_value"
+_POINT_COLORS = ("#313695", "#74add1", "#fee090", "#f46d43", "#a50026")
+
+
+class LargeMapPointLayerSet:
+    """Owns one in-memory point layer per restart partition."""
+
+    def __init__(self, grids, group_name, crs=None, project=None, layer_name=None):
+        self._project = project or QgsProject.instance()
+        self._group_name = group_name
+        self._group = None
+        self._crs = crs
+        self._sync_id = uuid.uuid4().hex
+        self._syncing = False
+        self._busy = False
+        self._plotted = False
+        self._slots = []
+        multi = len(grids) > 1
+        layer_name = layer_name or group_name
+        for grid in grids:
+            name = f"{layer_name} [{grid.partition_id}]" if multi and grid.partition_id is not None else layer_name
+            slot = _LayerSlot(grid, None, name)
+            slot.feature_ids = []
+            self._slots.append(slot)
+        self._project.layersWillBeRemoved.connect(self._on_layers_will_be_removed)
+
+    @property
+    def layers(self):
+        return [slot.layer for slot in self._slots if slot.layer is not None]
+
+    def has_layers(self):
+        return bool(self._slots) and all(slot.layer is not None for slot in self._slots)
+
+    def _ensure_group(self):
+        root = self._project.layerTreeRoot()
+        if self._group is not None:
+            try:
+                if self._group in root.findGroups(True):
+                    return self._group
+            except RuntimeError:
+                pass
+        self._group = root.insertGroup(0, self._group_name)
+        return self._group
+
+    def _new_layer(self, slot):
+        layer = QgsVectorLayer("Point", slot.name, "memory")
+        if not layer.isValid():
+            raise RuntimeError(f"Could not create the point layer for {slot.name}")
+        if self._crs is not None and self._crs.isValid():
+            layer.setCrs(self._crs)
+        provider = layer.dataProvider()
+        if not provider.addAttributes([QgsField(_POINT_VALUE_FIELD, QVariant.Double)]):
+            raise RuntimeError(f"Could not create the value field for {slot.name}")
+        layer.updateFields()
+        field_index = layer.fields().indexOf(_POINT_VALUE_FIELD)
+        features = []
+        for x, y in zip(slot.grid.node_x, slot.grid.node_y):
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(x), float(y))))
+            feature.setAttribute(field_index, None)
+            features.append(feature)
+        result = provider.addFeatures(features)
+        if isinstance(result, tuple):
+            if not result[0]:
+                raise RuntimeError(f"Could not add restart points for {slot.name}")
+        elif result is False:
+            raise RuntimeError(f"Could not add restart points for {slot.name}")
+        layer.updateExtents()
+        slot.feature_ids = [feature.id() for feature in layer.getFeatures()]
+        layer.setCustomProperty("delft3d_mesh_source", slot.grid.path)
+        layer.setCustomProperty(_LARGE_MAP_SYNC_PROPERTY, self._sync_id)
+        return layer
+
+    def _attach(self, slot, layer, position=None):
+        self._project.addMapLayer(layer, False)
+        group = self._ensure_group()
+        if position is None:
+            group.addLayer(layer)
+        else:
+            group.insertLayer(position, layer)
+        slot.layer = layer
+        slot.layer_id = layer.id()
+        slot.callback = lambda layer=layer: self._on_renderer_changed(layer)
+        layer.rendererChanged.connect(slot.callback)
+
+    def create_layers(self):
+        """Create (or recreate) missing point layers."""
+        for slot in self._slots:
+            if slot.layer is not None:
+                continue
+            self._attach(slot, self._new_layer(slot))
+        if not all(slot.dataset_name for slot in self._slots):
+            self._plotted = False
+        return self.layers
+
+    def extent(self):
+        extent = None
+        for layer in self.layers:
+            if extent is None:
+                extent = layer.extent()
+            else:
+                extent.combineExtentWith(layer.extent())
+        return extent
+
+    def _on_layers_will_be_removed(self, layer_ids):
+        if self._busy:
+            return
+        removed = set(layer_ids)
+        for slot in self._slots:
+            if slot.layer_id in removed:
+                self._disconnect(slot)
+                slot.layer = None
+                slot.layer_id = None
+                slot.dataset_name = None
+                slot.group_index = None
+                slot.feature_ids = []
+
+    def _disconnect(self, slot):
+        if slot.layer is not None and slot.callback is not None:
+            try:
+                slot.layer.rendererChanged.disconnect(slot.callback)
+            except (TypeError, RuntimeError):
+                pass
+        slot.callback = None
+
+    def dispose(self, remove_layers=False):
+        try:
+            self._project.layersWillBeRemoved.disconnect(self._on_layers_will_be_removed)
+        except (TypeError, RuntimeError):
+            pass
+        ids = []
+        for slot in self._slots:
+            self._disconnect(slot)
+            if slot.layer_id:
+                ids.append(slot.layer_id)
+            slot.layer = None
+        if remove_layers and ids:
+            self._project.removeMapLayers(ids)
+
+    @staticmethod
+    def _clone_renderer(renderer):
+        clone = getattr(renderer, "clone", None)
+        return clone() if callable(clone) else renderer
+
+    @staticmethod
+    def _renderer(value_range, template=None):
+        if value_range is None:
+            return None
+        minimum, maximum = value_range
+        width = (maximum - minimum) / len(_POINT_COLORS)
+        template_symbols = []
+        ranges_method = getattr(template, "ranges", None)
+        template_ranges = ranges_method() if callable(ranges_method) else ranges_method or []
+        for source_range in template_ranges:
+            symbol_method = getattr(source_range, "symbol", None)
+            source_symbol = symbol_method() if callable(symbol_method) else None
+            if source_symbol is not None:
+                template_symbols.append(source_symbol)
+        ranges = []
+        for index, color in enumerate(_POINT_COLORS):
+            lower = minimum + index * width
+            upper = maximum if index == len(_POINT_COLORS) - 1 else minimum + (index + 1) * width
+            if template_symbols:
+                symbol = LargeMapPointLayerSet._clone_renderer(template_symbols[index % len(template_symbols)])
+            else:
+                symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PointGeometry)
+            if symbol is None:
+                raise RuntimeError("Could not create the restart point symbol")
+            if not template_symbols:
+                symbol.setColor(QColor(color))
+            ranges.append(
+                QgsRendererRange(
+                    lower,
+                    upper,
+                    symbol,
+                    f"{lower:.4g} - {upper:.4g}",
+                )
+            )
+        return QgsGraduatedSymbolRenderer(_POINT_VALUE_FIELD, ranges)
+
+    def plot(self, values_per_layer, dataset_name, location, variable_changed, description=""):
+        """Replace point values on all layers and return the shared data range."""
+        del location, description
+        if len(values_per_layer) != len(self._slots):
+            raise ValueError("One array of values per partition is required")
+        self.create_layers()
+        value_range = shared_range(values_per_layer)
+        first_plot = not self._plotted
+        template = None
+        if variable_changed and self._plotted and self._slots:
+            template = self._slots[0].layer.renderer()
+        self._syncing = True
+        try:
+            for slot, values in zip(self._slots, values_per_layer):
+                values = np.asarray(values, dtype=float).reshape(-1)
+                if len(values) != len(slot.feature_ids):
+                    raise ValueError(
+                        f"Expected {len(slot.feature_ids)} restart values for {slot.name}, got {len(values)}"
+                    )
+                field_index = slot.layer.fields().indexOf(_POINT_VALUE_FIELD)
+                updates = {
+                    int(feature_id): {
+                        field_index: float(value) if np.isfinite(value) else None
+                    }
+                    for feature_id, value in zip(slot.feature_ids, values)
+                }
+                result = slot.layer.dataProvider().changeAttributeValues(updates)
+                if result is False:
+                    raise RuntimeError(f"Could not update restart values for {slot.name}")
+                slot.layer.updateExtents()
+                slot.dataset_name = dataset_name
+
+            if variable_changed or first_plot:
+                renderer = self._renderer(value_range, template)
+                if renderer is not None:
+                    for slot in self._slots:
+                        slot.layer.setRenderer(self._clone_renderer(renderer))
+            for slot in self._slots:
+                slot.layer.triggerRepaint()
+        finally:
+            self._syncing = False
+        self._plotted = True
+        return value_range
+
+    def _on_renderer_changed(self, source):
+        """Mirror Symbology edits of one restart partition to the others."""
+        if self._syncing or self._busy:
+            return
+        source_renderer = source.renderer()
+        self._syncing = True
+        try:
+            for slot in self._slots:
+                if slot.layer is source or slot.layer is None:
+                    continue
+                slot.layer.setRenderer(self._clone_renderer(source_renderer))
                 slot.layer.triggerRepaint()
         finally:
             self._syncing = False

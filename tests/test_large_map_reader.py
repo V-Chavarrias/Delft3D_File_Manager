@@ -140,6 +140,50 @@ def _write_partition(path, part, local_faces, owner, reverse_edges=False):
         )
 
 
+def _write_restart(path, part):
+    point_count = 4
+    with netCDF4.Dataset(path, "w") as ds:
+        ds.createDimension("nFlowElem", point_count)
+        ds.createDimension("time", None)
+        ds.createDimension("nBedLayers", 2)
+        ds.createDimension("nSedTot", 2)
+
+        time = ds.createVariable("time", "f8", ("time",))
+        time.units = "seconds since 2020-01-01 00:00:00"
+        time[:] = TIMES[:2]
+
+        x = ds.createVariable("FlowElem_xzw", "f8", ("nFlowElem",))
+        y = ds.createVariable("FlowElem_yzw", "f8", ("nFlowElem",))
+        x[:] = np.arange(point_count, dtype=float)
+        y[:] = np.arange(point_count, dtype=float) + 10.0
+        ds.createVariable("FlowElem_xcc", "f8", ("nFlowElem",))[:] = x[:]
+        ds.createVariable("FlowElem_ycc", "f8", ("nFlowElem",))[:] = y[:]
+        ds.createVariable("FlowElemDomain", "i4", ("nFlowElem",))[:] = [0, 0, 1, 1]
+        ds.createVariable("FlowElemGlobalNr", "i4", ("nFlowElem",))[:] = [101, 102, 103, 104]
+
+        def write_cell_variable(name, values, units="m"):
+            variable = ds.createVariable(
+                name,
+                "f8",
+                ("time", "nFlowElem"),
+                fill_value=-999.0,
+            )
+            variable.units = units
+            variable[:] = values
+
+        write_cell_variable("s1", [[1.0, 2.0, 3.0, 4.0], [11.0, 12.0, 13.0, 14.0]])
+        write_cell_variable("ucx", [[0.3, 0.4, 0.5, 0.6], [1.3, 1.4, 1.5, 1.6]], "m s-1")
+        write_cell_variable("ucy", [[0.4, 0.5, 0.6, 0.7], [1.4, 1.5, 1.6, 1.7]], "m s-1")
+        write_cell_variable("mor_bl", [[5.0, 6.0, 7.0, 8.0], [5.5, 6.5, 7.5, 8.5]])
+        lyrfrac = ds.createVariable(
+            "lyrfrac",
+            "f8",
+            ("time", "nFlowElem", "nBedLayers", "nSedTot"),
+        )
+        lyrfrac[:] = np.arange(2 * point_count * 2 * 2, dtype=float).reshape(2, point_count, 2, 2)
+        ds.createVariable("NetElemNode", "i4", ("nFlowElem", "nBedLayers"))[:] = 1
+
+
 @pytest.fixture
 def partitioned(tmp_path):
     owner = {face: (0 if face % NX < 2 else 1) for face in range(NX * NY)}
@@ -395,3 +439,53 @@ def test_single_file_without_partitions_uses_all_faces(tmp_path):
     assert not grid.ghost_filtered
     assert grid.face_count == NX * NY
     assert reader.discover_partitions(tmp_path / "single_map.nc") == [str(tmp_path / "single_map.nc")]
+
+
+def test_restart_partitions_use_owned_flow_element_centers(tmp_path):
+    _write_restart(tmp_path / "model_0000_20200101_rst.nc", 0)
+    _write_restart(tmp_path / "model_0001_20200101_rst.nc", 1)
+    path = tmp_path / "model_0001_20200101_rst.nc"
+
+    paths = reader.discover_partitions(path)
+    assert [path_.split("\\")[-1].split("/")[-1] for path_ in paths] == [
+        "model_0000_20200101_rst.nc",
+        "model_0001_20200101_rst.nc",
+    ]
+    assert reader.model_base_name(path) == "model_20200101_rst"
+
+    grids = [reader.read_partition_grid(path_) for path_ in paths]
+    assert all(grid.point_mode for grid in grids)
+    assert [grid.face_index.tolist() for grid in grids] == [[0, 1], [2, 3]]
+    assert all(grid.faces.shape == (0, 0) for grid in grids)
+    assert all(grid.ghost_filtered for grid in grids)
+
+    entries = {entry.key: entry for entry in reader.list_variables(path)}
+    assert entries["s1"].location == reader.POINT
+    assert entries["lyrfrac"].extra_dims[0].name == "nBedLayers"
+    assert entries["lyrfrac"].extra_dims[1].name == "nSedTot"
+    assert reader.VELOCITY_MAGNITUDE_KEY in entries
+    for excluded in (
+        "FlowElem_xzw",
+        "FlowElem_yzw",
+        "FlowElem_xcc",
+        "FlowElem_ycc",
+        "FlowElemDomain",
+        "FlowElemGlobalNr",
+        "NetElemNode",
+    ):
+        assert excluded not in entries
+
+    np.testing.assert_allclose(
+        reader.read_slice(grids[1], entries["s1"], 1),
+        [13.0, 14.0],
+    )
+    np.testing.assert_allclose(
+        reader.read_slice(grids[0], entries["lyrfrac"], 0, [1, 0]),
+        [2.0, 6.0],
+    )
+    np.testing.assert_allclose(
+        reader.read_point_series(grids[0], entries["s1"], 0),
+        [1.0, 11.0],
+    )
+    assert reader.is_restart_file(path)
+    assert not reader.is_restart_file(tmp_path / "missing.nc")

@@ -13,6 +13,7 @@ from Delft3DFileManager.Delft3DFileManager import (
     _mesh_property_should_compute_connectivity,
     _mesh_source_path,
 )
+from Delft3DFileManager.large_map_reader import ExtraDimension, POINT, VariableEntry
 
 DATA_DIR = pathlib.Path(__file__).parent.parent / "data"
 FXW_01 = DATA_DIR / "fxw_01.pliz"
@@ -386,6 +387,85 @@ def test_load_netcdf_file_routes_m2d_cell_values_before_his(plugin):
     plugin.load_m2d_cell_vector_file.assert_called_once_with("/fake/cell_values.nc")
     plugin._is_his_netcdf_file.assert_not_called()
     plugin.load_ugrid_mesh_file.assert_not_called()
+
+
+def test_load_netcdf_file_routes_restart_before_his_or_ugrid(plugin):
+    plugin._is_restart_netcdf_file = MagicMock(return_value=True)
+    plugin._is_his_netcdf_file = MagicMock()
+    plugin.load_restart_file = MagicMock()
+    plugin.load_ugrid_mesh_file = MagicMock()
+
+    with patch(
+        "Delft3DFileManager.m2d_cell_vector.is_m2d_cell_vector_file",
+        return_value=False,
+    ):
+        plugin.load_netcdf_file("/fake/restart.nc")
+
+    plugin.load_restart_file.assert_called_once_with("/fake/restart.nc")
+    plugin._is_his_netcdf_file.assert_not_called()
+    plugin.load_ugrid_mesh_file.assert_not_called()
+
+
+def test_restart_import_field_specs_flatten_extra_dimensions(plugin):
+    entries = [
+        VariableEntry("s1", "Water level", POINT, True),
+        VariableEntry(
+            "lyrfrac",
+            "Layer fraction",
+            POINT,
+            True,
+            extra_dims=[
+                ExtraDimension("nBedLayers", 2, ["Layer 1", "Layer 2"]),
+                ExtraDimension("nSedTot", 2, ["1: sand", "2: gravel"]),
+            ],
+        ),
+    ]
+
+    specs = plugin._restart_import_field_specs(entries)
+
+    assert [spec[0] for spec in specs] == [
+        "s1",
+        "lyrfrac_layer_1_sand",
+        "lyrfrac_layer_1_gravel",
+        "lyrfrac_layer_2_sand",
+        "lyrfrac_layer_2_gravel",
+    ]
+    assert all(spec[1].location == POINT for spec in specs)
+
+
+def test_load_restart_file_creates_grouped_point_layer(plugin, monkeypatch):
+    from Delft3DFileManager import large_map_reader as reader
+
+    grid = SimpleNamespace(
+        point_mode=True,
+        partition_id=0,
+        node_x=[10.0, 20.0],
+        node_y=[30.0, 40.0],
+        face_index=[4, 9],
+    )
+    entry = VariableEntry("s1", "Water level", POINT, True)
+    monkeypatch.setattr(reader, "discover_partitions", lambda _path: ["restart_0000_rst.nc"])
+    monkeypatch.setattr(reader, "read_partition_grid", lambda _path: grid)
+    monkeypatch.setattr(reader, "list_variables", lambda *_args: [entry])
+    monkeypatch.setattr(reader, "read_times", lambda _path: ([0.0], ["t0"]))
+    monkeypatch.setattr(reader, "read_crs_info", lambda _path: (None, None))
+    monkeypatch.setattr(reader, "model_base_name", lambda _path: "restart")
+    monkeypatch.setattr(reader, "read_slice", lambda *_args: [1.5, 2.5])
+    monkeypatch.setattr(plugin, "_create_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_update_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_close_progress_dialog", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_clear_status_message", lambda: None)
+    monkeypatch.setattr(plugin, "_unique_group_name", lambda name: name)
+
+    loaded = plugin.load_restart_file("/fake/restart_0000_rst.nc")
+
+    assert len(loaded) == 1
+    layer = loaded[0]
+    layer.setCustomProperty.assert_any_call(
+        "delft3d_restart_source",
+        "restart_0000_rst.nc",
+    )
+    plugin.iface.messageBar().pushSuccess.assert_called_once()
 
 
 def test_load_netcdf_file_routes_mesh_when_not_his(plugin):

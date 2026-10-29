@@ -137,6 +137,14 @@ def test_nearest_mesh_sample_candidates_respects_node_and_face_location():
     ]
 
 
+def test_nearest_mesh_sample_candidates_supports_restart_points():
+    grid = _Grid([0, 1, 2], [10, 10, 10], [])
+
+    assert nearest_mesh_sample_candidates([grid], (1.7, 10.1), "point") == [
+        (0, 2, (2.0, 10.0))
+    ]
+
+
 def test_nearest_mesh_sample_candidates_keeps_duplicate_partition_nodes():
     grid = _Grid([0, 1, 1, 0], [0, 0, 1, 1], [[0, 1, 2, 3]])
 

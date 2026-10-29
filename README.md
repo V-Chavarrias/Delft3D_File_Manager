@@ -27,6 +27,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Imports Delft3D FM model-definition files (`.mdu`) and loads linked meshes, forcing, cross-sections, structures, 1D fields, and roughness data.
 - Imports external-forcing link files (`.ext`) as spatial boundary/lateral features and boundary-condition forcing files (`.bc`) as timeseries records linked to those features.
 - Imports Delft3D `.ini` files for structures, ini fields, 1D fields, and roughness, resolving spatial records against mesh branch geometry when available.
+- Imports classic Delft3D FM restart NetCDF files as grouped flow-element-center point layers, including partitioned restart output with owner-cell filtering.
 - Loads UGRID mesh NetCDF files with a native 2D mesh layer plus mesh1d branches, nodes, and network geometry layers.
 - Plots M2D NetCDF cell-value arrays on the active 2D mesh when the global `description` is `gdm_write_M2D_netcdf; v1.0`.
 - Detects NetCDF variables with dimensions beyond time and mesh space that are not handled by the regular loader, and offers those variables plus cumulative bed-level change for side-car flattening. Substrate patch data is read from the source MAP output on demand.
@@ -36,7 +37,7 @@ It supports QGIS 3.x and QGIS 4.x and is designed to keep the original model fil
 - Visualizes HIS station and cross-section timeseries in a dedicated explorer with variable selection and New Plot/Add To Plot modes.
 - Visualizes time-dependent mesh1d node and edge results in point and shortest-path track modes, including derived Froude values.
 - Draws scalar dataset slices across 2D mesh edges for imported mesh results and plots point time series from temporal node/face datasets.
-- Plots variables of very large (partitioned) MAP files by reading only the selected variable, time, and index, with previous/next stepping and derived Froude, velocity magnitude, bed level change, and streamfunction; replaces the previous viewer layers when a new MAP file is loaded; extracts all-time point series at selected map locations.
+- Plots variables of very large (partitioned) MAP and classic restart files by reading only the selected variable, time, and index, with previous/next stepping and MAP-derived Froude, velocity magnitude, bed level change, and streamfunction; replaces the previous viewer layers when a new file is loaded; extracts all-time point series at selected map locations.
 - Computes a time-dependent node streamfunction from `q1` discharge.
 - Computes a time-dependent face Froude number from 2D flow depth and velocity.
 - Creates a difference mesh from all compatible matching datasets in two selected same-grid mesh layers.
@@ -186,25 +187,29 @@ Enter to apply; **Reset View** restores automatic limits.
 
 ### Large MAP Viewer
 
-Use **Viewer -> Large MAP Viewer** (or its toolbar icon) for Delft3D FM MAP
-files that are too large to load as regular mesh layers. Only the grid is read
-once; each plot then reads just the selected variable, time, and index from the
-NetCDF file(s).
+Use **Viewer -> Large MAP Viewer** (or its toolbar icon) for Delft3D FM MAP or
+classic D-Flow FM restart files that are too large to load as regular layers.
+Only the grid or cell-center point locations are read once; each plot then
+reads just the selected variable, time, and index from the NetCDF file(s).
 
 Workflow:
-1. Click **Browse...** and select a `*_map.nc` file. For partitioned output
-   (`<name>_0000_map.nc`, `<name>_0001_map.nc`, ...) any partition can be
-   selected; all siblings are found automatically. The grid is loaded and shown
-   as soon as the file is selected, in a `<name> (Large MAP)` layer group with
-   one in-memory mesh layer per partition (ghost cells excluded).
-2. Select a **Variable**. All 2D face and node variables are listed, plus the
-   derived variables that can be computed from the file: Froude number,
-   velocity magnitude (when `ucmag` is absent), cumulative bed level change
-	(`mor_bl` relative to the first time), nondimensional bed shear stress per
-	sediment fraction, and the streamfunction (from `q1`, computed across all
-	partitions). The theta variables require an imported `.sed` file containing
-	`RhoSol` for each fraction. They use `mesh2d_taus` when available; otherwise
-	they use velocity and `mesh2d_czs` to calculate the bed shear stress.
+1. Click **Browse...** and select a `*_map.nc` or `*_rst.nc` file. For
+   partitioned output (`<name>_0000_map.nc`, `<name>_0001_map.nc`, or
+   `<name>_0000_<timestamp>_rst.nc`, ...) any partition can be selected; all
+   siblings are found automatically. A MAP grid is loaded and shown as soon as
+   the file is selected in a `<name> (Large MAP)` group with one in-memory mesh
+   layer per partition (ghost cells excluded). Restart files contain cell-center
+   coordinates rather than UGRID node topology, so they are shown in a
+   `<name> (Large MAP / Restart)` group with one in-memory point layer per
+   partition (owner cells only).
+2. Select a **Variable**. MAP files list all 2D face and node variables, plus
+	the derived variables that can be computed from the file. Restart files
+	list cell-centered flow-element variables, plus derived velocity magnitude
+	(when `ucmag` is absent) and cumulative bed level change (`mor_bl` relative
+	to the first time). MAP theta variables require an imported `.sed` file
+	containing `RhoSol` for each fraction. They use `mesh2d_taus` when
+	available; otherwise they use velocity and `mesh2d_czs` to calculate the
+	bed shear stress.
 3. Select the **Time**. For variables with additional dimensions (for example
    sediment fraction or bed layer) one index selector per dimension is shown.
 4. Click **Plot**. The selected data replaces the plotted dataset on the
@@ -212,9 +217,9 @@ Workflow:
    again to update.
 5. For a time-dependent variable, click **Select Point Time Series** and then
    click the map once. The selected variable and extra-dimension indexes are
-   sampled at the nearest node or face through every available time step and
-   shown in a separate chart window. The Large MAP Viewer remains open, and its
-   existing single-time map plot is unchanged.
+   sampled at the nearest node or face (or restart cell center) through every
+   available time step and shown in a separate chart window. The Large MAP
+   Viewer remains open, and its existing single-time map plot is unchanged.
 
 The ◀ / ▶ buttons next to the time and index selectors plot the previous or
 next entry immediately.
@@ -227,7 +232,9 @@ partition link is stored with the project layers and restored when the project
 is reopened.
 
 Limitations:
-- Edge variables and mesh1d variables are not listed.
+- Edge, flow-link, and mesh1d variables are not listed.
+- Classic restart files do not contain UGRID node coordinates, so their values
+  are rendered at flow-element centers rather than as filled mesh cells.
 - The viewer's file-reading state is not restored from the project. QGIS saves
   the plotted mesh layers (which can make the project file large), and their
   symbology link is restored, but reselect the MAP file in the viewer to resume
@@ -335,7 +342,7 @@ Load Delft3D files into QGIS. File type is detected automatically by extension a
 - **`.mdu`** — Delft3D FM model definition file (creates a summary table and loads linked files)
 - **`.ext`** — Delft3D FM external forcing links (creates spatial boundary/lateral features and links `.bc` forcing series)
 - **`.bc`** — Delft3D FM boundary-condition forcing file (creates forcing/timeseries records)
-- **`.nc`** — M2D cell values, UGRID mesh NetCDF, or Delft3D FM HIS NetCDF (auto-detected)
+- **`.nc`** — M2D cell values, classic Delft3D FM restart data, UGRID mesh NetCDF, or Delft3D FM HIS NetCDF (auto-detected)
 - **`.mat`** — ShorelineS results file (creates coastline + optional hard structures/groynes layers)
 - **`.csl`, `.csd`** — Delft3D FM cross-section locations/definitions (prompts for required companion files and creates one point layer)
 
@@ -576,6 +583,24 @@ Flattened morphodynamic variables are stored in the sidecar file as additional d
 #### CRS Handling
 - The plugin attempts to read EPSG code from NetCDF metadata
 - If not found, defaults to EPSG:28992 (RD New projection, common for Dutch models)
+
+### Import: Delft3D FM restart (`*_rst.nc`)
+
+Classic D-Flow FM restart files can be selected from the regular **Import**
+action. The importer detects their `nFlowElem` cell-center layout and creates
+one point layer per partition inside a `<name> (Restart)` layer group. For
+partitioned files such as `<name>_0000_<timestamp>_rst.nc`, all matching
+siblings are discovered automatically and `FlowElemDomain` keeps only the
+owner cells in each layer.
+
+The point layers contain the first restart time step as numeric attributes.
+Variables with bed-layer or sediment-fraction dimensions are flattened into
+separate fields with dimension labels in their names. A `source_index` field
+stores the source flow-element index, and the original restart path and time
+are stored as layer properties. Restart files do not contain UGRID node
+coordinates, so regular Import renders their values at flow-element centers;
+use **Viewer -> Large MAP Viewer** to select another time or variable
+interactively.
 
 ### Import: Delft3D FM HIS (`.nc`)
 

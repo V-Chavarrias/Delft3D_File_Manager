@@ -229,8 +229,8 @@ def nearest_mesh_sample_candidates(grids, point, location):
     if not math.isfinite(x) or not math.isfinite(y):
         raise ValueError("point coordinates must be finite")
     location = str(location or "").lower()
-    if location not in ("node", "face"):
-        raise ValueError("location must be 'node' or 'face'")
+    if location not in ("node", "face", "point"):
+        raise ValueError("location must be 'node', 'face' or 'point'")
 
     candidates = []
     for grid_index, grid in enumerate(grids or []):
@@ -239,7 +239,7 @@ def nearest_mesh_sample_candidates(grids, point, location):
         if len(node_x) != len(node_y):
             continue
 
-        if location == "node":
+        if location in ("node", "point"):
             sample_x, sample_y = node_x, node_y
             valid = np.isfinite(sample_x) & np.isfinite(sample_y)
         else:

@@ -1,4 +1,4 @@
-"""Non-modal window of the Large MAP Viewer."""
+"""Non-modal window of the Large MAP / restart viewer."""
 
 import os
 
@@ -71,7 +71,7 @@ class LargeMapDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Large MAP Viewer")
+        self.setWindowTitle("Large MAP / Restart Viewer")
         self.setMinimumWidth(560)
         self._on_file_selected = None
         self._on_variable_changed = None
@@ -83,10 +83,10 @@ class LargeMapDialog(QDialog):
 
         self._path_edit = QLineEdit()
         self._path_edit.setReadOnly(True)
-        self._path_edit.setPlaceholderText("Select a Delft3D FM MAP file (*_map.nc)")
+        self._path_edit.setPlaceholderText("Select a Delft3D FM MAP or restart file")
         self._browse_button = QPushButton("Browse...")
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("MAP file:"))
+        file_row.addWidget(QLabel("MAP/restart file:"))
         file_row.addWidget(self._path_edit, 1)
         file_row.addWidget(self._browse_button)
 
@@ -148,9 +148,9 @@ class LargeMapDialog(QDialog):
         start = os.path.dirname(self._path_edit.text()) or self._last_directory
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Delft3D FM MAP file",
+            "Select Delft3D FM MAP or restart file",
             start,
-            "Delft3D FM MAP files (*_map.nc);;NetCDF files (*.nc);;All files (*)",
+            "Delft3D FM MAP/restart files (*_map.nc *_rst.nc);;NetCDF files (*.nc);;All files (*)",
         )
         if not path:
             return
