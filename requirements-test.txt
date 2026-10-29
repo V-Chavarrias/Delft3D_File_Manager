@@ -1,4 +1,6 @@
-pytest
+pip>=25.3
+# Keep below pytest 9.2 until the QGIS-stub suite supports that release.
+pytest>=9.1,<9.2
 pytest-cov
 numpy
 scipy

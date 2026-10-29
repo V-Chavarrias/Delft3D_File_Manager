@@ -1106,6 +1106,10 @@ Security guardrails (for contributors and coding agents):
 
 Testing
 
+This repository uses `pip` for test/development dependencies. The setup
+commands and CI upgrade pip before resolving `requirements-test.txt`; `uv`,
+`pixi`, and Poetry are not configured for this project.
+
 For day-to-day development, run the fast unit suite. It uses QGIS/PyQt stubs
 and does not start a real QGIS runtime:
 ```bash
@@ -1152,7 +1156,8 @@ python .\build_plugin.py
 
 Pre-commit (recommended):
 ```bash
-pip install -r requirements-test.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements-test.txt
 pre-commit install
 pre-commit run --all-files
 ```
