@@ -19,7 +19,7 @@ Implement requested plugin functionality end-to-end. Plan first, then continue i
    - Make only the necessary changes, following existing patterns and avoiding unrelated refactors.
    - Never introduce broad exception handlers such as `except Exception: pass`; catch only documented, expected exception types and report handled failures explicitly through the repository's logging or user-notification mechanisms.
    - Update `README.md` for user-facing behavior changes.
-   - Update the changelog in `Delft3DFileManager/metadata.txt`; recommend a version bump when appropriate.
+   - After implementation, update both the `version` field and the changelog in `Delft3DFileManager/metadata.txt`; every completed change must have a corresponding version increment and release-note entry.
    - Add or update meaningful tests for new behavior and regressions.
    - Keep reusable, checked-in test fixtures in `data/`. Create generated test inputs and outputs under pytest `tmp_path`. Never put test data in, read from, or otherwise depend on `data_tmp/`; tests must work from a fresh checkout.
    - When adding postprocessing for a variable, support both 1D and 2D data, both on-the-fly computation for large files without loading the entire file and computation from an already-loaded mesh layer. Test each supported dimension and data-source combination.
