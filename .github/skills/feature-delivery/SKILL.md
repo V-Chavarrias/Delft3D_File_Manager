@@ -17,6 +17,7 @@ Implement requested plugin functionality end-to-end. Plan first, then continue i
    - Keep the plan focused; do not stop at the plan unless the user requested plan-only work.
 3. **Implement**
    - Make only the necessary changes, following existing patterns and avoiding unrelated refactors.
+   - Never introduce broad exception handlers such as `except Exception: pass`; catch only documented, expected exception types and report handled failures explicitly through the repository's logging or user-notification mechanisms.
    - Update `README.md` for user-facing behavior changes.
    - Update the changelog in `Delft3DFileManager/metadata.txt`; recommend a version bump when appropriate.
    - Add or update meaningful tests for new behavior and regressions.

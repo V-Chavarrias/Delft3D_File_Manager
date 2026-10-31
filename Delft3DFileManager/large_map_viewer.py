@@ -3,6 +3,7 @@
 import math
 import os
 import time
+import logging
 
 try:
     from . import large_map_reader as reader
@@ -17,6 +18,7 @@ from qgis.PyQt.QtWidgets import QApplication
 
 DEFAULT_EPSG = 28992
 _PREFERRED_DEFAULTS = ("s1", "waterdepth", "ucmag")
+LOGGER = logging.getLogger(__name__)
 
 
 def default_variable_key(entries):
@@ -160,8 +162,8 @@ class LargeMapViewer:
                 extent = transform.transformBoundingBox(extent)
             canvas.setExtent(extent)
             canvas.refresh()
-        except Exception:  # noqa: BLE001 - zooming is a convenience only
-            pass
+        except (RuntimeError, TypeError, ValueError) as error:
+            LOGGER.warning("Could not zoom to the loaded large-map layers: %s", error)
 
     # ---------------------------------------------------------------- loading
     def load_file(self, path):

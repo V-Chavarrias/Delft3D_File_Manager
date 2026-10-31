@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from Delft3DFileManager import large_map_viewer as module
 
 
@@ -25,6 +27,35 @@ def test_dataset_name_includes_time_and_extra_dimension_labels():
         module.dataset_name(entry, "2020-01-01 00:00", ["Sediment 1"])
         == "mesh:velocity_2020-01-01_00:00_Sediment_1"
     )
+
+
+def test_zoom_to_layers_reports_expected_canvas_errors(caplog):
+    iface = MagicMock()
+    viewer = module.LargeMapViewer(iface)
+    viewer.layer_set = SimpleNamespace(
+        layers=[SimpleNamespace(crs=lambda: MagicMock())],
+        extent=lambda: object(),
+    )
+    iface.mapCanvas.return_value.mapSettings.return_value.destinationCrs.return_value.isValid.return_value = False
+    iface.mapCanvas.return_value.setExtent.side_effect = RuntimeError("canvas was deleted")
+
+    with caplog.at_level("WARNING", logger=module.LOGGER.name):
+        viewer._zoom_to_layers()
+
+    assert "Could not zoom to the loaded large-map layers" in caplog.text
+
+
+def test_zoom_to_layers_does_not_swallow_unexpected_errors():
+    viewer = module.LargeMapViewer(MagicMock())
+    viewer.layer_set = SimpleNamespace(
+        layers=[SimpleNamespace(crs=lambda: MagicMock())],
+        extent=lambda: object(),
+    )
+    viewer.iface.mapCanvas.return_value.mapSettings.return_value.destinationCrs.return_value.isValid.return_value = False
+    viewer.iface.mapCanvas.return_value.setExtent.side_effect = LookupError("unexpected failure")
+
+    with pytest.raises(LookupError, match="unexpected failure"):
+        viewer._zoom_to_layers()
 
 
 def test_crs_from_info_uses_valid_epsg_then_wkt_then_default():
