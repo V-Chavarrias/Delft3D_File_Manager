@@ -122,7 +122,8 @@ The Viewer actions are documented here:
 
 The **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions** actions open the same profile window, which supports:
 - Delft3D FM cross-section profile previews
-- Delft3D FM boundary-condition timeseries previews
+- Delft3D FM boundary-condition timeseries previews, with the horizontal axis shown as dates when the `.bc` time unit is `<unit> since <datetime>`
+- Matplotlib navigation toolbar above the chart for zooming and panning
 
 ### HIS Time Series Explorer
 
@@ -183,7 +184,7 @@ compatible sediment table already present in the QGIS project.
 
 Use the **y limits** and **color limits** fields (empty = automatic) to change
 the axis and color range of the plot on display without resampling it. Press
-Enter to apply; **Reset View** restores automatic limits.
+Enter to apply; clear a field and press Enter to restore its automatic limit.
 
 ### Large MAP Viewer
 

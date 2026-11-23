@@ -3559,7 +3559,7 @@ def test_timeseries_from_feature_uses_quantity_unit_axis_labels(plugin):
     points, metadata, message = plugin._timeseries_from_feature(feature)
 
     assert points == [(0.0, 12.0), (24.0, 15.0)]
-    assert metadata["x_axis_label"] == "time [hours since 2000-01-01 00:00:00]"
+    assert metadata["x_axis_label"] == "time"
     assert metadata["y_axis_label"] == "dischargebnd [m3/s]"
     assert message == ""
 
@@ -3579,6 +3579,41 @@ def test_timeseries_from_feature_axis_label_fallbacks(plugin):
 
     assert metadata["x_axis_label"] == "x"
     assert metadata["y_axis_label"] == "waterlevelbnd"
+
+
+@pytest.mark.parametrize(
+    ("unit", "expected"),
+    [
+        ("minutes since 2000-01-01 00:00:00", (datetime(2000, 1, 1), 60.0)),
+        ("hours since 2000-01-01", (datetime(2000, 1, 1), 3600.0)),
+        ("days since 2000-01-01 12:00:00", (datetime(2000, 1, 1, 12), 86400.0)),
+        ("seconds since 2000-01-01 00:00:00", (datetime(2000, 1, 1), 1.0)),
+        ("m3/s", None),
+        ("minutes since not-a-date", None),
+        (None, None),
+    ],
+)
+def test_time_axis_from_unit_parses_reference_and_scale(plugin, unit, expected):
+    assert plugin._time_axis_from_unit(unit) == expected
+
+
+def test_timeseries_from_feature_exposes_time_reference_metadata(plugin):
+    feature = {
+        "bc_name": "UpstreamQ",
+        "bc_function": "timeseries",
+        "quantity_1": "time",
+        "unit_1": "minutes since 2000-01-01 00:00:00",
+        "quantity_2": "dischargebnd",
+        "unit_2": "m3/s",
+        "series_xy": "0 12;60 15",
+    }
+
+    points, metadata, _ = plugin._timeseries_from_feature(feature)
+
+    assert points == [(0.0, 12.0), (60.0, 15.0)]
+    assert metadata["x_time_reference"] == datetime(2000, 1, 1)
+    assert metadata["x_time_unit_seconds"] == 60.0
+    assert metadata["x_axis_label"] == "time"
 
 
 def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
@@ -3623,6 +3658,32 @@ def test_load_ext_file_imports_linked_bc(plugin, tmp_path):
 
     assert add_map_layer.call_count == 1
     style_mock.assert_called_once()
+
+
+def test_read_mesh_node_lookup_includes_network1d_node_names(plugin, tmp_path):
+    netcdf4 = pytest.importorskip("netCDF4")
+
+    grid = tmp_path / "grid.nc"
+    with netcdf4.Dataset(str(grid), "w") as ds:
+        ds.createDimension("n2d", 1)
+        ds.createDimension("n1d", 2)
+
+        ids_2d = ds.createVariable("network_node_id", str, ("n2d",))
+        ids_2d[0] = "0.0_0.0"
+        ds.createVariable("network_node_x", "f8", ("n2d",))[:] = [0.0]
+        ds.createVariable("network_node_y", "f8", ("n2d",))[:] = [0.0]
+
+        ids_1d = ds.createVariable("network1d_node_id", str, ("n1d",))
+        ids_1d[0] = "us"
+        ids_1d[1] = "Nds"
+        ds.createVariable("network1d_node_x", "f8", ("n1d",))[:] = [100.0, 300.0]
+        ds.createVariable("network1d_node_y", "f8", ("n1d",))[:] = [200.0, 400.0]
+
+    lookup, _ = plugin._read_mesh_node_lookup_from_grid(str(grid))
+
+    assert lookup["us"] == (100.0, 200.0)
+    assert lookup["nds"] == (300.0, 400.0)
+    assert lookup["0.0_0.0"] == (0.0, 0.0)
 
 
 def test_parse_ext_file_accepts_mixed_case_keys(plugin, tmp_path):

@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -6,6 +7,7 @@ import pytest
 
 matplotlib = pytest.importorskip("matplotlib")
 matplotlib.use("Agg")
+from matplotlib import dates as mdates  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
 from Delft3DFileManager.cross_section_profile_dialog import (  # noqa: E402
@@ -31,8 +33,31 @@ def _chart():
     chart._color_limits = (None, None)
     chart._auto_y_limits = None
     chart._auto_color_limits = None
+    chart._time_origin = None
+    chart._time_days_per_unit = None
     chart.draw_idle = MagicMock()
     return chart
+
+
+def test_time_axis_plots_offsets_as_dates_and_restores_numeric_axis():
+    chart = _chart()
+    reference = datetime(2000, 1, 1)
+    profiles = [{"points": [(0.0, 1.0), (120.0, 2.0)], "label": "BC"}]
+
+    chart.set_time_axis(reference, 60.0)
+    chart.set_profiles(profiles, "")
+
+    x_values = chart._axes.lines[0].get_xdata()
+    origin = mdates.date2num(reference)
+    assert x_values[0] == pytest.approx(origin)
+    assert x_values[1] == pytest.approx(origin + 2.0 / 24.0)
+    assert isinstance(chart._axes.xaxis.get_major_formatter(), mdates.ConciseDateFormatter)
+
+    chart.set_time_axis(None, None)
+    chart.set_profiles(profiles, "")
+
+    assert list(chart._axes.lines[0].get_xdata()) == [0.0, 120.0]
+    assert not isinstance(chart._axes.xaxis.get_major_formatter(), mdates.ConciseDateFormatter)
 
 
 def _patch_args():

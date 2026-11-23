@@ -2397,6 +2397,25 @@ class Delft3DFileManager:
             return unit_text
         return fallback
 
+    def _time_axis_from_unit(self, unit):
+        """Return (reference datetime, seconds per unit) for '<unit> since <datetime>' text, or None."""
+        if unit is None:
+            return None
+        match = re.match(
+            r"^\s*(seconds?|minutes?|hours?|days?)\s+since\s+(.+?)\s*$",
+            str(unit),
+            re.IGNORECASE,
+        )
+        if match is None:
+            return None
+        try:
+            reference = datetime.fromisoformat(match.group(2))
+        except ValueError:
+            return None
+        seconds_per_unit = {"second": 1.0, "minute": 60.0, "hour": 3600.0, "day": 86400.0}
+        unit_name = match.group(1).lower().rstrip("s")
+        return reference, seconds_per_unit[unit_name]
+
     def _timeseries_from_feature(self, feature):
         """Build displayable points and metadata for one boundary-condition feature."""
         points = self._parse_series_xy_text(feature["series_xy"])
@@ -2407,6 +2426,10 @@ class Delft3DFileManager:
             "x_axis_label": self._format_axis_label(feature["quantity_1"], feature["unit_1"], "x"),
             "y_axis_label": self._format_axis_label(feature["quantity_2"], feature["unit_2"], "value"),
         }
+        time_axis = self._time_axis_from_unit(feature["unit_1"])
+        if time_axis is not None:
+            metadata["x_time_reference"], metadata["x_time_unit_seconds"] = time_axis
+            metadata["x_axis_label"] = "time"
         if points:
             return points, metadata, ""
         return [], metadata, "No numeric series found for this boundary condition."
@@ -5008,28 +5031,40 @@ class Delft3DFileManager:
         return grid_path
 
     def _read_mesh_node_lookup_from_grid(self, grid_path):
-        """Read node-id to coordinate lookup from grid file."""
+        """Read node-id to coordinate lookup from grid file (2D network nodes, then 1D network nodes)."""
         try:
             import netCDF4 as nc
-            import numpy as np
         except ModuleNotFoundError as exc:
             raise RuntimeError(
                 "The 'netCDF4' package is required. Use 'Install Python Dependencies' and restart QGIS."
             ) from exc
 
         with nc.Dataset(grid_path, "r") as ds:
-            node_x = ds.variables["network_node_x"][:] if "network_node_x" in ds.variables else None
-            node_y = ds.variables["network_node_y"][:] if "network_node_y" in ds.variables else None
-            node_ids = self._read_string_array(ds, "network_node_id")
-            if not self._has_nonempty_strings(node_ids):
-                node_ids = self._read_string_array(ds, "network_node_long_name")
+            node_sets = []
+            for prefix in ("network", "network1d"):
+                node_x = ds.variables[f"{prefix}_node_x"][:] if f"{prefix}_node_x" in ds.variables else None
+                node_y = ds.variables[f"{prefix}_node_y"][:] if f"{prefix}_node_y" in ds.variables else None
+                node_ids = self._read_string_array(ds, f"{prefix}_node_id")
+                if not self._has_nonempty_strings(node_ids):
+                    node_ids = self._read_string_array(ds, f"{prefix}_node_long_name")
+                node_sets.append((node_x, node_y, node_ids))
 
             epsg = self._read_epsg_from_nc(ds)
             if epsg is None:
                 epsg = 28992
 
+        lookup = self._node_lookup_from_arrays(*node_sets[0])
+        # 1D boundary nodeIds (e.g. EXT [boundary] nodeId) reference network1d node names.
+        for key, xy in self._node_lookup_from_arrays(*node_sets[1]).items():
+            lookup.setdefault(key, xy)
+        return lookup, epsg
+
+    def _node_lookup_from_arrays(self, node_x, node_y, node_ids):
+        """Map lowercase node ids to finite (x, y) coordinates."""
+        import numpy as np
+
         if node_x is None or node_y is None or not node_ids:
-            return {}, epsg
+            return {}
 
         if isinstance(node_x, np.ma.MaskedArray):
             node_x = node_x.filled(np.nan)
@@ -5050,7 +5085,7 @@ class Delft3DFileManager:
             if not math.isfinite(x_val) or not math.isfinite(y_val):
                 continue
             lookup[node_id.lower()] = (x_val, y_val)
-        return lookup, epsg
+        return lookup
 
     def _build_spatial_context(self, grid_path):
         """Build reusable spatial context for branch and node-based feature placement."""

@@ -9,7 +9,6 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QComboBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,15 +42,17 @@ def _qpainter_render_hint(name):
     return getattr(getattr(QPainter, "RenderHint", None), name, None)
 
 try:
+    from matplotlib import dates as mdates
     try:
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
     except Exception:
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
     from matplotlib.figure import Figure
 
     _HAS_MATPLOTLIB = True
 except Exception:
     FigureCanvasQTAgg = object
+    NavigationToolbar2QT = None
     Figure = object
     _HAS_MATPLOTLIB = False
 
@@ -104,10 +105,6 @@ class _ProfileChartWidget(QWidget):
         self._points = list(self._default_points)
         self._vertical_exaggeration = 1.0
         self.update()
-
-    def save_figure(self, parent=None):
-        del parent
-        return False
 
     def paintEvent(self, event):
         del event
@@ -234,6 +231,8 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._color_limits = (None, None)
         self._auto_y_limits = None
         self._auto_color_limits = None
+        self._time_origin = None
+        self._time_days_per_unit = None
         self.setMinimumHeight(260)
 
     def set_profile(self, points, message=""):
@@ -252,6 +251,20 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._message = message or ""
         self._redraw()
 
+    def set_time_axis(self, reference, seconds_per_unit):
+        """Plot x values as offsets from reference datetime; None keeps x values numeric."""
+        if reference is None or not seconds_per_unit:
+            self._time_origin = None
+            self._time_days_per_unit = None
+            return
+        self._time_origin = mdates.date2num(reference)
+        self._time_days_per_unit = float(seconds_per_unit) / 86400.0
+
+    def _plot_x(self, value):
+        if self._time_origin is None:
+            return value
+        return self._time_origin + value * self._time_days_per_unit
+
     def set_vertical_exaggeration(self, factor):
         self._vertical_exaggeration = max(0.1, float(factor))
         self._redraw()
@@ -269,20 +282,6 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._points = list(self._default_points)
         self._vertical_exaggeration = 1.0
         self._redraw()
-
-    def save_figure(self, parent=None):
-        filename, _ = QFileDialog.getSaveFileName(
-            parent or self,
-            "Print PNG",
-            "",
-            "PNG image (*.png)",
-        )
-        if not filename:
-            return False
-        if not filename.lower().endswith(".png"):
-            filename += ".png"
-        self._figure.savefig(filename, format="png", dpi=300)
-        return True
 
     def set_y_limits(self, lower, upper):
         """Apply y-axis limits to the displayed plot; None keeps the automatic limit."""
@@ -328,6 +327,10 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
         self._axes.set_xlabel(self._x_axis_label)
         self._axes.set_ylabel(self._y_axis_label)
         self._axes.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+        if self._time_origin is not None:
+            locator = mdates.AutoDateLocator()
+            self._axes.xaxis.set_major_locator(locator)
+            self._axes.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
 
         if self._patch_data is not None:
             chainages, elevations, values, colorbar_label = self._patch_data
@@ -371,7 +374,7 @@ class _MatplotlibProfileChartWidget(FigureCanvasQTAgg):
                         self._axes.plot(segment_x, segment_y, color=colors[profile_index % len(colors)], linewidth=2.0, label=profile.get("label", "Profile"))
                         segment_x, segment_y = [], []
                     continue
-                segment_x.append(point[0])
+                segment_x.append(self._plot_x(point[0]))
                 segment_y.append(point[1] * self._vertical_exaggeration)
             if segment_x:
                 self._axes.plot(segment_x, segment_y, color=colors[profile_index % len(colors)], linewidth=2.0, label=profile.get("label", "Profile"))
@@ -411,6 +414,9 @@ class CrossSectionProfileDialog(QDialog):
         self._message_label.setStyleSheet("color: #666666;")
 
         self._chart_widget = _create_chart_widget(self)
+        self._toolbar = None
+        if _HAS_MATPLOTLIB and isinstance(self._chart_widget, FigureCanvasQTAgg):
+            self._toolbar = NavigationToolbar2QT(self._chart_widget, self)
         self._on_draw_requested = None
         self._on_selected_lines_requested = None
         self._on_substrate_patch_requested = None
@@ -423,11 +429,6 @@ class CrossSectionProfileDialog(QDialog):
         self._ve_spin.setSingleStep(0.1)
         self._ve_spin.setValue(1.0)
         self._ve_spin.valueChanged.connect(self._chart_widget.set_vertical_exaggeration)
-
-        self._reset_button = QPushButton("Reset View")
-        self._reset_button.clicked.connect(self._on_reset)
-        self._print_button = QPushButton("Print PNG")
-        self._print_button.clicked.connect(lambda: self._chart_widget.save_figure(self))
 
         self._clear_button = QPushButton("Clear Slices")
         self._clear_button.clicked.connect(self.clear_profiles)
@@ -459,8 +460,6 @@ class CrossSectionProfileDialog(QDialog):
         control_layout.addWidget(QLabel("Vertical exaggeration:"))
         control_layout.addWidget(self._ve_spin)
         control_layout.addStretch(1)
-        control_layout.addWidget(self._reset_button)
-        control_layout.addWidget(self._print_button)
         mesh_layout = QHBoxLayout()
         point_layout = QHBoxLayout()
         if self._mesh_mode:
@@ -489,13 +488,13 @@ class CrossSectionProfileDialog(QDialog):
             layout.addLayout(mesh_layout)
             layout.addLayout(point_layout)
         layout.addLayout(limits_layout)
+        if self._toolbar is not None:
+            layout.addWidget(self._toolbar)
         layout.addWidget(self._chart_widget)
         layout.addWidget(self._message_label)
 
         # Enter in a limit field must apply it, not trigger a dialog default button.
         for button in (
-            self._reset_button,
-            self._print_button,
             self._clear_button,
             self._draw_button,
             self._selected_lines_button,
@@ -665,6 +664,11 @@ class CrossSectionProfileDialog(QDialog):
         y_axis_label = metadata.get("y_axis_label") or "z [m]"
         if hasattr(self._chart_widget, "set_axis_labels"):
             self._chart_widget.set_axis_labels(x_axis_label, y_axis_label)
+        if hasattr(self._chart_widget, "set_time_axis"):
+            self._chart_widget.set_time_axis(
+                metadata.get("x_time_reference"),
+                metadata.get("x_time_unit_seconds"),
+            )
 
         parts = []
         for key in ("id", "definitionId", "def_type"):
