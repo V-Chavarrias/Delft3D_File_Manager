@@ -246,8 +246,9 @@ Limitations:
 
 - Open by double-clicking a cross-section point or a spatial forcing feature on the map.
 - Also available from **Viewer -> Cross-Section** and **Viewer -> Boundary Conditions**.
-- Supports `yz` definitions from `def_yCoords` / `def_zCoords` and `circle` definitions from `def_diam`.
-- Axes are labeled with units (`y [m]`, `z [m]`).
+- Supports `yz` definitions from `def_yCoords` / `def_zCoords`, `circle` definitions from `def_diam`, and `zwRiver` definitions from `def_levels`, `def_flowWidths`, `def_totalWidths`, `def_mainWidth`, `def_fp1Width`, `def_fp2Width`.
+- `zwRiver` profiles plot `flowWidths` and `totalWidths` against `levels` as two lines (width `[m]` on the horizontal axis, level `[m]` on the vertical axis). The main, FP1 and FP2 widths are drawn as consecutive horizontal segments at the lowest level.
+- Axes are labeled with units (`y [m]`, `z [m]`; `width [m]`, `level [m]` for `zwRiver`).
 - The window uses a matplotlib plot when matplotlib is available, and falls back to the built-in renderer otherwise.
 - The chart updates automatically when selection changes on the active supported layer.
 - No extra dependencies are required.
@@ -697,13 +698,14 @@ Each `[CrossSection]` block is expected to contain:
 #### Definition Input (`.csd`)
 Each `[Definition]` block is keyed by `id` and merged into the output attributes.
 For `yz` definitions, arrays such as `yCoordinates` and `zCoordinates` are preserved as text attributes.
+For `zwRiver` definitions, `levels`, `flowWidths`, `totalWidths`, `mainWidth`, `fp1Width`, and `fp2Width` are preserved as text attributes.
 
 #### Output Layer
 - `<csl_file_name>_cross_sections` (Point, mesh EPSG from grid or fallback EPSG:28992)
 
 Output attributes include:
 - location fields: `id`, `branchId`, `chainage`, `shift`, `definitionId`
-- definition fields (if found): `def_type`, `def_thalweg`, `def_singleValZ`, `def_yzCount`, `def_convey`, `def_secCount`, `def_fricIds`, `def_fricPos`, `def_diam`, `def_fricType`, `def_fricVal`, `def_yCoords`, `def_zCoords`
+- definition fields (if found): `def_type`, `def_thalweg`, `def_singleValZ`, `def_yzCount`, `def_convey`, `def_secCount`, `def_fricIds`, `def_fricPos`, `def_diam`, `def_fricType`, `def_fricVal`, `def_yCoords`, `def_zCoords`, `def_levels`, `def_flowWidths`, `def_totalWidths`, `def_mainWidth`, `def_fp1Width`, `def_fp2Width`
 - full serialized definition payload: `def_raw`
 - diagnostics: `def_found`, `import_note`
 

@@ -4448,6 +4448,87 @@ def test_build_circle_profile_success(plugin):
     assert max(point[1] for point in points) > 0.0
 
 
+def test_profile_layer_detection_accepts_zwriver_levels(plugin):
+    layer = _FakeLayer(["id", "definitionId", "def_type", "def_levels"])
+    assert plugin._is_cross_section_layer(layer)
+
+
+def test_build_zwriver_profiles_builds_width_lines_and_bottom_segments(plugin):
+    feature = _FakeFeature(
+        {
+            "def_type": "zwRiver",
+            "def_levels": "0 1 2",
+            "def_flowWidths": "10 20 30",
+            "def_totalWidths": "15 25 35",
+            "def_mainWidth": "10",
+            "def_fp1Width": "5",
+            "def_fp2Width": "0",
+        }
+    )
+
+    profiles, message = plugin._build_zwriver_profiles(feature)
+
+    assert message == ""
+    assert [profile["label"] for profile in profiles] == [
+        "Flow width",
+        "Total width",
+        "Main width",
+        "FP1 width",
+    ]
+    assert profiles[0]["points"] == [(10.0, 0.0), (20.0, 1.0), (30.0, 2.0)]
+    assert profiles[1]["points"] == [(15.0, 0.0), (25.0, 1.0), (35.0, 2.0)]
+    assert profiles[2]["points"] == [(0.0, 0.0), (10.0, 0.0)]
+    assert profiles[3]["points"] == [(10.0, 0.0), (15.0, 0.0)]
+
+
+def test_build_zwriver_profiles_rejects_mismatched_or_missing_values(plugin):
+    mismatched = _FakeFeature(
+        {
+            "def_levels": "0 1 2",
+            "def_flowWidths": "10 20",
+            "def_totalWidths": "15 25 35",
+            "def_mainWidth": "10",
+            "def_fp1Width": "5",
+            "def_fp2Width": "5",
+        }
+    )
+    profiles, message = plugin._build_zwriver_profiles(mismatched)
+    assert profiles == []
+    assert message.startswith("Invalid zwRiver profile")
+
+    older_layer_feature = _FakeFeature({"def_type": "zwriver", "def_levels": "0 1"})
+    profiles, message = plugin._build_zwriver_profiles(older_layer_feature)
+    assert profiles == []
+    assert message.startswith("Invalid zwRiver profile")
+
+
+def test_read_crossdef_records_keeps_zwriver_fields(plugin, tmp_path):
+    csd_file = tmp_path / "river.csd"
+    csd_file.write_text(
+        "[General]\n"
+        "fileType = crossDef\n\n"
+        "[Definition]\n"
+        "id = RIV001\n"
+        "type = zwRiver\n"
+        "levels = 0.0 1.0 2.0\n"
+        "flowWidths = 30.0 40.0 50.0\n"
+        "totalWidths = 35.0 45.0 55.0\n"
+        "mainWidth = 20.0\n"
+        "fp1Width = 10.0\n"
+        "fp2Width = 5.0\n"
+    )
+
+    definitions = plugin._read_crossdef_records(str(csd_file))
+    definition = definitions["riv001"]
+    assert definition["type"] == "zwRiver"
+    assert definition["levels"] == "0.0 1.0 2.0"
+    assert definition["flowwidths"] == "30.0 40.0 50.0"
+    assert definition["totalwidths"] == "35.0 45.0 55.0"
+    assert definition["mainwidth"] == "20.0"
+    assert definition["fp1width"] == "10.0"
+    assert definition["fp2width"] == "5.0"
+
+
 def test_open_profile_from_selected_feature(plugin):
     feature = _FakeFeature(
         {

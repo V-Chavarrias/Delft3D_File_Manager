@@ -2096,6 +2096,12 @@ class Delft3DFileManager:
                 QgsField("def_fricVal", QVariant.String),
                 QgsField("def_yCoords", QVariant.String),
                 QgsField("def_zCoords", QVariant.String),
+                QgsField("def_levels", QVariant.String),
+                QgsField("def_flowWidths", QVariant.String),
+                QgsField("def_totalWidths", QVariant.String),
+                QgsField("def_mainWidth", QVariant.String),
+                QgsField("def_fp1Width", QVariant.String),
+                QgsField("def_fp2Width", QVariant.String),
                 QgsField("def_raw", QVariant.String),
                 QgsField("def_found", QVariant.Int),
                 QgsField("import_note", QVariant.String),
@@ -2150,6 +2156,12 @@ class Delft3DFileManager:
                     definition.get("frictionvalue", ""),
                     definition.get("ycoordinates", ""),
                     definition.get("zcoordinates", ""),
+                    definition.get("levels", ""),
+                    definition.get("flowwidths", ""),
+                    definition.get("totalwidths", ""),
+                    definition.get("mainwidth", ""),
+                    definition.get("fp1width", ""),
+                    definition.get("fp2width", ""),
                     self._definition_to_text(definition),
                     definition_found,
                     ";".join(note_parts),
@@ -2196,7 +2208,11 @@ class Delft3DFileManager:
         field_lookup = self._field_name_map(layer)
         has_type = "def_type" in field_lookup
         has_id = "id" in field_lookup or "definitionid" in field_lookup
-        has_profile = "def_ycoords" in field_lookup or "def_diam" in field_lookup
+        has_profile = (
+            "def_ycoords" in field_lookup
+            or "def_diam" in field_lookup
+            or "def_levels" in field_lookup
+        )
         return has_type and has_id and has_profile
 
     def _is_boundary_condition_layer(self, layer):
@@ -2265,10 +2281,70 @@ class Delft3DFileManager:
             points.append((x_val, z_val))
         return points
 
+    def _feature_def_type(self, feature):
+        """Return the normalized def_type attribute of a cross-section feature."""
+        raw_type = feature["def_type"] if feature["def_type"] is not None else ""
+        return str(raw_type).strip().lower()
+
+    def _feature_attribute(self, feature, name):
+        """Return one attribute value, or None when the layer lacks that field (older imports)."""
+        try:
+            return feature[name]
+        except KeyError:
+            return None
+
+    def _parse_single_float(self, text):
+        """Parse text holding exactly one finite number, or return None."""
+        values = self._parse_float_list(text)
+        if values is None or len(values) != 1:
+            return None
+        return values[0]
+
+    def _build_zwriver_profiles(self, feature):
+        """Build flow/total width lines and bottom width segments for a zwRiver feature."""
+        levels = self._parse_float_list(self._feature_attribute(feature, "def_levels"))
+        flow_widths = self._parse_float_list(self._feature_attribute(feature, "def_flowWidths"))
+        total_widths = self._parse_float_list(self._feature_attribute(feature, "def_totalWidths"))
+        main_width = self._parse_single_float(self._feature_attribute(feature, "def_mainWidth"))
+        fp1_width = self._parse_single_float(self._feature_attribute(feature, "def_fp1Width"))
+        fp2_width = self._parse_single_float(self._feature_attribute(feature, "def_fp2Width"))
+
+        if (
+            levels is None
+            or flow_widths is None
+            or total_widths is None
+            or main_width is None
+            or fp1_width is None
+            or fp2_width is None
+            or len(levels) < 2
+            or not (len(levels) == len(flow_widths) == len(total_widths))
+        ):
+            return [], "Invalid zwRiver profile: check def_levels, def_flowWidths, def_totalWidths and width values."
+
+        bottom_level = min(levels)
+        profiles = [
+            {"points": list(zip(flow_widths, levels)), "label": "Flow width"},
+            {"points": list(zip(total_widths, levels)), "label": "Total width"},
+        ]
+
+        # Main, FP1 and FP2 widths are laid out consecutively along the bottom level.
+        start = 0.0
+        for label, width in (
+            ("Main width", main_width),
+            ("FP1 width", fp1_width),
+            ("FP2 width", fp2_width),
+        ):
+            if width <= 0.0:
+                continue
+            end = start + width
+            profiles.append({"points": [(start, bottom_level), (end, bottom_level)], "label": label})
+            start = end
+
+        return profiles, ""
+
     def _profile_from_feature(self, feature):
         """Build displayable profile points and metadata for one feature."""
-        raw_type = feature["def_type"] if feature["def_type"] is not None else ""
-        profile_type = str(raw_type).strip().lower()
+        profile_type = self._feature_def_type(feature)
 
         if profile_type == "yz":
             points = self._build_yz_profile(feature)
@@ -2398,18 +2474,34 @@ class Delft3DFileManager:
 
     def _show_profile_in_dialog(self, feature):
         """Render one feature profile in the profile dialog."""
-        points, profile_meta, message = self._profile_from_feature(feature)
         metadata = self._profile_metadata(feature)
-        metadata.update(profile_meta)
-
         dialog = self._ensure_profile_dialog()
         dialog.setWindowTitle("Cross-Section")
-        dialog.set_profile(
-            points=points,
-            title=self._profile_title(feature),
-            metadata=metadata,
-            message=message,
-        )
+
+        if self._feature_def_type(feature) == "zwriver":
+            profiles, message = self._build_zwriver_profiles(feature)
+            metadata.update(
+                {
+                    "def_type": "zwriver",
+                    "x_axis_label": "width [m]",
+                    "y_axis_label": "level [m]",
+                }
+            )
+            dialog.set_profiles(
+                profiles=profiles,
+                title=self._profile_title(feature),
+                metadata=metadata,
+                message=message,
+            )
+        else:
+            points, profile_meta, message = self._profile_from_feature(feature)
+            metadata.update(profile_meta)
+            dialog.set_profile(
+                points=points,
+                title=self._profile_title(feature),
+                metadata=metadata,
+                message=message,
+            )
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
