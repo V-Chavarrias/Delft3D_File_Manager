@@ -22,6 +22,16 @@ class SedimentRecord:
     dry_density: float = None
 
 
+def _parse_value(raw_value):
+    """Return a value without its trailing comment; ``#...#`` quotes a value."""
+    value = raw_value.strip()
+    if value.startswith("#"):
+        closing = value.find("#", 1)
+        if closing != -1:
+            return value[1:closing].strip()
+    return value.split("#", 1)[0].strip()
+
+
 def _parse_sections(filepath):
     sections = []
     current_name = None
@@ -45,7 +55,7 @@ def _parse_sections(filepath):
                     f"Line {line_number} contains a key outside a section"
                 )
             key, value = line.split("=", 1)
-            current_values[key.strip().lower()] = value.strip()
+            current_values[key.strip().lower()] = _parse_value(value)
 
     if current_name is not None:
         sections.append((current_name, current_values))

@@ -25,6 +25,27 @@ def test_read_sediment_file_uses_seddia_and_preserves_order(tmp_path):
     assert characteristic_grain_sizes(path) == [0.001, 0.004]
 
 
+def test_read_sediment_file_ignores_inline_comments_and_quoted_values(tmp_path):
+    path = tmp_path / "delft3d_style.sed"
+    path.write_text(
+        "[Sediment]\n"
+        "    Name        = #Fraction01# #  Name as specified in NamC#\n"
+        "    SedTyp      = bedload          #  Must be sand, mud or bedload\n"
+        "    SedMinDia   = 0.0000630           # [  m   ] Minimum diameter\n"
+        "    SedMaxDia   = 2.5e-004        # [  m   ] Maximum diameter\n"
+        "    RhoSol      = 2.65e+003       # [kg/m3]  Specific density\n",
+        encoding="utf-8",
+    )
+
+    record = read_sediment_file(path)[0]
+
+    assert record.name == "Fraction01"
+    assert record.sediment_type == "bedload"
+    assert record.minimum_diameter == 0.0000630
+    assert record.maximum_diameter == 0.00025
+    assert record.dry_density == 2650.0
+
+
 def test_read_sediment_file_allows_missing_dry_density_for_existing_workflows(tmp_path):
     path = tmp_path / "legacy.sed"
     path.write_text("[Sediment]\nName = sand\nSedDia = 0.001\n", encoding="utf-8")
